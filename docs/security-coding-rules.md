@@ -1,8 +1,10 @@
 # Security coding rules
 
-These rules define requirements for future implementation. No sandbox or
-security checks are implemented yet. Apply them with the [coding rules](coding-rules.md)
-and verify them using the [testing standards](testing-standards.md).
+These rules define requirements for each implemented boundary. The first CLI
+prototype has bounded prompt/provider/journal checks and rejects model-requested
+tools. It has no execution sandbox, filesystem tool broker, or permission UI.
+See [current limits](development.md). Apply these rules with the
+[coding rules](coding-rules.md) and [testing standards](testing-standards.md).
 
 ## Trust and permissions
 

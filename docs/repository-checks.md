@@ -61,9 +61,12 @@ No application build is claimed. CodeQL's Rust processing can still execute
 build scripts or procedural macros; the analysis job has no Sonar or provider
 secrets. Keep its permissions restricted.
 
-The current documentation-only repository has no Rust or frontend code to scan.
-A successful Actions analysis is not application vulnerability coverage.
-Add other source languages deliberately when the implementation needs them.
+The repository now contains Rust source in the core, CLI, and platform crates.
+CodeQL selects Rust when tracked Rust files and a Cargo manifest are present.
+Its no-build scan is separate from the locked Cargo checks in
+`.github/workflows/rust.yml`; it is not a full application build or proof of
+application security. There is no frontend source to scan yet. Add other source
+languages deliberately when the implementation needs them.
 
 ## SonarQube Cloud
 
@@ -99,16 +102,16 @@ Their other actions can still access a limited GITHUB_TOKEN. Do not use
 `pull_request_target` to run fork code with the Sonar credential.
 Use a trusted, separately reviewed path when a fork requires a Sonar analysis.
 
-The source root is the repository, including workflow and tooling files.
-The explicit exclusions cover .git, target, node_modules, dist, and coverage
-directories at any depth. They do not cover every generated directory; add
-other generated paths, such as build outputs, with the relevant scaffold.
-Update source/test classification and report paths with the application scaffold.
-No Rust compilation, Clippy execution, or coverage import is configured here.
+The source root is the repository, including Rust crates, workflow, and tooling
+files. The explicit exclusions cover .git, target, node_modules, dist, and
+coverage directories at any depth. They do not cover every generated directory;
+review exclusions as the repository grows. No Rust compilation, Clippy execution,
+or coverage import is configured in the Sonar workflow; use the Rust workflow
+for those checks.
 
-At setup, the Sonar project existed but had no completed analysis. A repository
-with no supported source may not produce a usable analysis. Do not present a
-missing or empty analysis as proof that application code passed.
+Check the current Sonar result and quality gate for each pull request. Do not
+present a missing, empty, or failed analysis as proof that application code
+passed.
 
 ## Maintenance and verification
 
@@ -121,7 +124,7 @@ missing or empty analysis as proof that application code passed.
 - Confirm the effective main rules through the GitHub API. Do not test direct
   push rejection by attempting to land an unreviewed commit on main.
 - Keep the [testing standards](testing-standards.md) and this guide accurate as
-  application checks are added. These integrations do not replace runtime,
+  application checks change. These integrations do not replace runtime,
   sandbox, credential, or platform verification.
 
 ## References

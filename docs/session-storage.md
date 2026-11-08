@@ -1,8 +1,82 @@
 # Session storage and archiving
 
-This document defines the planned session journal and archive behaviour. There
-is no persistence implementation or archive UI yet. Conversation and session
-refer to the same saved coding interaction in this contract.
+This document separates the current JSONL session prototype from the complete
+release contract. Conversation and session refer to the same saved coding
+interaction. The prototype stores a bounded transcript and archive state. It
+does not provide a session UI, search index, task execution, or recovery UI.
+
+## Implemented prototype (v0.1.0)
+
+The Rust core creates and opens one UTF-8 JSONL journal per session. The CLI
+uses the operating system's per-user local application data location by default;
+`--data-dir` is an explicit override. The default is outside the workspace, but
+the override is not checked for overlap with it. The journal path stays fixed
+after creation. The filename contains the UTC creation time and session UUIDv4.
+Creation uses exclusive file creation.
+
+The journal holds an exclusive file lock for the lifetime of its writer. A
+second writer receives a conflict. The prototype syncs every complete appended
+event with `sync_all` before it updates the in-memory snapshot or reports the
+append as successful. A write or sync error poisons that writer; it accepts no
+further mutations. A complete event may still have reached storage when sync
+reports an error, so the result can be uncertain. Reopen validates the journal
+and does not retry recorded work.
+
+Unix creation requests mode 0700 for new session directories and 0600 for a new
+journal file. Existing directory permissions are not changed. Windows uses the
+inherited directory ACL; explicit per-user ACL setup is not implemented. The
+platform helper inspects an open journal handle for a regular, non-reparse,
+single-link file. This does not contain parent-directory races or establish
+workspace access confinement. Directory crash durability and Windows ACL
+behavior have not been qualified. The implementation does not claim equivalent
+crash durability on Windows and Unix.
+
+The v1 prototype has this exact event subset. Every event also has the common
+envelope described below. Payload objects reject unknown fields.
+
+| Event type | Payload in v1 | State rule |
+| --- | --- | --- |
+| `session.started` | `title`, `workspace`, `workspace_id`, `app_version` | First event, sequence 0. `workspace_id` is a per-session association ID; there is no persistent project registry. `app_version` is the package version. |
+| `message.recorded` | `role`, `source`, `text` | `user` must pair with `user_cli`; `assistant` must pair with `provider`. The source label is metadata and grants no authority. |
+| `turn.started` | `request_id` | Requires an active, unarchived session with no active turn. |
+| `request.manifest` | `request_id`, `manifest` | Must match the active turn. The manifest has `base_prompt`, `prompt_version`, `prompt_sha256`, `custom_instructions`, `model`, `base_url`, `context_tokens`, and `max_output_tokens`. It is historical metadata, not policy or permission. |
+| `turn.completed` | `request_id` | Must match the active turn. |
+| `turn.failed` | `request_id`, `code` | Must match the active turn. The code is nonempty, at most 128 UTF-8 bytes, and has no control characters. |
+| `session.archived` | Empty object `{}` | Requires no active turn. Repeating the API operation is idempotent. |
+| `session.restored` | Empty object `{}` | Repeating the API operation is idempotent. Restore starts no work. |
+
+`workspace` is a tagged native path: `{"encoding":"unix_bytes","units":[...]}`
+stores Unix path bytes; `{"encoding":"windows_utf16","units":[...]}` stores
+Windows UTF-16 code units. It is descriptive metadata only. It is not a current
+workspace authorization or a persistent project identity.
+
+The CLI supports `session new`, `inspect`, `archive`, `restore`, and
+`interrupt JOURNAL`. Interrupt marks a recorded active turn failed with the code
+`operator_interrupted`; it does not retry the model request. The current Archive
+operation refuses an active turn. The operator can interrupt it first, then
+archive it. There are no session-owned processes or MCP connections to clean up
+in this prototype. `chat --journal` does not resume an active turn; it requires
+an explicit interrupt first.
+
+Opening reads at most 8 MiB and rejects files above that limit. Each event is at
+most 64 KiB, a message is at most 16 KiB, a title is 1 to 256 UTF-8 bytes, and a
+journal has at most 10,000 events. The reader requires a final newline, accepts
+LF and CRLF, and rejects a BOM, duplicate JSON keys, unknown schema versions,
+unknown events, unknown fields, repeated event IDs, invalid transitions,
+sequence gaps, and a session ID that conflicts with the filename. It validates
+the complete journal before returning a writable handle. A malformed journal
+or incomplete tail is rejected without mutation. There is no recovery or
+read-only inspection UI yet.
+
+The request manifest does not include usage or `finish_reason`. The CLI returns
+those provider fields in its JSON output, but does not append them to the
+journal. The prototype has no streaming, artifact, index, compaction, migration,
+or memory events. It does not redact sensitive content from user messages; the
+LM Studio token is not put in the request manifest or deliberately recorded as
+a transcript message.
+
+These are implemented prototype facts, not a claim that the full release
+contract below is complete.
 
 ## Location and file naming
 
@@ -20,10 +94,12 @@ milliseconds and no colon, so the filename is valid on Windows and Linux. GUID
 means a randomly generated UUIDv4 in lowercase hyphenated form. Create the file
 exclusively; a collision must never overwrite an existing session.
 
-Choose the normal per-user local application data location through platform
-APIs. Keep the storage root in trusted application settings. Do not derive it
-from a repository instruction or model-supplied path. Storage relocation needs
-a separate controlled migration with writers stopped and recovery defined.
+For release, choose the normal per-user local application data location through
+platform APIs. Keep the storage root in trusted application settings. Do not
+derive it from a repository instruction or model-supplied path. Storage
+relocation needs a separate controlled migration with writers stopped and
+recovery defined. The prototype uses this default in the CLI but also exposes
+`--data-dir` for an explicit caller-selected override.
 
 Keep the original path when a session crosses midnight, resumes on another day,
 changes title/workspace, or is archived. The date tree organizes files; the UI
@@ -35,7 +111,7 @@ It does not promise compatibility with ChatGPT exports or Codex internal event
 schemas. Do not read or modify another application's session directory. Any
 future importer needs its own explicit format and trust contract.
 
-## JSONL event contract
+## Release JSONL event contract
 
 Write one JSON object per line, without a byte-order mark or pretty-printed
 multiline records. Escape newlines inside strings. Writers end every complete
@@ -51,28 +127,31 @@ record with LF; readers accept LF or CRLF. Each event has this envelope:
 | type | Defined event type |
 | payload | Object validated against that event type's schema |
 
-The first event is session.started and includes creation metadata, workspace
-identity, and safe application/version identifiers. Record subsequent title and
-workspace changes, user/assistant messages, bounded streaming updates, request
-manifests, tool intents/results, compaction records, usage, errors, interruptions,
-and archive/restore events. Preserve source labels and causal request/tool IDs.
+The release schema must define the first `session.started` event and every
+supported event's payload, size limits, state transitions, and migration rules
+before release. The prototype supports only the v1 event subset listed above.
+Release requirements include title and workspace changes, bounded streaming
+updates, tool intents and results, compaction records, usage, errors, and
+archive/restore events. Preserve source labels and causal request/tool IDs.
 Distinguish model-requested actions from core-observed execution results.
 
-Illustrative records below show the envelope and archive state. They are schema
-examples, not a transcript produced by an implemented application:
+The following is an illustrative valid Unix v1 subset. Its UUIDs and timestamp
+are examples. `workspace.units` contains the bytes for `/work/project`. The
+example is not evidence of release schema compatibility:
 
 ```jsonl
-{"schema_version":1,"session_id":"7a0d3e5c-8c2b-4b9c-a6de-19f1c8d2e470","event_id":"f23d5e17-ef07-40dd-8db2-6e6b4a0ce12b","seq":0,"timestamp":"2026-11-08T12:34:56.789Z","type":"session.started","payload":{"workspace_id":"workspace-1","title":"Project overview","app_version":"unreleased"}}
-{"schema_version":1,"session_id":"7a0d3e5c-8c2b-4b9c-a6de-19f1c8d2e470","event_id":"eac73dca-838e-4802-a0eb-8bafbf00cd7c","seq":1,"timestamp":"2026-11-08T12:34:57.000Z","type":"message.recorded","payload":{"role":"user","source":"user_ui","text":"Explain this project."}}
-{"schema_version":1,"session_id":"7a0d3e5c-8c2b-4b9c-a6de-19f1c8d2e470","event_id":"62349f2a-9cc5-42c1-94c4-2c7e7ae355eb","seq":2,"timestamp":"2026-11-08T12:35:03.000Z","type":"message.recorded","payload":{"role":"assistant","source":"provider","text":"This is a planned coding assistant harness."}}
-{"schema_version":1,"session_id":"7a0d3e5c-8c2b-4b9c-a6de-19f1c8d2e470","event_id":"b91ed8a6-c20a-4f98-aac0-c9ecf4984a99","seq":3,"timestamp":"2026-11-08T12:36:00.000Z","type":"session.archived","payload":{"source":"user_ui"}}
+{"schema_version":1,"session_id":"7a0d3e5c-8c2b-4b9c-a6de-19f1c8d2e470","event_id":"f23d5e17-ef07-40dd-8db2-6e6b4a0ce12b","seq":0,"timestamp":"2026-11-08T12:34:56.789Z","type":"session.started","payload":{"title":"Project overview","workspace":{"encoding":"unix_bytes","units":[47,119,111,114,107,47,112,114,111,106,101,99,116]},"workspace_id":"8a0d3e5c-8c2b-4b9c-a6de-19f1c8d2e470","app_version":"0.1.0"}}
+{"schema_version":1,"session_id":"7a0d3e5c-8c2b-4b9c-a6de-19f1c8d2e470","event_id":"eac73dca-838e-4802-a0eb-8bafbf00cd7c","seq":1,"timestamp":"2026-11-08T12:34:57.000Z","type":"message.recorded","payload":{"role":"user","source":"user_cli","text":"Explain this project."}}
 ```
 
-Before implementing the writer, define and version the complete event schemas,
-limits, and migration rules. Preserve unknown data for inspection, but do not
-resume a journal with unsupported required semantics or schema versions. Invalid
-sequence numbers, duplicate IDs/keys, or conflicting session IDs require a
-visible recovery/read-only state, not silent reinterpretation.
+For release, define and version the complete event schemas, limits, and
+migration rules. Preserve unsupported data for inspection, but do not resume a
+journal with unknown required semantics or schema versions. Invalid sequence
+numbers, duplicate IDs/keys, or conflicting session IDs require a visible
+recovery/read-only state, not silent reinterpretation. The current prototype
+rejects such journals and leaves their bytes unchanged; it has no recovery
+artifact, repair, or read-only view. Unsupported records remain in the original
+file, but the CLI does not expose them through an inspection view.
 
 Store large outputs and binary attachments as bounded artifacts referenced by
 safe session-local identifiers, with content digests and availability status.
@@ -80,7 +159,7 @@ Validate references within application-managed storage; never treat a transcript
 path or URI as permission to read a host file or contact a service. Missing
 artifacts remain visible as missing. Do not invent their content.
 
-## Durable writes and recovery
+## Release durability, recovery, and locking
 
 The JSONL journal is the source of truth for transcript and archive state. A
 search/tree index is derived and rebuildable. Its database format is not selected
@@ -107,7 +186,7 @@ uncertain status and reconcile state before retry. A persisted intent without a
 result is incomplete, not permission to replay. JSONL alone cannot provide
 exactly-once execution of external side effects.
 
-## Archive, restore, and resume
+## Release archive, restore, and resume
 
 Provide Archive in the session tree and conversation view. Hide archived sessions
 from the active tree, while keeping an Archived view/filter with folder grouping,
@@ -150,7 +229,7 @@ request manifests, but never recreate deleted memories or restore old scope
 choices by replaying a journal. Historical snapshots follow journal retention;
 memory deletion does not promise removal of every historical copy.
 
-## Privacy and trust
+## Release privacy and trust
 
 Keep journals, indexes, recovery artifacts, and attachments outside every task's
 writable view. Deny indirect access through links and overlapping roots. Use
@@ -171,7 +250,7 @@ render all message/tool content. Preserve the provenance and invalidation rules
 from [agent instructions](agent-instructions.md) and
 [context management](context-management.md).
 
-## Acceptance requirements
+## Release acceptance requirements
 
 Test Windows/Linux naming, UTC midnight and timezone changes, clock rollback,
 UUID collisions, Unicode/native paths, stream reconstruction, malformed/large

@@ -1,35 +1,79 @@
 # Provider authentication
 
-## Required behaviour
+## Release requirements
 
 The first release must support subscription-backed sign-in for both ChatGPT and
 Claude, as well as separate API-key connections. An API-key-only implementation
 does not meet this requirement.
 
 Subscription support is a product requirement, not a claim of implementation or
-provider approval. The application does not exist yet. Any unresolved provider
-approval or technical restriction remains a release blocker for that feature;
-do not silently replace it with API billing or defer it.
+provider approval. The current prototype has no sign-in, account management, or
+subscription adapter. Any unresolved provider approval or technical restriction
+remains a release blocker for that feature; do not silently replace it with API
+billing or defer it.
 
 | Connection profile | Required authentication and usage path | Current design readiness |
 | --- | --- | --- |
-| OpenAI API | User API key; API-account billing | Existing API plan |
+| OpenAI API | User API key; API-account billing | Planned; not implemented |
 | ChatGPT subscription | Provider-supported browser sign-in and permission to use the user's plan | Official local/open-source integration documented; implementation and entitlement tests pending |
-| Anthropic API | User API key; API-account billing | Existing API plan |
+| Anthropic API | User API key; API-account billing | Planned; not implemented |
 | Claude subscription | Provider-approved subscription sign-in and usage | Required; approval and integration route unresolved |
-| Ollama Local | Local service configuration; authentication where configured | Existing local-provider plan |
-| Ollama Cloud | Provider cloud credentials | Existing cloud-provider plan |
-| OpenRouter | User API key and explicit upstream routing | Existing routing plan |
-| LM Studio | Explicit local server profile; LM Studio API token when required | Required; endpoint/model/auth qualification pending |
+| Ollama Local | Local service configuration; authentication where configured | Planned; not implemented |
+| Ollama Cloud | Provider cloud credentials | Planned; not implemented |
+| OpenRouter | User API key and explicit upstream routing | Planned; not implemented |
+| LM Studio | Explicit local server profile; LM Studio API token when required | Local loopback chat prototype tested with Gemma on Windows; credential service and full platform/auth qualification pending |
 
 The provider, authentication method, account/workspace, billing mode, and model
 capabilities form one connection profile. Do not infer all of these from a
 provider name.
 
+## Implemented prototype (v0.1.0)
+
+The current CLI has one non-streaming LM Studio Chat Completions adapter. The
+caller supplies an already available model name, a maximum output budget, and a
+context budget with `--context-tokens`. For example, the CLI test fixture passes
+131072 as its configured context budget. This value is caller input; the
+prototype does not discover or verify the model's actual capacity. The adapter
+estimates input use from UTF-8 bytes, message count, fixed overhead, and output
+budget. It does not use the model's tokenizer or perform compaction.
+
+The adapter accepts only plain HTTP URLs with a literal loopback IP, an explicit
+nonzero port, and a `/v1` path, for example `127.0.0.1` or `[::1]`. It rejects hostnames,
+non-loopback addresses, credentials in the URL, query strings, and fragments.
+The request uses `/v1/chat/completions`, disables proxy use and redirects, and
+does not retry. It sends no tools and rejects tool-call responses. The adapter
+does not discover models, start the LM Studio service, download models, or
+configure that service.
+
+The CLI accepts an optional `MISANTHROPE_LM_TOKEN` in its own process
+environment. The core keeps the resulting authorization header in memory and
+does not add the token to a request manifest. There is no OS credential service
+or token settings UI. This is a prototype-only developer input. Task execution
+and task environments do not exist in the prototype; this does not qualify the
+future task-environment credential boundary.
+
+The adapter returns assistant text, `finish_reason`, and optional provider usage
+to the CLI, which emits them in JSON output. The session journal stores the
+assistant text but not provider usage or `finish_reason`. Loopback identifies
+the network destination used by the adapter; it does not prove that the selected
+LM Studio server or model avoids upstream/cloud services.
+
+On 2026-11-08, a Windows smoke check used the user's loaded
+`google/gemma-4-e4b` Q4_K_M model at `http://127.0.0.1:1234/v1`, without a token.
+LM Studio reported a loaded context of 131,072 tokens. Two bounded CLI requests
+completed: the second resumed the saved history and recalled a harmless test
+word. Archive and restore preserved that journal. This checks that one live
+profile; it does not qualify token authentication, streaming, Linux inference,
+all models, or the full release contract. The adapter accepts empty/null action
+fields as no action and still rejects actual tool requests.
+
+These are prototype facts. The rest of this document defines the broader
+authentication and provider requirements for release.
+
 ## Current provider evidence
 
-Checked against official documentation on 2026-11-08. Recheck before
-implementation and release; provider availability and requirements can change.
+Checked against official documentation on 2026-11-08. Recheck before release;
+provider availability and requirements can change.
 
 ### ChatGPT
 
@@ -75,7 +119,7 @@ a separately billed Anthropic API connection remains a different profile.
 
 ## Settings and account lifecycle
 
-### LM Studio connection requirements
+### LM Studio release connection requirements
 
 LM Studio documents OpenAI-compatible model, Chat Completions, and Responses
 endpoints. It also supports API tokens, with server authentication disabled by
@@ -116,7 +160,8 @@ resource limits. This grants no general model-management authority.
 Test model discovery, absent/unloaded models, token and no-token modes,
 authentication failure, streaming/cancellation, validated tool calls, changed
 context limits, and absence of unexpected cloud fallback on both supported
-platforms. No LM Studio runtime checks have run yet.
+platforms. The current prototype does not implement model discovery, streaming,
+or tool calls. No live LM Studio/Gemma smoke result is recorded.
 
 ### Shared settings and lifecycle
 
@@ -143,15 +188,19 @@ platforms. No LM Studio runtime checks have run yet.
 
 ## Credential and execution boundaries
 
-Keep access tokens, refresh tokens, API keys, login codes, and verifier values
-in the trusted authentication service. Store durable credentials in protected
-OS storage. Do not silently fall back to plaintext when that store is
-unavailable; offer an explicit memory-only session if appropriate.
+For release, keep access tokens, refresh tokens, API keys, login codes, and
+verifier values in the trusted authentication service. Store durable credentials
+in protected OS storage. Do not silently fall back to plaintext when that store
+is unavailable; offer an explicit memory-only session if appropriate. The
+prototype's `MISANTHROPE_LM_TOKEN` process-environment input does not meet this
+credential-service requirement and must not be treated as its replacement.
 
-Expose opaque connection identifiers and safe account labels to the UI. Never
-put credentials in model context, workspace files, terminal environments,
-command arguments, transcripts, or diagnostics. Scope credentials to the
-correct provider, account/workspace, and audience.
+Expose opaque connection identifiers and safe account labels to the UI. For
+release, never put credentials in model context, workspace files, task or
+terminal environments, command arguments, transcripts, or diagnostics. Scope
+credentials to the correct provider, account/workspace, and audience. The
+prototype has no task processes; its CLI reads the optional LM Studio token
+from its own process environment and does not place that value in the journal.
 
 The direct model adapter does not gain filesystem or command permissions.
 A future approved provider-runtime integration needs its own reviewed

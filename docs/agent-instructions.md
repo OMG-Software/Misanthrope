@@ -1,7 +1,8 @@
 # Agent instructions and prompt visibility
 
-This document defines planned behaviour. No prompt assembly or settings page is
-implemented yet. Use it with the [security rules](security-coding-rules.md).
+This document separates current prompt behavior from release requirements. The
+v0.1.0 Rust core and CLI implement bounded prompt assembly and a local model
+request path. The settings page and scoped preference storage are not implemented.
 
 ## Product priorities
 
@@ -11,7 +12,37 @@ when an optimization would weaken containment, authorization, or confidentiality
 Prompt injection defence requires runtime controls as well as model guidance.
 No prompt can guarantee that a model will ignore malicious instructions.
 
-## Visible system prompt
+## Implemented prototype (v0.1.0)
+
+The compiled base is prompt version 0.1.2. The Rust core embeds
+[`prompts/system.md`](../prompts/system.md), computes the SHA-256 digest from
+those compiled bytes, and exposes the text, version, and digest through the
+`prompt` CLI command. Each current LM Studio chat request begins with those
+exact compiled bytes as a system-role message. The adapter rejects a different
+first message or another system-role message.
+
+The `chat --instructions` option adds one labelled user-level preference
+message. The current request and saved journal history use user and assistant
+roles assigned by the core. Text inside these messages cannot create another
+role or a tool call. The CLI stores the current request and assistant response
+in the session journal. It records the compiled prompt, version and digest,
+custom instruction text, model, base URL, and configured context/output budgets
+in the request manifest. It does not record custom-instruction scope revisions,
+skill/tool/memory selections, or an account profile.
+
+Prompt assembly limits custom instruction text and each history message to 16
+KiB, history to 128 messages, and the assembled UTF-8 text to 256 KiB. The
+adapter applies a caller-supplied context budget using a byte-based estimate and
+fixed overhead. This is not an exact tokenizer or model-capacity check. The
+prototype has no settings UI, application/workspace/session preference store,
+preview UI, token-count display, compaction, skills, memories, tools, or
+provider-specific subscription routes. The current `--instructions` value is
+per invocation, not a saved preference with scope or revision history.
+
+These statements describe implemented prototype behavior. The sections below
+define the broader product requirements for release.
+
+## Release settings and visibility requirements
 
 The SYSTEM prompt settings page must show:
 
@@ -22,8 +53,9 @@ The SYSTEM prompt settings page must show:
 - The selected provider profile and the token count or labelled estimate.
 
 The initial base text is [prompt version 0.1.2](../prompts/system.md). It is a
-reviewable draft. Compile this versioned source into the Rust application, for
-example with include_str! at build time. The installed application must use the
+reviewable draft. Compile this versioned source into the Rust application. The
+current prototype uses `include_str!` at build time. The installed application
+must use the
 compiled bytes, not load a replacement prompt from a runtime file, environment
 variable, workspace, provider response, or settings field. Prompt changes require
 a reviewed application build/update. This does not prevent a user from changing
@@ -117,7 +149,7 @@ Claude Code prompts.
 [OpenAI request mapping](https://developers.openai.com/api/docs/guides/migrate-to-responses),
 [Claude Messages](https://platform.claude.com/docs/en/api/messages/create)
 
-## Changes and request records
+## Release request records
 
 Freeze an instruction manifest when starting each request. Record the prompt
 version/digest, custom-instruction revisions, selected skill versions, tool
@@ -128,6 +160,10 @@ instruction snapshots with the session journal under its retention policy so
 the user can inspect what was sent. A digest alone cannot reconstruct old text.
 Show when retention or removal has made an older body unavailable.
 Use the versioned JSONL [session journal](session-storage.md) for these records.
+The prototype records only the compiled prompt text/version/digest, one
+per-invocation custom instruction string, the selected model and base URL, and
+caller-supplied context/output budgets. It has no saved preference revision
+system or records for skills, tools, memories, or account profiles.
 
 Edits apply to the next request. Clearly label a request already in flight. If an
 edit requires immediate effect, cancel and observe completion before restarting;
@@ -136,6 +172,10 @@ Invalidate derived context and cache entries whose instruction inputs changed.
 Keep the base prompt and current user additions outside generated summaries.
 
 ## Acceptance requirements
+
+The prototype does not meet all release requirements below. The settings UI,
+scope and revision lifecycle, request inspector, exact token counting or
+labelled estimate, compaction, and source-selection records remain future work.
 
 - Verify that the preview matches the application-owned instructions actually
   serialized by each provider adapter, including subscription profiles.

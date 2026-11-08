@@ -361,12 +361,8 @@ fn parse_response(response: Response) -> Result<ModelReply, ProviderError> {
         .get("message")
         .and_then(Value::as_object)
         .ok_or(ProviderError::MalformedResponse)?;
-    if message.contains_key("tool_calls") || message.contains_key("function_call") {
-        return Err(ProviderError::UnsupportedToolCall);
-    }
-    if choice.get("tool_calls").is_some() || choice.get("function_call").is_some() {
-        return Err(ProviderError::UnsupportedToolCall);
-    }
+    reject_actions(message.get("tool_calls"), message.get("function_call"))?;
+    reject_actions(choice.get("tool_calls"), choice.get("function_call"))?;
     if matches!(
         choice.get("finish_reason").and_then(Value::as_str),
         Some("tool_calls" | "function_call")
@@ -400,6 +396,23 @@ fn parse_response(response: Response) -> Result<ModelReply, ProviderError> {
         finish_reason: finish_reason.to_owned(),
         usage,
     })
+}
+
+fn reject_actions(
+    tool_calls: Option<&Value>,
+    function_call: Option<&Value>,
+) -> Result<(), ProviderError> {
+    match tool_calls {
+        None | Some(Value::Null) => {}
+        // LM Studio includes an empty array in ordinary text-only replies.
+        Some(Value::Array(calls)) if calls.is_empty() => {}
+        Some(Value::Array(_)) => return Err(ProviderError::UnsupportedToolCall),
+        Some(_) => return Err(ProviderError::MalformedResponse),
+    }
+    if function_call.is_some_and(|call| !call.is_null()) {
+        return Err(ProviderError::UnsupportedToolCall);
+    }
+    Ok(())
 }
 
 fn parse_usage(value: &Value) -> Result<Usage, ProviderError> {

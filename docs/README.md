@@ -1,8 +1,8 @@
 # Project documentation
 
-Misanthrope is in pre-implementation planning. The guides below set contribution
-requirements now. They do not establish that the application, sandbox, tests, or
-automated checks already exist.
+Misanthrope has a first Rust CLI prototype for local chat and JSONL sessions.
+The guides distinguish implemented behaviour from the remaining product
+contracts. The execution sandbox and coding tools are not implemented.
 
 ## Start here
 
@@ -17,6 +17,7 @@ automated checks already exist.
 | Document | Purpose |
 | --- | --- |
 | [Project overview](../README.md) | Product scope, proposed architecture, and roadmap |
+| [Build and run](development.md) | Current CLI, build commands, crate boundaries, limits, and dependencies |
 | [Coding rules](coding-rules.md) | Rust design, ownership, errors, concurrency, and workflow |
 | [Security coding rules](security-coding-rules.md) | Permission, sandbox, credential, Git, and UI boundaries |
 | [Testing standards](testing-standards.md) | Test design, execution, and evidence requirements |
@@ -67,7 +68,8 @@ links for repository files. Keep whitespace clean and end files with a newline.
 ## Current enforcement status
 
 Repository review and analysis are configured in the repository-checks guide.
-There is no Cargo manifest, Rust toolchain selection, frontend project, or
-application test suite yet. Application formatting, linting, tests, dependency
-checks, and release checks must be introduced with the implementation they check.
-Record their actual scope and limitations when they are added.
+The Rust workflow adds formatting, strict Clippy, unit/integration tests, and
+separate documentation tests on Windows and Linux. The development guide owns
+the current commands and limits. There is no frontend or execution backend yet.
+Dependency security audits, native containment qualification, and release checks
+still need their own implementation and evidence.

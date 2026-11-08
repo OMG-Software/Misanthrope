@@ -295,6 +295,29 @@ fn rejects_invalid_response_schemas_and_tool_requests() {
 }
 
 #[test]
+fn accepts_empty_lm_studio_tool_call_array_as_no_action() {
+    let response = br#"{"choices":[{"message":{"role":"assistant","content":"READY.","tool_calls":[],"reasoning_content":""},"finish_reason":"stop"}],"usage":{"prompt_tokens":893,"completion_tokens":3,"total_tokens":896}}"#;
+    let fixture = Fixture::start("200 OK", response, "");
+    let model = client(fixture.address.clone(), None);
+
+    let result = model.complete(&messages());
+    fixture.finish();
+
+    assert_eq!(
+        result,
+        Ok(ModelReply {
+            content: "READY.".to_owned(),
+            finish_reason: "stop".to_owned(),
+            usage: Some(Usage {
+                prompt_tokens: Some(893),
+                completion_tokens: Some(3),
+                total_tokens: Some(896),
+            }),
+        })
+    );
+}
+
+#[test]
 fn rejects_oversized_response_body() {
     let fixture = Fixture::start("200 OK", &vec![b'x'; 1024 * 1024 + 1], "");
     let error = client(fixture.address.clone(), None)
@@ -302,6 +325,51 @@ fn rejects_oversized_response_body() {
         .expect_err("oversized response is rejected");
     fixture.finish();
     assert_eq!(error, ProviderError::ResponseTooLarge);
+}
+
+#[test]
+fn null_action_fields_are_absent_but_actual_or_malformed_calls_fail() {
+    for (fields, expected) in [
+        (
+            serde_json::json!({"tool_calls":null,"function_call":null}),
+            None,
+        ),
+        (
+            serde_json::json!({"tool_calls":[{}]}),
+            Some(ProviderError::UnsupportedToolCall),
+        ),
+        (
+            serde_json::json!({"function_call":{}}),
+            Some(ProviderError::UnsupportedToolCall),
+        ),
+        (
+            serde_json::json!({"tool_calls":"not an array"}),
+            Some(ProviderError::MalformedResponse),
+        ),
+    ] {
+        // Exercise both response locations, including unexpected choice fields.
+        for at_choice in [false, true] {
+            let mut response = serde_json::json!({"choices":[{
+                "message":{"role":"assistant","content":"plain text"},
+                "finish_reason":"stop"
+            }]});
+            let target = if at_choice {
+                response["choices"][0]
+                    .as_object_mut()
+                    .expect("choice object")
+            } else {
+                response["choices"][0]["message"]
+                    .as_object_mut()
+                    .expect("message object")
+            };
+            target.extend(fields.as_object().expect("field object").clone());
+            let encoded = serde_json::to_vec(&response).expect("fixture response JSON");
+            let fixture = Fixture::start("200 OK", &encoded, "");
+            let result = client(fixture.address.clone(), None).complete(&messages());
+            fixture.finish();
+            assert_eq!(result.err(), expected);
+        }
+    }
 }
 
 #[test]

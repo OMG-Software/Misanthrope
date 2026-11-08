@@ -6,6 +6,14 @@ Changes are recorded here before a release version is assigned.
 
 ### Added
 
+- First Rust 0.1.0 CLI prototype, with a pinned toolchain, locked dependencies,
+  and native Windows/Linux formatting, lint, and test workflow.
+- Compiled base prompt inspection, lower-priority per-request user instructions,
+  bounded LM Studio chat, and refusal of all model-requested tools.
+- Typed JSONL session creation, request manifests, exclusive writer ownership,
+  strict replay validation, archive/restore, and explicit abandoned-turn recovery.
+- Native journal-handle checks, prompt/provider/journal/CLI tests, a development
+  guide, and an ADR separating this prototype from future controlled execution.
 - User-selected project/global memories with review, edit, delete, disable,
   scoped retrieval, provenance, and context/cache invalidation requirements.
 - A memory-scope ADR and memory guidance in draft system prompt version 0.1.2.
