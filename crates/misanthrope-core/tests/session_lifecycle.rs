@@ -147,10 +147,7 @@ fn archive_restore_are_idempotent_and_never_resume_a_turn() {
     reopened.restore().expect("repeat restore");
     assert_eq!(reopened.snapshot().event_count, restored_count);
     assert!(!reopened.snapshot().archived);
-    assert_eq!(
-        reopened.start_turn().expect("new explicit turn").is_nil(),
-        false
-    );
+    assert!(!reopened.start_turn().expect("new explicit turn").is_nil());
 }
 
 #[test]
