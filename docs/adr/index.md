@@ -26,3 +26,4 @@ meaningful alternative does not need an ADR.
 | [0009: Require user-selected project and global memories](0009-require-user-selected-project-and-global-memories.md) | Accepted | 2026-11-08 |
 | [0010: Build a local chat core before execution](0010-build-a-local-chat-core-before-execution.md) | Accepted | 2026-11-08 |
 | [0011: Reserve terminal journal capacity](0011-reserve-terminal-journal-capacity.md) | Accepted | 2026-11-08 |
+| [0012: Separate workspace settings from execution authority](0012-separate-workspace-settings-from-execution-authority.md) | Accepted | 2026-11-08 |

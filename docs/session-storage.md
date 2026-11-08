@@ -5,12 +5,15 @@ release contract. Conversation and session refer to the same saved coding
 interaction. The prototype stores a bounded transcript and archive state. It
 does not provide a session UI, search index, task execution, or recovery UI.
 
-## Implemented prototype (v0.1.0)
+## Implemented prototype (v0.2.0)
 
 The Rust core creates and opens one UTF-8 JSONL journal per session. The CLI
 uses the operating system's per-user local application data location by default;
 `--data-dir` is an explicit override. The default is outside the workspace, but
-the override is not checked for overlap with it. The journal path stays fixed
+configured development roots reject overlap with application storage. Without a
+configured root, legacy text-only sessions retain the previous unchecked
+`--data-dir` override. No tool access is granted by that compatibility mode.
+The journal path stays fixed
 after creation. The filename contains the UTC creation time and session UUIDv4.
 Creation uses exclusive file creation.
 
@@ -40,7 +43,7 @@ envelope described below. Payload objects reject unknown fields.
 
 | Event type | Payload in v1 | State rule |
 | --- | --- | --- |
-| `session.started` | `title`, `workspace`, `workspace_id`, `app_version` | First event, sequence 0. `workspace_id` is a per-session association ID; there is no persistent project registry. `app_version` is the package version. |
+| `session.started` | `title`, `workspace`, `workspace_id`, `app_version` | First event, sequence 0. `workspace_id` is the stable registry ID for new sessions with configured workspace settings; legacy/unconfigured sessions use a per-session association ID. `app_version` is the package version. |
 | `message.recorded` | `role`, `source`, `text` | `user` must pair with `user_cli`; `assistant` must pair with `provider`. The source label is metadata and grants no authority. |
 | `turn.started` | `request_id` | Requires an active, unarchived session with no active turn. |
 | `request.manifest` | `request_id`, `manifest` | Must match the active turn. The manifest has `base_prompt`, `prompt_version`, `prompt_sha256`, `custom_instructions`, `model`, `base_url`, `context_tokens`, and `max_output_tokens`. It is historical metadata, not policy or permission. |
@@ -52,7 +55,9 @@ envelope described below. Payload objects reject unknown fields.
 `workspace` is a tagged native path: `{"encoding":"unix_bytes","units":[...]}`
 stores Unix path bytes; `{"encoding":"windows_utf16","units":[...]}` stores
 Windows UTF-16 code units. It is descriptive metadata only. It is not a current
-workspace authorization or a persistent project identity.
+workspace authorization. The registry supplies stable IDs for configured new
+sessions; the journal cannot restore or mint authority. Existing journals are
+not rewritten. See [workspace settings](workspace-permissions.md).
 
 The CLI supports `session new`, `inspect`, `archive`, `restore`, and
 `interrupt JOURNAL`. Interrupt marks a recorded active turn failed with the code

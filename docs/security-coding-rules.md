@@ -3,7 +3,9 @@
 These rules define requirements for each implemented boundary. The first CLI
 prototype has bounded prompt/provider/journal checks and rejects model-requested
 tools. It has no execution sandbox, filesystem tool broker, or permission UI.
-See [current limits](development.md). Apply these rules with the
+It now has trusted workspace settings and audited configuration checks. Those
+checks always deny execution and do not replace per-target authorization. See
+[workspace settings](workspace-permissions.md) and [current limits](development.md). Apply these rules with the
 [coding rules](coding-rules.md) and [testing standards](testing-standards.md).
 
 ## Trust and permissions

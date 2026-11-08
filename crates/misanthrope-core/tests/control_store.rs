@@ -6,6 +6,23 @@ use misanthrope_core::policy::{DecisionReason, Operation, PermissionSet, PolicyR
 use tempfile::TempDir;
 use uuid::Uuid;
 
+#[test]
+fn ancestor_limit_cannot_allow_development_root_inside_application_storage() {
+    let temporary = tempfile::tempdir().expect("private temporary directory");
+    let data = temporary.path().join("data");
+    let mut store = ControlStore::open(&data).expect("control store");
+    let mut deep_root = data.clone();
+    for _ in 0..260 {
+        deep_root.push("d");
+    }
+    std::fs::create_dir_all(&deep_root).expect("deep directory fixture");
+
+    assert!(store.set_development_root(&deep_root, 0).is_err());
+    assert_eq!(store.revision(), 0);
+    assert!(!store.has_development_root());
+    assert_eq!(store.audit(100).expect("audit unchanged").len(), 1);
+}
+
 const CONTROL_FILE: &str = "control-v1.jsonl";
 
 struct Fixture {
@@ -135,8 +152,10 @@ fn enabled_configuration_is_audited_without_granting_execution_or_changing_revis
     let fixture = fixture();
     let mut store = open_store(&fixture);
     let registration = register(&mut store, &fixture.workspace);
-    let mut permissions = PermissionSet::default();
-    permissions.execute = true;
+    let permissions = PermissionSet {
+        execute: true,
+        ..PermissionSet::default()
+    };
     store
         .set_permissions(registration.id(), permissions, store.revision())
         .expect("enable configured execute preference");
@@ -282,8 +301,10 @@ fn replacing_workspace_directory_blocks_binding_and_reregistration() {
     let fixture = fixture();
     let mut store = open_store(&fixture);
     let workspace = register(&mut store, &fixture.workspace);
-    let mut permissions = PermissionSet::default();
-    permissions.read = false;
+    let permissions = PermissionSet {
+        read: false,
+        ..PermissionSet::default()
+    };
     store
         .set_permissions(workspace.id(), permissions, store.revision())
         .expect("set nondefault workspace preferences");

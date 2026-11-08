@@ -157,7 +157,7 @@ impl DirectoryRecord {
             }
             ancestor = parent.to_path_buf();
         }
-        Ok(false)
+        Err(invalid_input("directory ancestor depth limit exceeded"))
     }
 
     /// Compare directory identity and creation time, not mutable child metadata.

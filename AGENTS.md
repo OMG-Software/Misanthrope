@@ -4,7 +4,9 @@
 
 Misanthrope is an early coding-assistant prototype for Windows and Linux. The
 repository now contains a pinned Rust workspace with a core, a developer CLI,
-and narrow native journal-handle checks. The prototype is not a desktop app and
+and configuration-only workspace settings, audit records, and native identity
+checks. Follow [workspace settings](docs/workspace-permissions.md) for their
+contract. Enabled preferences never authorize execution. The prototype is not a desktop app and
 does not provide workspace tools, process execution, or an execution sandbox.
 The bundled web interface and most planned features are not implemented.
 Repository review and analysis are defined in

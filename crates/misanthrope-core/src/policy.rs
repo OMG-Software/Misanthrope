@@ -151,8 +151,17 @@ impl SessionBinding {
             session_id,
             workspace_id,
             revision,
-            expires: Instant::now() + SESSION_BINDING_LIFETIME,
+            // Clock-range exhaustion expires the binding immediately.
+            expires: {
+                let now = Instant::now();
+                now.checked_add(SESSION_BINDING_LIFETIME).unwrap_or(now)
+            },
         }
+    }
+
+    /// Identify the store incarnation for internal audit records.
+    pub(crate) const fn store_id(&self) -> Uuid {
+        self.store_id
     }
 
     /// Return the session ID bound to this policy context.

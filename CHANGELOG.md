@@ -20,6 +20,14 @@ Changes are recorded here before a release version is assigned.
 
 ### Added
 
+- Rust 0.2.0 workspace settings core: explicit development root, persistent
+  directory-backed workspace IDs, permission preferences, revision checks, and
+  short-lived process-local session bindings. No file or command tools enabled.
+- Bounded single-writer settings/audit JSONL with strict replay, synced
+  acknowledgement, poisoned-writer handling, and configuration-only decisions.
+- Workspace CLI commands and stable IDs in new sessions when configured, with
+  legacy text-only session compatibility and Windows/Linux boundary tests.
+
 - First Rust 0.1.0 CLI prototype, with a pinned toolchain, locked dependencies,
   and native Windows/Linux formatting, lint, and test workflow.
 - Compiled base prompt inspection, lower-priority per-request user instructions,
