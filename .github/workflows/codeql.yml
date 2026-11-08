@@ -1,0 +1,81 @@
+name: CodeQL
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    - cron: '17 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  languages:
+    name: Detect analysis languages
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      languages: ${{ steps.detect.outputs.languages }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Select languages present in the repository
+        id: detect
+        shell: python
+        run: |
+          import json
+          import os
+          import subprocess
+          from pathlib import PurePosixPath
+
+          files = subprocess.check_output(["git", "ls-files", "-z"]).decode(
+              "utf-8", errors="surrogateescape"
+          ).split("\0")
+          languages = ["actions"]
+          if any(path.endswith(".rs") for path in files):
+              if not any(
+                  PurePosixPath(path).name in {"Cargo.toml", "rust-project.json"}
+                  for path in files
+              ):
+                  raise SystemExit("Rust source requires Cargo.toml or rust-project.json for CodeQL.")
+              languages.append("rust")
+          if any(path.endswith((".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts")) for path in files):
+              languages.append("javascript-typescript")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write("languages=" + json.dumps(languages) + "\n")
+
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    needs: languages
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: ${{ fromJSON(needs.languages.outputs.languages) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          queries: security-extended
+      - name: Analyze
+        uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          category: /language:${{ matrix.language }}

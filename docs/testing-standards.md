@@ -5,9 +5,10 @@ Use these standards with the [coding rules](coding-rules.md) and
 
 ## Current state
 
-There is no Cargo manifest, frontend project, test suite, or CI pipeline yet.
-The commands below define the baseline to introduce with implementation.
-They are not current working installation or verification instructions.
+There is no Cargo manifest, frontend project, or application test suite yet.
+[Repository review and analysis](repository-checks.md) have separate workflows.
+The Cargo commands below define the baseline to introduce with implementation;
+they are not current working installation or verification instructions.
 
 Documentation-only changes need documentation checks, not an invented Rust
 project or a claimed application test run.

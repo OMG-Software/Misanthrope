@@ -220,8 +220,9 @@ not a claim that automated enforcement already exists.
 
 ## Enforcement and verification limits
 
-No Cargo manifest, application tests, frontend tooling, or automated gates exist
-yet. When implementation begins, configure and run the checks in the testing
+The [repository-checks guide](repository-checks.md) defines review and analysis.
+No Cargo manifest, application tests, or frontend tooling exists yet.
+When implementation begins, configure and run the checks in the testing
 guide and record what each one actually covers. Rustfmt checks formatting;
 Clippy and the compiler check selected properties; tests check exercised cases.
 None establishes prompt-injection resistance or sandbox correctness by itself.

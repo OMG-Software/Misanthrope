@@ -15,3 +15,7 @@ Changes are recorded here before a release version is assigned.
 - General development-tool access through installed or managed toolchain
   profiles, including scoped runtimes, SDKs, outputs, caches, and subprocesses.
 - Authentication and toolchain acceptance requirements and supporting ADRs.
+- CodeRabbit automatic reviews using project guidelines, CodeQL language-aware
+  analysis, and SonarQube Cloud CI configuration.
+- PR-only main protection with no bypass actors and blocks on force-pushes
+  and branch deletion.

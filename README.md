@@ -141,6 +141,13 @@ requirements, design proposals, and gaps in the plan.
 Build instructions will be added when implementation begins. See the
 [contributor guidance](AGENTS.md) for the current workflow.
 
+## Repository checks
+
+Main updates require pull requests. CodeRabbit reviews pull requests, CodeQL
+analyzes workflow files and available application languages, and Sonar uses
+CI-based analysis. See [repository checks](docs/repository-checks.md) for the
+configured scope, credential setup, and current limitations.
+
 ## License
 
 Misanthrope is licensed under the [Apache License 2.0](LICENSE).

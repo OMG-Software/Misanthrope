@@ -23,6 +23,7 @@ automated checks already exist.
 | [Platform support](platform-support.md) | Windows/Linux targets and the evidence needed for support |
 | [Provider authentication](provider-authentication.md) | Required subscription/API profiles, provider evidence, and readiness gates |
 | [Development tools](development-tools.md) | Installed/managed toolchains, runtime grants, outputs, caches, and qualification |
+| [Repository checks](repository-checks.md) | CodeRabbit, CodeQL, Sonar, credentials, and main protection |
 | [ADR register](adr/index.md) | Lasting decisions, alternatives, and consequences |
 | [Changelog](../CHANGELOG.md) | Changes awaiting release |
 
@@ -34,6 +35,7 @@ automated checks already exist.
 | A coding convention | Coding rules; an ADR when the choice needs lasting rationale |
 | A security property, permission, or trust boundary | Security coding rules and relevant tests |
 | A test convention or verification command | Testing standards |
+| Repository analysis, CI workflows, or branch rules | Repository checks and relevant testing/security guidance |
 | A supported platform or prerequisite | Platform support |
 | Provider login, subscription entitlement, or billing | Provider authentication and security rules |
 | Tool discovery, runtime access, build environments, or caches | Development tools and platform support |
@@ -51,7 +53,8 @@ links for repository files. Keep whitespace clean and end files with a newline.
 
 ## Current enforcement status
 
-There is no Cargo manifest, Rust toolchain selection, frontend project, or CI
-configuration yet. Formatting, linting, tests, dependency checks, and release
-checks must be introduced with the implementation they check. Record their
-actual scope and limitations when they are added.
+Repository review and analysis are configured in the repository-checks guide.
+There is no Cargo manifest, Rust toolchain selection, frontend project, or
+application test suite yet. Application formatting, linting, tests, dependency
+checks, and release checks must be introduced with the implementation they check.
+Record their actual scope and limitations when they are added.
