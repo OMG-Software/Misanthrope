@@ -25,7 +25,7 @@ impl WorkspaceId {
         &self.0
     }
 
-    /// Validate a UUID read from trusted storage before using it as a workspace ID.
+    /// Wrap a stored UUID only after enforcing the non-nil version 4 invariant.
     pub(crate) fn from_uuid(value: Uuid) -> Result<Self, WorkspaceIdError> {
         if is_valid_workspace_uuid(value) {
             Ok(Self(value))
@@ -34,13 +34,14 @@ impl WorkspaceId {
         }
     }
 
-    /// Generate a fresh, non-nil version 4 workspace identifier.
+    /// Generate a fresh non-nil version 4 ID that matches parser and storage rules.
     pub(crate) fn fresh() -> Self {
         Self(Uuid::new_v4())
     }
 }
 
 impl fmt::Display for WorkspaceId {
+    /// Render the UUID in the standard display form for local configuration.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(formatter)
     }
@@ -49,6 +50,7 @@ impl fmt::Display for WorkspaceId {
 impl FromStr for WorkspaceId {
     type Err = WorkspaceIdError;
 
+    /// Parse UUID syntax, then enforce the non-nil version 4 workspace invariant.
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         let uuid = Uuid::parse_str(value).map_err(|_| WorkspaceIdError)?;
         Self::from_uuid(uuid)
@@ -60,6 +62,7 @@ impl FromStr for WorkspaceId {
 pub struct WorkspaceIdError;
 
 impl fmt::Display for WorkspaceIdError {
+    /// Keep invalid syntax and unsupported UUID forms on one safe error message.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("workspace ID must be a non-nil version 4 UUID")
     }
@@ -67,7 +70,7 @@ impl fmt::Display for WorkspaceIdError {
 
 impl std::error::Error for WorkspaceIdError {}
 
-// `Version::Random` is the UUID crate marker for version 4 UUIDs.
+/// Keep parsed and generated workspace IDs within the same non-nil UUID v4 domain.
 fn is_valid_workspace_uuid(value: Uuid) -> bool {
     !value.is_nil() && value.get_version() == Some(Version::Random)
 }
@@ -89,6 +92,7 @@ pub struct PermissionSet {
 }
 
 impl Default for PermissionSet {
+    /// Leave process execution and task networking disabled until configured.
     fn default() -> Self {
         Self {
             read: true,
@@ -140,6 +144,9 @@ pub struct SessionBinding {
 
 impl SessionBinding {
     /// Bind a session to a store, workspace, and policy revision for 15 minutes.
+    ///
+    /// If the monotonic clock cannot represent the lifetime, the binding expires
+    /// immediately.
     pub(crate) fn new(
         store_id: Uuid,
         session_id: Uuid,
@@ -290,14 +297,17 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// Generate an independent UUID for each test scope.
     fn id() -> Uuid {
         Uuid::new_v4()
     }
 
+    /// Use a generated non-nil version 4 ID in policy test fixtures.
     fn workspace_id() -> WorkspaceId {
         WorkspaceId::fresh()
     }
 
+    /// Build an opaque live binding for the supplied store and session fixture.
     fn binding(
         store_id: Uuid,
         session_id: Uuid,
@@ -307,6 +317,7 @@ mod tests {
         SessionBinding::new(store_id, session_id, workspace_id, revision)
     }
 
+    /// Describe one session-scoped operation request for evaluator tests.
     fn request(session_id: Uuid, workspace_id: WorkspaceId, operation: Operation) -> PolicyRequest {
         PolicyRequest {
             session_id,
@@ -315,6 +326,7 @@ mod tests {
         }
     }
 
+    /// Apply one request to the supplied policy context and permission snapshot.
     fn decision(
         binding: &SessionBinding,
         store_id: Uuid,
@@ -325,6 +337,7 @@ mod tests {
         evaluate(store_id, revision, permissions, binding, request)
     }
 
+    /// Preserve the documented defaults while keeping higher-impact options off.
     #[test]
     fn default_permissions_enable_only_read_and_write() {
         let permissions = PermissionSet::default();
@@ -339,6 +352,7 @@ mod tests {
         assert!(!permissions.allows(Operation::TaskNetwork));
     }
 
+    /// Verify that changing one permission flag does not change another operation.
     #[test]
     fn each_operation_flag_controls_only_its_operation() {
         let cases = [
@@ -402,6 +416,7 @@ mod tests {
         }
     }
 
+    /// Confirm that enabled configuration policy still produces no execution grant.
     #[test]
     fn evaluate_reports_enabled_policy_without_granting_execution() {
         let store_id = id();
@@ -423,6 +438,7 @@ mod tests {
         }
     }
 
+    /// Deny execution and task-network requests under their default disabled flags.
     #[test]
     fn evaluate_rejects_each_disabled_operation_flag() {
         let store_id = id();
@@ -445,6 +461,7 @@ mod tests {
         }
     }
 
+    /// Bindings from an earlier or separate store incarnation must fail closed.
     #[test]
     fn evaluate_rejects_a_different_store() {
         let store_id = id();
@@ -464,6 +481,7 @@ mod tests {
         assert!(!result.execution_allowed());
     }
 
+    /// A valid workspace binding cannot be reused by another session.
     #[test]
     fn evaluate_rejects_a_different_session() {
         let store_id = id();
@@ -482,6 +500,7 @@ mod tests {
         assert!(!result.execution_allowed());
     }
 
+    /// Requests for a different workspace must not inherit the bound policy.
     #[test]
     fn evaluate_rejects_a_different_workspace() {
         let store_id = id();
@@ -500,6 +519,7 @@ mod tests {
         assert!(!result.execution_allowed());
     }
 
+    /// A policy edit invalidates bindings created under the previous revision.
     #[test]
     fn evaluate_rejects_a_stale_revision() {
         let store_id = id();
@@ -519,6 +539,7 @@ mod tests {
         assert!(!result.execution_allowed());
     }
 
+    /// A monotonic lifetime expiry blocks an otherwise matching request.
     #[test]
     fn evaluate_rejects_an_expired_binding() {
         let store_id = id();
@@ -544,6 +565,7 @@ mod tests {
         assert!(!result.execution_allowed());
     }
 
+    /// Missing workspace preferences are an unavailable policy, not an allow.
     #[test]
     fn evaluate_rejects_an_unavailable_workspace() {
         let store_id = id();
@@ -563,6 +585,7 @@ mod tests {
         assert!(!result.execution_allowed());
     }
 
+    /// Keep malformed, nil, and other-version IDs outside the workspace type.
     #[test]
     fn workspace_id_accepts_only_non_nil_v4_uuids() {
         let valid = Uuid::new_v4();
@@ -588,6 +611,7 @@ mod tests {
         assert!(WorkspaceId::from_uuid(valid).is_ok());
     }
 
+    /// Reject future or attacker-added permission fields instead of ignoring them.
     #[test]
     fn permission_set_rejects_unknown_flags_in_json() {
         let parsed = serde_json::from_value::<PermissionSet>(json!({
@@ -601,6 +625,7 @@ mod tests {
         assert!(parsed.is_err());
     }
 
+    /// Persist a descriptive decision without exposing a deserialization grant path.
     #[test]
     fn policy_decision_serializes_as_description_only() {
         let store_id = id();
