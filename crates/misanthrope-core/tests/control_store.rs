@@ -25,6 +25,22 @@ fn ancestor_limit_cannot_allow_development_root_inside_application_storage() {
 
 const CONTROL_FILE: &str = "control-v1.jsonl";
 
+#[cfg(unix)]
+#[test]
+fn dangling_control_link_is_invalid_state_not_absent_state() {
+    let temporary = tempfile::tempdir().expect("private temporary directory");
+    let data = temporary.path().join("data");
+    fs::create_dir(&data).expect("application storage");
+    let path = data.join(CONTROL_FILE);
+    let absent_target = temporary.path().join("missing-target");
+    std::os::unix::fs::symlink(&absent_target, &path).expect("dangling fixture link");
+
+    assert!(ControlStore::open_existing(&data).is_err());
+    assert!(ControlStore::open(&data).is_err());
+    assert_eq!(fs::read_link(&path).expect("link preserved"), absent_target);
+    assert!(!absent_target.exists());
+}
+
 struct Fixture {
     _temporary: TempDir,
     data: PathBuf,

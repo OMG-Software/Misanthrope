@@ -199,13 +199,18 @@ impl ControlStore {
 
     /// Open existing state without creating directories or files. Only absence is `None`.
     pub fn open_existing(data_directory: &Path) -> Result<Option<Self>, ControlError> {
-        let mut file = match storage::open_locked_file(&data_directory.join(FILE_NAME), false) {
-            Ok(file) => file,
-            Err(StorageError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
-                return Ok(None);
+        let path = data_directory.join(FILE_NAME);
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if !metadata.is_file() => {
+                return Err(ControlError::Invalid("control path is not a regular file"));
             }
-            Err(error) => return Err(error.into()),
-        };
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(ControlError::Io(error)),
+        }
+        // Existing state that disappears or fails validation must not become
+        // an implicit legacy-mode selection. Handle checks still follow below.
+        let mut file = storage::open_locked_file(&path, false)?;
         let mut bytes = Vec::new();
         Read::by_ref(&mut file)
             .take(u64::try_from(MAX_BYTES + 1).map_err(|_| ControlError::LimitReached)?)

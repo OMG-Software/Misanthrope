@@ -91,7 +91,8 @@ and policy metadata, not prompts or credentials. Treat paths as private data.
 Opening validates the complete bounded log. Empty files, incomplete tails,
 duplicate JSON keys or event IDs, unknown fields/schema/events, invalid
 transitions, and sequence/revision inconsistencies fail without repair. Only
-an absent file permits initialization. Write or sync failure poisons that
+an absent file permits initialization. Existing links, including dangling links,
+are invalid state; they cannot select the legacy no-settings path. Write or sync failure poisons that
 writer; no decision is returned if its audit append fails. A complete record
 can still exist after an uncertain sync, so reopen validates without retrying
 work. There is no rotation, automatic repair, deletion, or directory-rebind

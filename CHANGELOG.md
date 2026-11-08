@@ -6,6 +6,9 @@ Changes are recorded here before a release version is assigned.
 
 ### Fixed
 
+- Reject indeterminate ancestor walks and invalid control-file links before
+  accepting workspace configuration or selecting legacy session behavior.
+
 - Reserve terminal journal capacity, recover full legacy active turns with one
   bounded terminal tail, and test write-success/sync-failure handling.
 - Preflight encoded request events before starting turns, mark deterministic
