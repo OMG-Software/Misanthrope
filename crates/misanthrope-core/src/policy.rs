@@ -67,6 +67,7 @@ impl fmt::Display for WorkspaceIdError {
 
 impl std::error::Error for WorkspaceIdError {}
 
+// `Version::Random` is the UUID crate marker for version 4 UUIDs.
 fn is_valid_workspace_uuid(value: Uuid) -> bool {
     !value.is_nil() && value.get_version() == Some(Version::Random)
 }
@@ -334,6 +335,7 @@ mod tests {
         let cases = [
             (
                 Operation::Read,
+                false,
                 PermissionSet {
                     read: false,
                     write: true,
@@ -343,6 +345,7 @@ mod tests {
             ),
             (
                 Operation::Write,
+                false,
                 PermissionSet {
                     read: true,
                     write: false,
@@ -352,6 +355,7 @@ mod tests {
             ),
             (
                 Operation::Execute,
+                true,
                 PermissionSet {
                     read: true,
                     write: true,
@@ -361,6 +365,7 @@ mod tests {
             ),
             (
                 Operation::TaskNetwork,
+                true,
                 PermissionSet {
                     read: true,
                     write: true,
@@ -370,8 +375,8 @@ mod tests {
             ),
         ];
 
-        for (operation, permissions) in cases {
-            assert!(permissions.allows(operation));
+        for (operation, enabled, permissions) in cases {
+            assert_eq!(permissions.allows(operation), enabled);
             for other in [
                 Operation::Read,
                 Operation::Write,
