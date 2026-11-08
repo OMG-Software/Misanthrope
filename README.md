@@ -8,7 +8,8 @@ interface, workspace tools, Git workflows, and an execution sandbox remain
 planned.
 
 > **Status: early prototype, not release-ready.** The Rust CLI can inspect the
-> compiled prompt, report implemented capabilities, manage JSONL sessions, and
+> compiled prompt, report implemented capabilities, manage JSONL sessions and
+> workspace permission preferences, and
 > send one non-streaming chat request to an explicitly selected local LM Studio
 > model. It cannot read or edit workspace files or run commands. No execution
 > sandbox is implemented.
@@ -31,6 +32,9 @@ and `misanthrope-platform`. The CLI command is `misanthrope`. It provides:
 
 - `prompt`: print the compiled, read-only base prompt, version, and SHA-256 digest.
 - `capabilities`: report what this prototype implements and rejects.
+- `workspace`: configure the development root, register stable workspace IDs,
+  change read/write/execute/task-network preferences, and inspect audited policy
+  checks. These checks describe configuration only; execution stays disabled.
 - `session`: create, inspect, archive, restore, and explicitly interrupt an
   abandoned turn in a JSONL journal.
 - `chat`: send one user turn to an already-running LM Studio server at a literal
@@ -44,10 +48,11 @@ refuses to chat with an archived session or one with an incomplete prior turn;
 it does not replay recorded actions. An abandoned turn must be inspected and
 marked interrupted before chat can continue.
 
-The platform crate checks an already-open journal handle for file type and link
-properties. This narrow check does not protect parent paths or contain a
-process. The planned filesystem, process, network, Git, MCP, memory, and tool
-permission controls are not implemented. See the
+The platform crate checks opened journal handles and captures native directory
+identity for workspace registration. These checks do not protect parent paths
+or contain a process. Workspace settings and audit records are implemented;
+filesystem enforcement, process/network confinement, Git, MCP, and memories
+remain planned. See the [workspace settings contract](docs/workspace-permissions.md). See the
 [development guide](docs/development.md) for setup and command details.
 
 The current CLI has no operating-system credential service. Its optional local

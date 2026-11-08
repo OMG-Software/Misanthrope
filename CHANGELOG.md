@@ -6,6 +6,16 @@ Changes are recorded here before a release version is assigned.
 
 ### Fixed
 
+- Reject stale saved workspace paths before reusing registrations, and reject
+  moved application storage before interpreting overlap checks.
+- Open Unix workspace selections as directories so named pipes cannot hold the
+  control-store lock indefinitely; test unsupported creation-time metadata.
+- Bound workspace CLI test processes, check the exact policy-audit event count,
+  and document registry status and internal policy contracts.
+
+- Reject indeterminate ancestor walks and invalid control-file links before
+  accepting workspace configuration or selecting legacy session behavior.
+
 - Reserve terminal journal capacity, recover full legacy active turns with one
   bounded terminal tail, and test write-success/sync-failure handling.
 - Preflight encoded request events before starting turns, mark deterministic
@@ -19,6 +29,14 @@ Changes are recorded here before a release version is assigned.
 - Add review regression tests and clarify smoke-check, coverage, and CLI examples.
 
 ### Added
+
+- Rust 0.2.0 workspace settings core: explicit development root, persistent
+  directory-backed workspace IDs, permission preferences, revision checks, and
+  short-lived process-local session bindings. No file or command tools enabled.
+- Bounded single-writer settings/audit JSONL with strict replay, synced
+  acknowledgement, poisoned-writer handling, and configuration-only decisions.
+- Workspace CLI commands and stable IDs in new sessions when configured, with
+  legacy text-only session compatibility and Windows/Linux boundary tests.
 
 - First Rust 0.1.0 CLI prototype, with a pinned toolchain, locked dependencies,
   and native Windows/Linux formatting, lint, and test workflow.

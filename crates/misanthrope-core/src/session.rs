@@ -4,17 +4,18 @@
 //! file before returning a writable handle. It does not execute or resume work.
 
 use std::collections::HashSet;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use serde::de::{self, MapAccess, SeqAccess, Visitor};
-use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::{Map, Number, Value};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use thiserror::Error;
 use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, UtcOffset};
 use uuid::Uuid;
+
+use crate::storage::{self, StorageError};
 
 const SCHEMA_VERSION: u32 = 1;
 const MAX_TITLE_BYTES: usize = 256;
@@ -174,8 +175,35 @@ impl SessionJournal {
     ///
     /// `data_root` must come from trusted application settings. `workspace` is
     /// canonicalized and recorded only as metadata; this function grants no file
-    /// access. The session event is synced before this function returns.
+    /// access. A fresh per-session workspace ID is generated for legacy callers.
+    /// The session event is synced before this function returns.
     pub fn create(data_root: &Path, workspace: &Path, title: &str) -> Result<Self, SessionError> {
+        Self::create_with_id(data_root, workspace, title, Uuid::new_v4())
+    }
+
+    /// Create a journal with a caller-validated workspace ID in its metadata.
+    ///
+    /// `workspace_id` is descriptive metadata only. Never derive execution
+    /// authority from this journal header. The caller must obtain the ID from
+    /// current trusted control state. `data_root` must come from trusted
+    /// application settings. `workspace` is canonicalized and recorded only as
+    /// metadata; this function grants no file access.
+    pub fn create_with_workspace_id(
+        data_root: &Path,
+        workspace: &Path,
+        title: &str,
+        workspace_id: crate::policy::WorkspaceId,
+    ) -> Result<Self, SessionError> {
+        Self::create_with_id(data_root, workspace, title, *workspace_id.as_uuid())
+    }
+
+    /// Create a journal after the public constructors select its metadata ID.
+    fn create_with_id(
+        data_root: &Path,
+        workspace: &Path,
+        title: &str,
+        workspace_id: Uuid,
+    ) -> Result<Self, SessionError> {
         validate_title(title)?;
         let workspace = fs::canonicalize(workspace)?;
         if !workspace.is_dir() {
@@ -191,7 +219,7 @@ impl SessionJournal {
             .join(format!("{:04}", now.year()))
             .join(format!("{:02}", u8::from(now.month())))
             .join(format!("{:02}", now.day()));
-        create_private_directories(&dir)?;
+        storage::create_private_directories(&dir).map_err(map_storage_error)?;
         let filename = format!(
             "misanthrope-{:02}-{:02}-{:02}-{:03}Z-{session_id}.jsonl",
             now.hour(),
@@ -200,22 +228,12 @@ impl SessionJournal {
             now.millisecond()
         );
         let path = dir.join(filename);
-        let mut create_options = OpenOptions::new();
-        create_options.read(true).write(true).create_new(true);
-        configure_journal_options(&mut create_options);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            create_options.mode(0o600);
-        }
-        let mut file = create_options.open(&path)?;
-        check_open_file(&path, &file)?;
-        file.try_lock().map_err(map_lock_error)?;
+        let mut file = storage::open_locked_file(&path, true).map_err(map_storage_error)?;
 
         let started = SessionStarted {
             title: title.to_owned(),
             workspace,
-            workspace_id: Uuid::new_v4(),
+            workspace_id,
             app_version: env!("CARGO_PKG_VERSION").to_owned(),
         };
         let event = EventRecord {
@@ -231,7 +249,7 @@ impl SessionJournal {
         if let Err(error) = file.write_all(&bytes).and_then(|()| file.sync_all()) {
             return Err(SessionError::Io(error));
         }
-        sync_parent_directory(&dir)?;
+        storage::sync_parent_directory(&dir).map_err(map_storage_error)?;
 
         Ok(Self {
             path,
@@ -280,10 +298,7 @@ impl SessionJournal {
                 "journal is not a regular file",
             ));
         }
-        let mut file = open_existing(path)?;
-        check_open_file(path, &file)?;
-        file.try_lock().map_err(map_lock_error)?;
-        check_link_count(&file)?;
+        let mut file = storage::open_locked_file(path, false).map_err(map_storage_error)?;
         let contents = read_bounded(&mut file)?;
         let snapshot = replay(&contents, filename_id)?;
         let bytes = u64::try_from(contents.len()).map_err(|_| SessionError::LimitReached)?;
@@ -806,7 +821,9 @@ fn replay(contents: &[u8], filename_id: Uuid) -> Result<SessionSnapshot, Session
         if line.is_empty() {
             return Err(SessionError::InvalidJournal("blank event line"));
         }
-        let value: Value = parse_strict_json(line)?;
+        let value: Value = storage::parse_strict_json(line).map_err(|_| {
+            SessionError::InvalidJournal("event JSON is malformed or has duplicate keys")
+        })?;
         let envelope: EventEnvelope = serde_json::from_value(value)
             .map_err(|_| SessionError::InvalidJournal("event envelope is invalid"))?;
         let end = consumed_bytes
@@ -1016,201 +1033,57 @@ fn decode_payload<T: for<'de> Deserialize<'de>>(value: Value) -> Result<T, Sessi
         .map_err(|_| SessionError::InvalidJournal("event payload is invalid"))
 }
 
-/// Reject duplicate keys at every depth and require exactly one JSON value.
-fn parse_strict_json(bytes: &[u8]) -> Result<Value, SessionError> {
-    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
-    let value = StrictValue::deserialize(&mut deserializer).map_err(|_| {
-        SessionError::InvalidJournal("event JSON is malformed or has duplicate keys")
-    })?;
-    deserializer
-        .end()
-        .map_err(|_| SessionError::InvalidJournal("event JSON has trailing data"))?;
-    Ok(value.0)
-}
-
-struct StrictValue(Value);
-
-impl<'de> Deserialize<'de> for StrictValue {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        struct StrictVisitor;
-        impl<'de> Visitor<'de> for StrictVisitor {
-            type Value = StrictValue;
-            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                formatter.write_str("a JSON value without duplicate object keys")
-            }
-            fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
-                Ok(StrictValue(Value::Bool(value)))
-            }
-            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
-                Ok(StrictValue(Value::Number(Number::from(value))))
-            }
-            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
-                Ok(StrictValue(Value::Number(Number::from(value))))
-            }
-            fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                Number::from_f64(value)
-                    .map(|number| StrictValue(Value::Number(number)))
-                    .ok_or_else(|| E::custom("non-finite number"))
-            }
-            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                Ok(StrictValue(Value::String(value.to_owned())))
-            }
-            fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
-                Ok(StrictValue(Value::String(value)))
-            }
-            fn visit_none<E>(self) -> Result<Self::Value, E> {
-                Ok(StrictValue(Value::Null))
-            }
-            fn visit_unit<E>(self) -> Result<Self::Value, E> {
-                Ok(StrictValue(Value::Null))
-            }
-            /// Keep duplicate-key checks active inside nested array elements.
-            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-            where
-                A: SeqAccess<'de>,
-            {
-                let mut values = Vec::new();
-                while let Some(value) = seq.next_element::<StrictValue>()? {
-                    values.push(value.0);
-                }
-                Ok(StrictValue(Value::Array(values)))
-            }
-            /// Detect repeated keys before converting an object to a JSON map.
-            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-            where
-                A: MapAccess<'de>,
-            {
-                let mut values = Map::new();
-                while let Some((key, value)) = map.next_entry::<String, StrictValue>()? {
-                    if values.contains_key(&key) {
-                        return Err(de::Error::custom("duplicate JSON object key"));
-                    }
-                    values.insert(key, value.0);
-                }
-                Ok(StrictValue(Value::Object(values)))
-            }
-        }
-        deserializer.deserialize_any(StrictVisitor)
-    }
-}
-
-/// Open with native link checks and Windows replacement protection enabled.
-fn open_existing(path: &Path) -> Result<File, SessionError> {
-    let mut options = OpenOptions::new();
-    options.read(true).write(true);
-    configure_journal_options(&mut options);
-    Ok(options.open(path)?)
-}
-
-/// Keep Windows files at their path while the journal owner holds the handle.
-fn configure_journal_options(options: &mut OpenOptions) {
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        const FILE_SHARE_READ_AND_WRITE: u32 = 0x0000_0003;
-        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-        options
-            .share_mode(FILE_SHARE_READ_AND_WRITE)
-            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = options;
-    }
-}
-
-/// Validate the opened object and detect Unix path replacement during opening.
-/// Parent directories must still be trusted; this is not a filesystem broker.
-fn check_open_file(path: &Path, file: &File) -> Result<(), SessionError> {
-    let opened = file.metadata()?;
-    if !opened.is_file() {
-        return Err(SessionError::InvalidJournal(
-            "journal handle is not a regular file",
-        ));
-    }
-    check_link_count(file)?;
-    let path_metadata = fs::symlink_metadata(path)?;
-    if path_metadata.file_type().is_symlink() || !path_metadata.is_file() {
-        return Err(SessionError::InvalidJournal(
-            "journal path is a link or not a regular file",
-        ));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if opened.dev() != path_metadata.dev() || opened.ino() != path_metadata.ino() {
-            return Err(SessionError::InvalidJournal(
-                "journal path changed during open",
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// Inspect the existing handle through the platform boundary, without reopening.
-fn check_link_count(file: &File) -> Result<(), SessionError> {
-    match misanthrope_platform::validate_journal_handle(file) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::InvalidInput => Err(
-            SessionError::InvalidJournal("journal handle is linked or not a regular file"),
-        ),
-        Err(error) => Err(SessionError::Io(error)),
-    }
-}
-
-/// Distinguish an existing writer from an unavailable or failed locking facility.
-fn map_lock_error(error: std::fs::TryLockError) -> SessionError {
+/// Preserve storage error categories at the session journal boundary.
+fn map_storage_error(error: StorageError) -> SessionError {
     match error {
-        std::fs::TryLockError::WouldBlock => SessionError::Busy,
-        std::fs::TryLockError::Error(error) => SessionError::Io(error),
+        StorageError::Io(error) => SessionError::Io(error),
+        StorageError::Invalid(reason) => SessionError::InvalidJournal(reason),
+        StorageError::Busy => SessionError::Busy,
     }
 }
-
-/// Request private Unix modes for new directories; do not alter existing ACLs.
-fn create_private_directories(path: &Path) -> Result<(), SessionError> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        let mut builder = fs::DirBuilder::new();
-        builder.recursive(true).mode(0o700);
-        builder.create(path)?;
-    }
-    #[cfg(not(unix))]
-    {
-        fs::create_dir_all(path)?;
-    }
-    Ok(())
-}
-
-/// Sync the Unix directory entry; Windows directory durability is not qualified.
-fn sync_parent_directory(directory: &Path) -> Result<(), SessionError> {
-    #[cfg(unix)]
-    {
-        File::open(directory)?.sync_all()?;
-    }
-    #[cfg(windows)]
-    {
-        // std does not provide a portable safe directory-handle sync contract.
-        let _ = directory;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::{MessageRole, SessionError, SessionJournal};
     use std::fs::{self, File};
     use std::io::{Read, Seek, SeekFrom};
 
+    #[test]
+    fn create_with_workspace_id_preserves_metadata_across_sessions_and_reopen() {
+        let temporary = tempfile::tempdir().expect("private temporary directory");
+        let workspace = temporary.path().join("workspace");
+        fs::create_dir(&workspace).expect("workspace directory");
+        let workspace_id: crate::policy::WorkspaceId = uuid::Uuid::new_v4()
+            .to_string()
+            .parse()
+            .expect("valid generated workspace identifier");
+        let expected_id = *workspace_id.as_uuid();
+        let data_root = temporary.path().join("app-data");
+        let first = SessionJournal::create_with_workspace_id(
+            &data_root,
+            &workspace,
+            "First metadata test",
+            workspace_id,
+        )
+        .expect("create first journal with workspace metadata");
+        let second = SessionJournal::create_with_workspace_id(
+            &data_root,
+            &workspace,
+            "Second metadata test",
+            workspace_id,
+        )
+        .expect("create second journal with workspace metadata");
+        let paths = [first.path().to_path_buf(), second.path().to_path_buf()];
+        assert_eq!(first.snapshot.workspace_id, expected_id);
+        assert_eq!(second.snapshot.workspace_id, expected_id);
+        drop(first);
+        drop(second);
+
+        for path in paths {
+            let reopened = SessionJournal::open(&path).expect("reopen journal");
+            assert_eq!(reopened.snapshot.workspace_id, expected_id);
+            assert_eq!(reopened.snapshot.active_turn, None);
+        }
+    }
     #[test]
     fn append_failure_preserves_snapshot_and_poisons_future_mutations() {
         let temporary = tempfile::tempdir().expect("private temporary directory");

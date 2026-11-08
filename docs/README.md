@@ -23,6 +23,7 @@ contracts. The execution sandbox and coding tools are not implemented.
 | [Testing standards](testing-standards.md) | Test design, execution, and evidence requirements |
 | [Platform support](platform-support.md) | Windows/Linux targets and the evidence needed for support |
 | [Provider authentication](provider-authentication.md) | Required subscription/API profiles, provider evidence, and readiness gates |
+| [Workspace settings](workspace-permissions.md) | Implemented workspace IDs, configuration-only permissions, revisions, audit, and remaining gates |
 | [Development tools](development-tools.md) | Installed/managed toolchains, runtime grants, outputs, caches, and qualification |
 | [Agent instructions](agent-instructions.md) | Product priorities, visible SYSTEM prompt, user additions, and request manifests |
 | [System prompt draft](../prompts/system.md) | Versioned initial base instructions for the coding assistant |
@@ -44,6 +45,7 @@ contracts. The execution sandbox and coding tools are not implemented.
 | A security property, permission, or trust boundary | Security coding rules and relevant tests |
 | A test convention or verification command | Testing standards |
 | Repository analysis, CI workflows, or branch rules | Repository checks and relevant testing/security guidance |
+| Workspace identity, settings, revisions, or policy audit | Workspace settings, session storage, security rules, and relevant tests |
 | A supported platform or prerequisite | Platform support |
 | Provider login, subscription entitlement, or billing | Provider authentication and security rules |
 | Tool discovery, runtime access, build environments, or build/package caches | Development tools and platform support |

@@ -1,6 +1,7 @@
 # Build and run the core prototype
 
-Misanthrope 0.1.0 is a developer CLI prototype. It can send a text conversation
+Misanthrope 0.2.0 is a developer CLI prototype with workspace permission settings.
+It can send a text conversation
 to an explicitly selected local LM Studio model and save that conversation.
 It is not yet a coding agent: it cannot read project contents, edit files, run
 commands, use Git, or connect to MCP servers. No execution sandbox exists yet.
@@ -22,6 +23,38 @@ cargo run --locked -p misanthrope-cli -- prompt
 The repository pins Rust 1.99.1, edition 2024, for all three crates. This is also
 the declared minimum version; no older compiler is supported. Cargo.lock fixes
 the resolved dependency graph. The executable is named misanthrope.
+
+## Workspace settings
+
+Use a private application data directory outside your development root. These
+examples use Windows paths; on Linux use separate paths such as
+`/home/me/.local/share/misanthrope` and `/home/me/dev`. Create the root and
+project directories first. Each command returns JSON. Use the current revision
+from its output for the next mutation; replace WORKSPACE_ID and SESSION_UUID
+with returned workspace ID and a UUIDv4 session selection.
+
+```text
+misanthrope --data-dir C:\misanthrope-data workspace status
+misanthrope --data-dir C:\misanthrope-data workspace set-root C:\dev --revision 0
+misanthrope --data-dir C:\misanthrope-data workspace register C:\dev\project --revision 1
+misanthrope --data-dir C:\misanthrope-data workspace permissions WORKSPACE_ID --revision 2 --write false
+misanthrope --data-dir C:\misanthrope-data workspace check WORKSPACE_ID --session SESSION_UUID --operation read
+misanthrope --data-dir C:\misanthrope-data workspace audit --limit 20
+```
+
+`status` initializes an absent store at revision zero. `check` and `audit`
+require existing state. Flags take explicit `true` or `false` values. Read/write
+default to enabled; execute/task-network default to disabled. All decisions
+still report `execution_allowed: false`. Commands do not dispatch tools.
+See the [workspace contract](workspace-permissions.md) for limits and failures.
+
+When a root is configured, new sessions use stable IDs from the persisted
+workspace registration. Invalid settings or outside-root selections fail.
+Existing text-only journals remain readable without inferred access grants.
+With no configured root, the earlier text-only behavior remains available and
+sets no implicit root. Registrations store settings and audit history; they do
+not create project folders or grant access. A broader project registry and the
+folder/session tree remain future work.
 
 ## Local chat
 
@@ -137,12 +170,14 @@ usage events, streaming chunks, and large-output artifacts remain planned.
 
 | Crate | Responsibility |
 | --- | --- |
-| misanthrope-core | Compiled prompt assembly, bounded local model adapter, typed journal and replay |
+| misanthrope-core | Compiled prompt, bounded model adapter, session/control journals, workspace settings and policy |
 | misanthrope-cli | Trusted operator input, one-turn orchestration, JSON output |
-| misanthrope-platform | Narrow native validation of opened journal handles |
+| misanthrope-platform | Native journal-handle validation and directory identity |
 
 Core and CLI forbid unsafe code. The platform crate denies unsafe code except
-inside its reviewed Windows handle wrapper. Rust's stable metadata API does not
+inside its reviewed Windows handle wrappers. Directory registration uses
+128-bit native file IDs and requires directory creation-time metadata.
+Rust's stable metadata API does not
 provide the needed Windows hard-link count. The wrapper borrows the existing
 handle and checks GetFileInformationByHandle; it never takes ownership of a raw
 handle. Unix uses standard file metadata. These checks reject known unsafe
@@ -150,9 +185,10 @@ journal objects; they do not establish a development-root access broker or an
 execution boundary. Existing parent directories must remain trusted. Windows
 ACL hardening and power-loss durability qualification are still required.
 
-The workspace path and initial workspace UUID are descriptive session metadata.
-They grant no access. A persistent project registry and the folder/session tree
-are future work. The CLI's explicit journal path is a trusted operator interface;
+Session workspace IDs are descriptive metadata. They grant no access. The
+control journal persists workspace registrations, settings, revisions, and
+audit events. A broader project registry and the folder/session tree remain
+future work. The CLI's explicit journal path is a trusted operator interface;
 it must not become a raw-path command in the future web interface.
 
 ## Dependencies
@@ -163,6 +199,7 @@ Direct dependencies have specific purposes:
 | --- | --- |
 | serde / serde_json | Typed JSON serialization and bounded protocol parsing; derive macros run during compilation |
 | uuid | Random UUIDv4 identifiers and typed JSON identifiers; OS-backed randomness through its dependency graph |
+| libc (Unix only) | Locked at 0.2.191; supplies `O_DIRECTORY` and `O_NOFOLLOW` constants to safe `std::fs::OpenOptions` flag configuration, avoiding ABI-specific numeric flags without adding unsafe core code |
 | time | UTC date layout and RFC 3339 formatting/parsing |
 | sha2 | Standard SHA-256 prompt digest; no custom cryptography |
 | thiserror | Typed component errors; derive macro runs during compilation |
