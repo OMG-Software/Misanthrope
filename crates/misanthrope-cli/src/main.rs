@@ -189,6 +189,8 @@ fn run(cli: Cli) -> Result<(), CliError> {
         })),
         Command::Session { action } => match action {
             SessionCommand::New { workspace, title } => {
+                let token = read_lm_token()?;
+                let title = redact_known_secret(&title, token.as_deref());
                 let data_root = data_root(cli.data_dir)?;
                 let journal = SessionJournal::create(&data_root, &workspace, &title)
                     .map_err(session_error)?;
@@ -227,16 +229,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
 
 /// Validate the provider before opening storage, then attach recovery information.
 fn chat(data_dir: Option<PathBuf>, mut args: ChatArgs) -> Result<(), CliError> {
-    let token = match env::var("MISANTHROPE_LM_TOKEN") {
-        Ok(value) if !value.is_empty() => Some(value),
-        Ok(_) | Err(env::VarError::NotPresent) => None,
-        Err(env::VarError::NotUnicode(_)) => {
-            return Err(CliError::new(
-                "configuration",
-                "Server token must be Unicode",
-            ));
-        }
-    };
+    let token = read_lm_token()?;
     let client = LocalModelClient::new(
         LocalModelConfig {
             base_url: args.endpoint.clone(),
@@ -416,6 +409,19 @@ fn resolve_journal(path: Option<PathBuf>, native: Option<String>) -> Result<Path
         _ => Err(CliError::new(
             "configuration",
             "Supply one journal path or native locator",
+        )),
+    }
+}
+
+/// Read only the trusted CLI's credential input, without including it in errors.
+/// Session creation and chat use this same source for known-token redaction.
+fn read_lm_token() -> Result<Option<String>, CliError> {
+    match env::var("MISANTHROPE_LM_TOKEN") {
+        Ok(value) if !value.is_empty() => Ok(Some(value)),
+        Ok(_) | Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(_)) => Err(CliError::new(
+            "configuration",
+            "Server token must be Unicode",
         )),
     }
 }

@@ -54,6 +54,7 @@ future task-environment credential boundary.
 
 The CLI redacts exact occurrences of that currently configured token from new
 user text, preferences, titles, and assistant text before retention or display.
+Both chat-created sessions and direct `session new` use the same title redaction.
 It also redacts the current token from historical text before sending context.
 This is known-token redaction, not general secret detection or retroactive
 cleanup of existing journals. Ordinary string storage does not guarantee erasure.

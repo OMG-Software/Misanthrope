@@ -12,6 +12,7 @@ pub fn validate_journal_handle(file: &File) -> io::Result<()> {
 }
 
 #[cfg(unix)]
+/// Inspect the live inode rather than trusting an earlier path metadata check.
 fn validate(file: &File) -> io::Result<()> {
     use std::os::unix::fs::MetadataExt;
     let metadata = file.metadata()?;
@@ -26,6 +27,7 @@ fn validate(file: &File) -> io::Result<()> {
 
 #[cfg(windows)]
 #[allow(unsafe_code)]
+/// Borrow the live handle to inspect link count and reparse attributes via Win32.
 fn validate(file: &File) -> io::Result<()> {
     use std::mem::MaybeUninit;
     use std::os::windows::io::AsRawHandle;

@@ -17,6 +17,7 @@ struct Fixture {
 }
 
 impl Fixture {
+    /// Serve one bounded local exchange without depending on production retries.
     fn start(status: &str, body: &[u8], extra_headers: &str) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind local fixture");
         listener
@@ -64,11 +65,13 @@ impl Fixture {
         }
     }
 
+    /// Observe fixture completion before returning captured headers and body.
     fn finish(self) -> (String, Vec<u8>) {
         join_bounded(self.task, "fixture completes")
     }
 }
 
+/// Fail independently when a mock worker does not terminate within its budget.
 fn join_bounded<T>(task: JoinHandle<T>, message: &str) -> T {
     let deadline = Instant::now() + Duration::from_secs(8);
     while !task.is_finished() {
@@ -78,6 +81,7 @@ fn join_bounded<T>(task: JoinHandle<T>, message: &str) -> T {
     task.join().expect(message)
 }
 
+/// Validate fixture framing and cap allocations before reading a declared body.
 fn read_request(stream: &mut TcpStream) -> std::io::Result<(String, Vec<u8>)> {
     let mut head = Vec::new();
     let mut window = Vec::with_capacity(4);
@@ -155,6 +159,7 @@ fn client(address: String, token: Option<String>) -> LocalModelClient {
     .expect("valid local model client")
 }
 
+/// Observe the listening socket so rejection proves the prompt was not sent.
 fn assert_prompt_rejected_before_connect(messages: &[ModelMessage]) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind no-call fixture");
     listener

@@ -14,6 +14,8 @@ Changes are recorded here before a release version is assigned.
   not Unicode; prevent renaming open Windows journals with delete sharing denied.
 - Redact the configured local server token from retained/displayed chat text
   and resumed context, and apply a total deadline to each model request.
+- Apply title redaction to direct session creation as well as chat, and verify
+  redaction of credentials seeded in historical conversation text.
 - Add review regression tests and clarify smoke-check, coverage, and CLI examples.
 
 ### Added

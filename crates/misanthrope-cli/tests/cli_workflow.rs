@@ -20,6 +20,7 @@ struct MockServer {
 }
 
 impl MockServer {
+    /// Accept exactly one local request with independent bounds and observed cleanup.
     fn start(response: Value) -> Self {
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind private mock server");
         listener
@@ -61,6 +62,7 @@ impl MockServer {
         }
     }
 
+    /// Return the captured request only after the response worker has completed.
     fn finish(self) -> Value {
         let request = self
             .request
@@ -74,6 +76,7 @@ impl MockServer {
     }
 }
 
+/// Bound fixture startup independently of the production client's timeout.
 fn accept_with_timeout(listener: &TcpListener) -> Result<TcpStream, String> {
     let deadline = Instant::now() + MOCK_TIMEOUT;
     loop {
@@ -90,6 +93,7 @@ fn accept_with_timeout(listener: &TcpListener) -> Result<TcpStream, String> {
     }
 }
 
+/// Parse only bounded Content-Length requests and reject truncation or slow input.
 fn read_http_body(stream: &mut TcpStream) -> Result<Vec<u8>, String> {
     let deadline = Instant::now() + MOCK_TIMEOUT;
     let mut bytes = Vec::new();
@@ -146,6 +150,7 @@ fn find_header_end(bytes: &[u8]) -> Option<usize> {
     bytes.windows(4).position(|window| window == b"\r\n\r\n")
 }
 
+/// Send deterministic JSON without depending on a real provider or live account.
 fn write_http_response(stream: &mut TcpStream, body: &Value) -> Result<(), String> {
     let body = serde_json::to_vec(body).map_err(|error| error.to_string())?;
     let headers = format!(
@@ -855,6 +860,88 @@ fn configured_credential_is_removed_from_new_inputs_before_request_and_retention
     assert!(
         !std::fs::read_to_string(path)
             .expect("journal")
+            .contains(token)
+    );
+}
+
+#[test]
+fn session_new_redacts_the_configured_credential_in_its_title() {
+    let temporary = TempDir::new().expect("private test directory");
+    let token = "fixture-session-title-credential-246810";
+    let output = cli()
+        .env("MISANTHROPE_LM_TOKEN", token)
+        .arg("--data-dir")
+        .arg(temporary.path().join("data"))
+        .args(["session", "new", "--workspace"])
+        .arg(temporary.path())
+        .arg("--title")
+        .arg(format!("title {token}"))
+        .output()
+        .expect("CLI");
+    assert_success(&output);
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(token));
+    let result = output_json(&output);
+    assert_eq!(result["session"]["title"], "title [REDACTED]");
+    assert!(
+        !std::fs::read_to_string(result["journal"].as_str().expect("journal"))
+            .expect("journal bytes")
+            .contains(token)
+    );
+}
+
+#[test]
+fn configured_credential_in_older_history_is_redacted_before_resuming() {
+    let temporary = TempDir::new().expect("private test directory");
+    let token = "fixture-historical-credential-135790";
+    let mut journal = SessionJournal::create(
+        &temporary.path().join("data"),
+        temporary.path(),
+        "old history",
+    )
+    .expect("journal");
+    journal
+        .record_message(MessageRole::User, &format!("Earlier user text {token}"))
+        .expect("older user message");
+    journal
+        .record_message(
+            MessageRole::Assistant,
+            &format!("Earlier assistant text {token}"),
+        )
+        .expect("older assistant message");
+    let path = journal.path().to_path_buf();
+    drop(journal);
+    let server = MockServer::start(completion_response("safe new answer"));
+    let output = cli()
+        .env("MISANTHROPE_LM_TOKEN", token)
+        .args(["chat", "--journal"])
+        .arg(&path)
+        .args([
+            "--endpoint",
+            &server.endpoint,
+            "--model",
+            "fixture",
+            "--context-tokens",
+            "131072",
+            "continue",
+        ])
+        .output()
+        .expect("CLI");
+    let request = server.finish();
+    assert_success(&output);
+    assert_eq!(
+        request["messages"][1]["content"],
+        "Earlier user text [REDACTED]"
+    );
+    assert_eq!(
+        request["messages"][2]["content"],
+        "Earlier assistant text [REDACTED]"
+    );
+    assert!(!request["messages"].to_string().contains(token));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(token));
+    // Context redaction does not rewrite or silently destroy historical evidence.
+    assert!(
+        std::fs::read_to_string(path)
+            .expect("original journal")
             .contains(token)
     );
 }
