@@ -65,7 +65,12 @@ pub enum MessageRole {
 
 /// Lossless native path metadata. It is descriptive data, not an access grant.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(tag = "encoding", content = "units", deny_unknown_fields)]
+#[serde(
+    tag = "encoding",
+    content = "units",
+    deny_unknown_fields,
+    rename_all = "snake_case"
+)]
 pub enum NativePath {
     /// Unix path bytes, which may not be valid UTF-8.
     UnixBytes(Vec<u8>),
@@ -111,6 +116,8 @@ pub struct RecordedMessage {
 pub struct SessionSnapshot {
     /// The UUID shared by all events in this journal.
     pub session_id: Uuid,
+    /// Stable identifier for the workspace association recorded at creation.
+    pub workspace_id: Uuid,
     /// Whether the session is archived.
     pub archived: bool,
     /// The currently active turn, if any. Opening never resumes it.
@@ -148,6 +155,11 @@ impl SessionJournal {
     pub fn create(data_root: &Path, workspace: &Path, title: &str) -> Result<Self, SessionError> {
         validate_title(title)?;
         let workspace = fs::canonicalize(workspace)?;
+        if !workspace.is_dir() {
+            return Err(SessionError::InvalidValue(
+                "workspace must resolve to a directory",
+            ));
+        }
         let workspace = NativePath::from_path(&workspace)?;
         let now = OffsetDateTime::now_utc();
         let session_id = Uuid::new_v4();
@@ -179,7 +191,8 @@ impl SessionJournal {
         let started = SessionStarted {
             title: title.to_owned(),
             workspace,
-            app_version: "unreleased".to_owned(),
+            workspace_id: Uuid::new_v4(),
+            app_version: env!("CARGO_PKG_VERSION").to_owned(),
         };
         let event = EventRecord {
             schema_version: SCHEMA_VERSION,
@@ -201,6 +214,7 @@ impl SessionJournal {
             file,
             snapshot: SessionSnapshot {
                 session_id,
+                workspace_id: started.workspace_id,
                 archived: false,
                 active_turn: None,
                 messages: Vec::new(),
@@ -243,8 +257,7 @@ impl SessionJournal {
         let mut file = open_existing(path)?;
         check_open_file(path, &file)?;
         file.try_lock().map_err(map_lock_error)?;
-        let opened_metadata = file.metadata()?;
-        check_link_count(&opened_metadata)?;
+        check_link_count(&file)?;
         let contents = read_bounded(&mut file)?;
         let snapshot = replay(&contents, filename_id)?;
         let bytes = u64::try_from(contents.len()).map_err(|_| SessionError::LimitReached)?;
@@ -279,11 +292,16 @@ impl SessionJournal {
                 "archived sessions cannot be changed",
             ));
         }
+        let source = match role {
+            MessageRole::User => MessageSource::UserCli,
+            MessageRole::Assistant => MessageSource::Provider,
+        };
         let payload = MessagePayload {
             role,
+            source,
             text: text.to_owned(),
         };
-        let bytes = self.append("message.recorded", &payload, false)?;
+        let bytes = self.append("message.recorded", &payload)?;
         self.snapshot.messages.push(RecordedMessage {
             role,
             text: text.to_owned(),
@@ -310,7 +328,7 @@ impl SessionJournal {
             request_id,
             manifest,
         };
-        let bytes = self.append("request.manifest", &payload, true)?;
+        let bytes = self.append("request.manifest", &payload)?;
         self.commit_accounting(bytes)
     }
 
@@ -326,7 +344,7 @@ impl SessionJournal {
             return Err(SessionError::ActiveTurn);
         }
         let request_id = Uuid::new_v4();
-        let bytes = self.append("turn.started", &TurnPayload { request_id }, true)?;
+        let bytes = self.append("turn.started", &TurnPayload { request_id })?;
         self.snapshot.active_turn = Some(request_id);
         self.commit_accounting(bytes)?;
         Ok(request_id)
@@ -359,7 +377,7 @@ impl SessionJournal {
         if self.snapshot.active_turn.is_some() {
             return Err(SessionError::ActiveTurn);
         }
-        let bytes = self.append("session.archived", &EmptyPayload {}, true)?;
+        let bytes = self.append("session.archived", &EmptyPayload {})?;
         self.snapshot.archived = true;
         self.commit_accounting(bytes)
     }
@@ -370,7 +388,7 @@ impl SessionJournal {
         if !self.snapshot.archived {
             return Ok(());
         }
-        let bytes = self.append("session.restored", &EmptyPayload {}, true)?;
+        let bytes = self.append("session.restored", &EmptyPayload {})?;
         self.snapshot.archived = false;
         self.commit_accounting(bytes)
     }
@@ -389,7 +407,7 @@ impl SessionJournal {
             request_id,
             code: code.map(str::to_owned),
         };
-        let bytes = self.append(event_type, &payload, false)?;
+        let bytes = self.append(event_type, &payload)?;
         self.snapshot.active_turn = None;
         self.commit_accounting(bytes)
     }
@@ -406,7 +424,6 @@ impl SessionJournal {
         &mut self,
         event_type: &'static str,
         payload: &T,
-        critical: bool,
     ) -> Result<Vec<u8>, SessionError> {
         self.ensure_mutable()?;
         if self.next_seq >= u64::try_from(MAX_EVENTS).map_err(|_| SessionError::LimitReached)? {
@@ -434,13 +451,7 @@ impl SessionJournal {
             .file
             .seek(SeekFrom::End(0))
             .and_then(|_| self.file.write_all(&bytes))
-            .and_then(|()| {
-                if critical {
-                    self.file.sync_all()
-                } else {
-                    self.file.flush()
-                }
-            });
+            .and_then(|()| self.file.sync_all());
         if let Err(error) = write_result {
             self.poisoned = true;
             return Err(SessionError::Io(error));
@@ -496,6 +507,7 @@ struct EventEnvelope {
 struct SessionStarted {
     title: String,
     workspace: NativePath,
+    workspace_id: Uuid,
     app_version: String,
 }
 
@@ -503,7 +515,15 @@ struct SessionStarted {
 #[serde(deny_unknown_fields)]
 struct MessagePayload {
     role: MessageRole,
+    source: MessageSource,
     text: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum MessageSource {
+    UserCli,
+    Provider,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -677,6 +697,7 @@ fn replay(contents: &[u8], filename_id: Uuid) -> Result<SessionSnapshot, Session
                     .map_err(|_| SessionError::InvalidJournal("initial title is invalid"))?;
                 snapshot = Some(SessionSnapshot {
                     session_id: envelope.session_id,
+                    workspace_id: started.workspace_id,
                     archived: false,
                     active_turn: None,
                     messages: Vec::new(),
@@ -693,6 +714,15 @@ fn replay(contents: &[u8], filename_id: Uuid) -> Result<SessionSnapshot, Session
                 let message: MessagePayload = decode_payload(envelope.payload)?;
                 if message.text.len() > MAX_MESSAGE_BYTES {
                     return Err(SessionError::InvalidJournal("message exceeds 16 KiB"));
+                }
+                if !matches!(
+                    (message.role, message.source),
+                    (MessageRole::User, MessageSource::UserCli)
+                        | (MessageRole::Assistant, MessageSource::Provider)
+                ) {
+                    return Err(SessionError::InvalidJournal(
+                        "message role and source do not match",
+                    ));
                 }
                 target.messages.push(RecordedMessage {
                     role: message.role,
@@ -723,6 +753,9 @@ fn replay(contents: &[u8], filename_id: Uuid) -> Result<SessionSnapshot, Session
                         "manifest does not match active turn",
                     ));
                 }
+                validate_manifest(&payload.manifest).map_err(|_| {
+                    SessionError::InvalidJournal("request manifest exceeds event size limit")
+                })?;
             }
             "turn.completed" | "turn.failed" => {
                 let target = snapshot
@@ -919,7 +952,7 @@ fn check_open_file(path: &Path, file: &File) -> Result<(), SessionError> {
             "journal handle is not a regular file",
         ));
     }
-    check_link_count(&opened)?;
+    check_link_count(file)?;
     let path_metadata = fs::symlink_metadata(path)?;
     if path_metadata.file_type().is_symlink() || !path_metadata.is_file() {
         return Err(SessionError::InvalidJournal(
@@ -938,26 +971,14 @@ fn check_open_file(path: &Path, file: &File) -> Result<(), SessionError> {
     Ok(())
 }
 
-fn check_link_count(metadata: &fs::Metadata) -> Result<(), SessionError> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if metadata.nlink() != 1 {
-            return Err(SessionError::InvalidJournal(
-                "journal has multiple hard links",
-            ));
-        }
+fn check_link_count(file: &File) -> Result<(), SessionError> {
+    match misanthrope_platform::validate_journal_handle(file) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::InvalidInput => Err(
+            SessionError::InvalidJournal("journal handle is linked or not a regular file"),
+        ),
+        Err(error) => Err(SessionError::Io(error)),
     }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        if metadata.number_of_links() != 1 {
-            return Err(SessionError::InvalidJournal(
-                "journal has multiple hard links",
-            ));
-        }
-    }
-    Ok(())
 }
 
 fn map_lock_error(error: std::fs::TryLockError) -> SessionError {
@@ -993,4 +1014,49 @@ fn sync_parent_directory(directory: &Path) -> Result<(), SessionError> {
         let _ = directory;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MessageRole, SessionError, SessionJournal};
+    use std::fs::{self, File};
+    use std::io::{Read, Seek, SeekFrom};
+
+    #[test]
+    fn append_failure_preserves_snapshot_and_poisons_future_mutations() {
+        let temporary = tempfile::tempdir().expect("private temporary directory");
+        let workspace = temporary.path().join("workspace");
+        fs::create_dir(&workspace).expect("workspace directory");
+        let mut journal = SessionJournal::create(
+            &temporary.path().join("app-data"),
+            &workspace,
+            "Failure test",
+        )
+        .expect("create journal");
+        let original_snapshot = journal.snapshot.clone();
+        let mut original_bytes = Vec::new();
+        journal
+            .file
+            .seek(SeekFrom::Start(0))
+            .expect("seek in locked journal");
+        journal
+            .file
+            .read_to_end(&mut original_bytes)
+            .expect("read through locked handle");
+        let path = journal.path().to_path_buf();
+
+        // Replace the owned handle with a read-only one to force a write error.
+        journal.file = File::open(path).expect("read-only journal handle");
+        assert!(matches!(
+            journal.record_message(MessageRole::User, "not persisted"),
+            Err(SessionError::Io(_))
+        ));
+
+        assert_eq!(journal.snapshot, original_snapshot);
+        assert_eq!(
+            fs::read(journal.path()).expect("journal remains unchanged"),
+            original_bytes
+        );
+        assert!(matches!(journal.start_turn(), Err(SessionError::Poisoned)));
+    }
 }
