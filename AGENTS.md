@@ -4,7 +4,9 @@
 
 Misanthrope is a planned coding-assistant harness for Windows and Linux.
 The intended design has a Rust core and a bundled web interface. This repository
-does not yet contain an application, Cargo workspace, test suite, or CI pipeline.
+does not yet contain an application, Cargo workspace, or application test suite.
+Repository review and analysis are defined in
+[docs/repository-checks.md](docs/repository-checks.md).
 Do not describe proposed features or security controls as implemented.
 
 ## Required reading
@@ -31,6 +33,8 @@ the user's explicit authorization.
   `codex/` prefix for agent-created branches. Update a clean `main` from
   `origin` before creating a new branch from it. Preserve an in-progress
   feature branch rather than switching away from its work.
+- Main is protected by an active PR-only rule with no bypass actors. Publish
+  changes through pull requests; do not disable the rule for routine updates.
 - Update `CHANGELOG.md` and relevant documentation in the same change.
   Documentation-only work does not require a version bump.
 - Record lasting design choices and rejected alternatives in the
