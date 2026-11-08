@@ -10,3 +10,8 @@ Changes are recorded here before a release version is assigned.
 - Rust coding rules adapted from Merovingian, with security and testing guidance.
 - Required contributor guidance, a documentation index, and platform targets.
 - An architecture decision register that records the Rust rule adaptations.
+- Required ChatGPT and Claude subscription authentication profiles, with provider
+  evidence, explicit billing modes, credential lifecycle, and readiness gates.
+- General development-tool access through installed or managed toolchain
+  profiles, including scoped runtimes, SDKs, outputs, caches, and subprocesses.
+- Authentication and toolchain acceptance requirements and supporting ADRs.

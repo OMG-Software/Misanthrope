@@ -59,6 +59,12 @@ and verify them using the [testing standards](testing-standards.md).
 
 ## Provider traffic and tool calls
 
+- Follow the [authentication contract](provider-authentication.md) for
+  subscription and API-key connections. Check identity, usage entitlement,
+  credential audience, and billing mode separately.
+- Bind login callbacks to the current trusted attempt, validate provider
+  responses, and protect token refresh and sign-out state. A login must not
+  grant filesystem or command permissions.
 - Model traffic, Git traffic, and task networking need separate policy.
   An approved model endpoint does not grant terminal networking.
 - Sending workspace context to a cloud model is data egress. Require an explicit
@@ -90,11 +96,33 @@ and verify them using the [testing standards](testing-standards.md).
 - Keep model/API keys and Git credentials out of frontend state, model context,
   task environments, process arguments, logs, and error reports. Use narrow
   host-side credential services and redact before recording diagnostics.
+- Apply the same protections to subscription access/refresh tokens, login codes,
+  and verifier values. Do not import unrelated client login caches or silently
+  switch subscription requests to separately billed API usage.
 - Review secret-bearing types for accidental `Debug`, serialization, cloning,
   and long retention. Use reviewed secret-handling libraries where needed;
   do not claim that dropping an ordinary string erases its memory.
 - Use established cryptographic and TLS libraries. Never disable certificate
   validation to make a connection work.
+
+## Development toolchains
+
+- Follow the [development-tool contract](development-tools.md). Explicitly
+  declare installed or managed toolchain inputs and narrowly scoped exceptions
+  to workspace-only data access.
+- Expose required compilers, helper binaries, libraries, SDKs, and non-secret
+  setup resources read-only. Keep trusted discovery and broker search paths
+  outside project control.
+- Redirect outputs, virtual environments, temporary files, and mutable caches
+  to designated writable resources. Prevent alternate writable paths to a
+  supposedly read-only toolchain.
+- Do not inherit a general host PATH, home, credential-bearing configuration,
+  or global package cache. Derive the required environment without secrets.
+- Apply containment to build scripts, package hooks, test programs, code
+  generators, language servers, and all descendants. Tool registration is not
+  permission to run commands outside confinement.
+- Separate toolchain installation/updates and package networking from ordinary
+  execution. Do not make a host installation writable to an untrusted task.
 
 ## Frontend, persistence, and dependencies
 

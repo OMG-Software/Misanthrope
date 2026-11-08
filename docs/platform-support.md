@@ -12,6 +12,7 @@ claim of tested application support. No runtime or sandbox backend exists yet.
 | Rust edition and minimum version | To be selected with the first Cargo workspace |
 | Pinned development toolchain | Not selected yet |
 | Webview and frontend prerequisites | To be selected with the desktop scaffold |
+| User-project toolchains | Required; native installed/managed profile matrix not yet qualified |
 | macOS | Outside the first-release target |
 
 ## Support requirements
@@ -30,6 +31,12 @@ claim of tested application support. No runtime or sandbox backend exists yet.
   cannot meet the contract. Do not silently change the execution environment.
 - Document filesystem, toolchain, privilege, kernel, and virtualization
   requirements when a backend is selected. Do not invent support claims now.
+- Qualify representative compiler/linker/SDK, interpreter, formatter, build, and
+  test workflows under the [toolchain contract](development-tools.md), including
+  a native Windows compiler/SDK profile. A discovered executable is not proof
+  that its dependencies and child programs work in confinement.
+- Verify subscription sign-in and usage under the
+  [authentication contract](provider-authentication.md) on both target systems.
 
 Read the [security rules](security-coding-rules.md) and
 [testing standards](testing-standards.md) for the acceptance requirements.

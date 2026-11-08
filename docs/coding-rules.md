@@ -16,6 +16,8 @@ not a claim that automated enforcement already exists.
   [security rules](security-coding-rules.md),
   [testing standards](testing-standards.md), and
   [platform targets](platform-support.md) as well.
+- Provider work must follow the [authentication contract](provider-authentication.md).
+  Runner and toolchain work must follow the [development-tool contract](development-tools.md).
 - Check provider and operating-system contracts against their official
   documentation. Another assistant's output or a passing test is not authority.
 - Document assumptions, limits, and failure behaviour. Do not claim that Rust's
@@ -174,6 +176,9 @@ not a claim that automated enforcement already exists.
 
 ## Toolchain, dependencies, and formatting
 
+- This section selects the toolchain for building Misanthrope itself.
+  User-project compilers, interpreters, and development tools have separate
+  scoped profiles defined in the development-tool contract.
 - When the first Cargo project is added, select a stable Rust edition and pin
   an exact toolchain in `rust-toolchain.toml`, including the rustfmt and Clippy
   components. Set the supported minimum version in `rust-version` and verify

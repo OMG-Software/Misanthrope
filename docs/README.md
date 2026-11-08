@@ -21,6 +21,8 @@ automated checks already exist.
 | [Security coding rules](security-coding-rules.md) | Permission, sandbox, credential, Git, and UI boundaries |
 | [Testing standards](testing-standards.md) | Test design, execution, and evidence requirements |
 | [Platform support](platform-support.md) | Windows/Linux targets and the evidence needed for support |
+| [Provider authentication](provider-authentication.md) | Required subscription/API profiles, provider evidence, and readiness gates |
+| [Development tools](development-tools.md) | Installed/managed toolchains, runtime grants, outputs, caches, and qualification |
 | [ADR register](adr/index.md) | Lasting decisions, alternatives, and consequences |
 | [Changelog](../CHANGELOG.md) | Changes awaiting release |
 
@@ -33,6 +35,8 @@ automated checks already exist.
 | A security property, permission, or trust boundary | Security coding rules and relevant tests |
 | A test convention or verification command | Testing standards |
 | A supported platform or prerequisite | Platform support |
+| Provider login, subscription entitlement, or billing | Provider authentication and security rules |
+| Tool discovery, runtime access, build environments, or caches | Development tools and platform support |
 | Product scope or the proposed architecture | Root README |
 | Project implementation status or module guidance | Root AGENTS.md and relevant directory guidance |
 | A lasting decision with a plausible alternative | New ADR and register entry |

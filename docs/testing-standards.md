@@ -58,6 +58,8 @@ As the relevant components are implemented, include:
 | Processes | Descendant escape attempts, limits, cleanup, startup failure |
 | Networking | Disabled egress, host-local access, redirects, provider routing |
 | Providers | Partial/malformed streams, duplicate calls, interruption, retries |
+| Authentication | Callback binding, consent, subscription entitlement, refresh, revocation, account/billing isolation |
+| Toolchains | Native compiler/SDK dependencies, interpreters, formatter/build/test flows, caches, helper processes, denied host access |
 | Git | Hostile config/hooks/helpers, metadata paths, changed push approvals |
 | Persistence | Partial operations, migration failure, recovery without replay |
 | Frontend | Untrusted rendering, IPC authorization, no secret disclosure |
@@ -66,6 +68,11 @@ As the relevant components are implemented, include:
 Use deterministic local provider mocks in normal tests. Live-provider tests must
 be explicit opt-in, use disposable data and a budget, and report which endpoint
 and model were tested. A mock pass is not a live-provider compatibility result.
+
+The [authentication contract](provider-authentication.md) adds subscription
+acceptance gates; the [toolchain contract](development-tools.md) defines real
+development workflows to qualify on each supported OS. Documentation checks
+cannot establish login entitlement or compiler compatibility.
 
 ## Cargo verification baseline
 

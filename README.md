@@ -14,6 +14,11 @@ permissions, Git workflows, terminals, and coding sessions into one interface.
 
 - **Multiple model providers:** OpenAI, Anthropic / Claude, Ollama Local,
   Ollama Cloud, and OpenRouter.
+- **Subscription authentication:** Required ChatGPT and Claude subscription
+  connections, alongside separate API-key connections. Provider eligibility
+  and approval remain implementation gates.
+- **Development tools:** Compilers, linkers, SDKs, formatters, linters, script
+  interpreters, build systems, package managers, and test tools.
 - **Permission settings:** Toggle switches for file access, command execution,
   background tasks, network access, and Git operations, with scoped approvals
   where required.
@@ -34,17 +39,22 @@ permissions, Git workflows, terminals, and coding sessions into one interface.
 
 ## Model providers
 
-| Provider | Planned connection |
+| Connection profile | Planned connection |
 | --- | --- |
-| OpenAI | Responses API |
-| Anthropic / Claude | Claude Messages API |
+| OpenAI API | Responses API with API-key authentication |
+| ChatGPT subscription | Provider-supported sign-in and ChatGPT plan usage |
+| Anthropic API | Claude Messages API with API-key authentication |
+| Claude subscription | Required subscription sign-in; provider approval and route unresolved |
 | Ollama Local | Local Ollama API |
 | Ollama Cloud | Authenticated cloud API |
 | OpenRouter | OpenRouter API with explicit upstream routing controls |
 
-Anthropic and Claude share one direct API integration: Anthropic provides access
-to Claude models. Integration with Claude Code or subscription authentication
-would require a separate design.
+API-key and subscription connections are distinct authentication and billing
+profiles. Subscription-backed usage for both ChatGPT and Claude is required for
+the first release. OpenAI documents a local/open-source integration; Anthropic
+currently requires approval for third-party subscription integration. See the
+[authentication requirements](docs/provider-authentication.md) for the evidence,
+open dependency, and acceptance checks.
 
 Provider support will depend on the capabilities of the selected model and
 endpoint. Tool calling, streaming, context limits, and usage reporting will remain
@@ -53,7 +63,8 @@ explicit rather than being assumed to work identically across providers.
 ## Proposed architecture
 
 - **Rust core:** Session management, agent execution, provider adapters,
-  permissions, file access, Git operations, and task supervision.
+  authentication, permissions, file access, toolchain profiles, Git operations,
+  and task supervision.
 - **Desktop interface:** Tauri with a bundled TypeScript web interface.
 - **Execution backends:** Separate Windows and Linux sandbox implementations.
 - **Local storage:** Persistent session records, settings, task results, and
@@ -63,6 +74,18 @@ explicit rather than being assumed to work identically across providers.
 
 The interface will use a limited command interface to the Rust core. Provider
 keys will stay out of frontend state, repository files, and task environments.
+
+## Development tools
+
+Misanthrope must work with projects in multiple languages. It will support
+user-selected installed tools and managed toolchain environments through a
+generic sandboxed runner. Tool profiles will include the required executable,
+runtime, library, and SDK resources, plus scoped writable build outputs, caches,
+and temporary space.
+
+Build scripts and all child programs remain subject to the effective sandbox.
+Toolchain access does not grant access to unrelated host data. See
+[development tools and toolchains](docs/development-tools.md).
 
 ## Permission and sandbox design
 
@@ -94,12 +117,13 @@ prevent every malicious instruction.
 ## Roadmap
 
 1. Define the threat model, workspace boundary, and permission contract.
-2. Prove Windows and Linux isolation, terminal operation, and process cleanup.
-3. Build the Rust core, desktop interface, and persistent session tree.
-4. Add provider adapters, streamed conversations, and validated tool calls.
-5. Add scoped file tools, sandboxed terminals, and background task management.
-6. Add mediated Git workflows, diff review, checkpoints, and crash recovery.
-7. Verify the full workflow on both platforms and prepare installers and
+2. Resolve subscription integration eligibility and validate both login/usage paths.
+3. Prove Windows/Linux isolation, representative toolchains, and process cleanup.
+4. Build the Rust core, desktop interface, and persistent session tree.
+5. Add provider adapters, streamed conversations, and validated tool calls.
+6. Add scoped file tools, sandboxed terminals, and background task management.
+7. Add mediated Git workflows, diff review, checkpoints, and crash recovery.
+8. Verify the full workflow on both platforms and prepare installers and
    documentation.
 
 ## Documentation
