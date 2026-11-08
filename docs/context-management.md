@@ -42,6 +42,11 @@ Compact older history while retaining recent exchanges and valid tool-call/resul
 pairs. Do not rewrite fixed instructions or drop pending user messages to fit.
 The original journal remains available under an explicit retention policy;
 compaction changes active context, not the recorded history.
+The [session storage contract](session-storage.md) defines that JSONL journal,
+archive state, and recovery. Compaction does not archive or delete a session.
+Selected memories retain their IDs, revisions, scope, and original source trust.
+Use the current [memory registry](memories.md) to resolve enabled entries after
+compaction; a summary cannot save, enable, or promote a memory.
 
 A compacted record must preserve:
 
@@ -96,6 +101,12 @@ manifest, and provider/account/model/settings where applicable. Conversation
 artifacts remain session-scoped. Reuse a pure content artifact across sessions
 only within the same permitted workspace and user. Do not share task context
 between workspaces, accounts, or users through a matching content hash alone.
+
+User-saved global memories have explicit cross-project eligibility under the
+[memory contract](memories.md). That eligibility does not share project artifacts
+or conversation caches. Include selected memory IDs/revisions/scopes in context
+cache keys and invalidate affected entries after memory edit, withdrawal, or
+scope/project changes.
 
 A hash establishes content identity, not authorization or source trust. Validate
 the current file object/version, permissions, and provenance before returning an
