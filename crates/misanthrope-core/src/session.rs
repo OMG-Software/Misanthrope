@@ -156,7 +156,7 @@ impl SessionJournal {
             .join(format!("{:04}", now.year()))
             .join(format!("{:02}", u8::from(now.month())))
             .join(format!("{:02}", now.day()));
-        fs::create_dir_all(&dir)?;
+        create_private_directories(&dir)?;
         let filename = format!(
             "misanthrope-{:02}-{:02}-{:02}-{:03}Z-{session_id}.jsonl",
             now.hour(),
@@ -165,11 +165,14 @@ impl SessionJournal {
             now.millisecond()
         );
         let path = dir.join(filename);
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(&path)?;
+        let mut create_options = OpenOptions::new();
+        create_options.read(true).write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            create_options.mode(0o600);
+        }
+        let mut file = create_options.open(&path)?;
         check_open_file(&path, &file)?;
         file.try_lock().map_err(map_lock_error)?;
 
@@ -185,7 +188,7 @@ impl SessionJournal {
             seq: 0,
             timestamp: format_timestamp(now)?,
             event_type: "session.started",
-            payload: started,
+            payload: &started,
         };
         let bytes = encode_event(&event)?;
         if let Err(error) = file.write_all(&bytes).and_then(|()| file.sync_all()) {
@@ -549,7 +552,8 @@ struct ManifestPayload {
     manifest: RequestManifest,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct EmptyPayload {}
 
 fn validate_title(title: &str) -> Result<(), SessionError> {
@@ -956,12 +960,26 @@ fn check_link_count(metadata: &fs::Metadata) -> Result<(), SessionError> {
     Ok(())
 }
 
-fn map_lock_error(error: io::Error) -> SessionError {
-    if error.kind() == io::ErrorKind::WouldBlock {
-        SessionError::Busy
-    } else {
-        SessionError::Io(error)
+fn map_lock_error(error: std::fs::TryLockError) -> SessionError {
+    match error {
+        std::fs::TryLockError::WouldBlock => SessionError::Busy,
+        std::fs::TryLockError::Error(error) => SessionError::Io(error),
     }
+}
+
+fn create_private_directories(path: &Path) -> Result<(), SessionError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true).mode(0o700);
+        builder.create(path)?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(path)?;
+    }
+    Ok(())
 }
 
 fn sync_parent_directory(directory: &Path) -> Result<(), SessionError> {
