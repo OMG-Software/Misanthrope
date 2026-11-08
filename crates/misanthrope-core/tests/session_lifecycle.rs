@@ -195,40 +195,65 @@ fn invalid_or_incomplete_journal_bytes_are_rejected_without_repair() {
 }
 
 #[test]
-fn duplicate_json_keys_and_non_user_roles_are_rejected() {
+fn malformed_schema_events_and_injected_roles_are_rejected_without_repair() {
     let (_temp, root, workspace) = setup();
     let journal = create(&root, &workspace);
     let path = journal.path().to_path_buf();
     let session_id = journal.snapshot().session_id;
     drop(journal);
-    let duplicate = format!(
-        "{{\"schema_version\":1,\"schema_version\":1,\"session_id\":\"{session_id}\",\"event_id\":\"{}\",\"seq\":1,\"timestamp\":\"2026-11-08T00:00:00Z\",\"type\":\"message.recorded\",\"payload\":{{\"role\":\"user\",\"text\":\"x\"}}}}\n",
+    let initial = fs::read(&path).expect("initial journal bytes");
+    let initial_event: serde_json::Value =
+        serde_json::from_slice(&initial[..initial.len() - 1]).expect("initial event");
+    let initial_event_id = initial_event["event_id"]
+        .as_str()
+        .expect("initial event UUID")
+        .to_owned();
+    let valid_message = |schema_version, event_id: String, seq, event_type, role| {
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version": schema_version,
+            "session_id": session_id,
+            "event_id": event_id,
+            "seq": seq,
+            "timestamp": "2026-11-08T00:00:00Z",
+            "type": event_type,
+            "payload": {"role": role, "source": "user_cli", "text": "x"}
+        }))
+        .expect("serialize candidate event")
+    };
+    let duplicate_key = format!(
+        "{{\"schema_version\":1,\"schema_version\":1,\"session_id\":\"{session_id}\",\"event_id\":\"{}\",\"seq\":1,\"timestamp\":\"2026-11-08T00:00:00Z\",\"type\":\"message.recorded\",\"payload\":{{\"role\":\"user\",\"source\":\"user_cli\",\"text\":\"x\"}}}}",
         Uuid::new_v4()
-    );
-    let mut bytes = fs::read(&path).expect("initial bytes");
-    bytes.extend_from_slice(duplicate.as_bytes());
-    fs::write(&path, &bytes).expect("write duplicate key");
-    assert!(matches!(
-        SessionJournal::open(&path),
-        Err(SessionError::InvalidJournal(_))
-    ));
+    )
+    .into_bytes();
+    let candidates = [
+        duplicate_key,
+        valid_message(
+            1,
+            Uuid::new_v4().to_string(),
+            1,
+            "message.recorded",
+            "system",
+        ),
+        valid_message(2, Uuid::new_v4().to_string(), 1, "message.recorded", "user"),
+        valid_message(1, Uuid::new_v4().to_string(), 1, "future.event", "user"),
+        valid_message(1, initial_event_id, 1, "message.recorded", "user"),
+        valid_message(1, Uuid::new_v4().to_string(), 2, "message.recorded", "user"),
+    ];
 
-    let mut bytes = fs::read(&path).expect("duplicate bytes");
-    bytes.truncate(
-        bytes
-            .iter()
-            .rposition(|byte| *byte == b'\n')
-            .expect("newline"),
-    );
-    bytes.extend_from_slice(format!(
-        "{{\"schema_version\":1,\"session_id\":\"{session_id}\",\"event_id\":\"{}\",\"seq\":1,\"timestamp\":\"2026-11-08T00:00:00Z\",\"type\":\"message.recorded\",\"payload\":{{\"role\":\"system\",\"source\":\"user_cli\",\"text\":\"x\"}}}}\n",
-        Uuid::new_v4()
-    ).as_bytes());
-    fs::write(&path, &bytes).expect("write injected role");
-    assert!(matches!(
-        SessionJournal::open(&path),
-        Err(SessionError::InvalidJournal(_))
-    ));
+    for line in candidates {
+        let mut candidate = initial.clone();
+        candidate.extend_from_slice(&line);
+        candidate.push(b'\n');
+        fs::write(&path, &candidate).expect("write malformed candidate");
+        assert!(matches!(
+            SessionJournal::open(&path),
+            Err(SessionError::InvalidJournal(_))
+        ));
+        assert_eq!(
+            fs::read(&path).expect("journal unchanged after rejected replay"),
+            candidate
+        );
+    }
 }
 
 #[test]
@@ -257,7 +282,18 @@ fn hard_linked_journal_handles_are_rejected() {
     let (_temp, root, workspace) = setup();
     let journal = create(&root, &workspace);
     let path = journal.path().to_path_buf();
-    let hardlink = path.with_file_name("hardlink.jsonl");
+    let session_id = journal.snapshot().session_id;
+    let file_name = path.file_name().expect("journal filename");
+    let alias_directory = root.join("hard-link-alias");
+    fs::create_dir(&alias_directory).expect("hard link alias directory");
+    let hardlink = alias_directory.join(file_name);
+    assert!(
+        hardlink
+            .file_name()
+            .expect("alias journal filename")
+            .to_string_lossy()
+            .contains(&session_id.to_string())
+    );
     drop(journal);
 
     fs::hard_link(&path, &hardlink).expect("create hard link");
@@ -279,7 +315,10 @@ fn symbolic_link_journal_paths_are_rejected() {
     let (_temp, root, workspace) = setup();
     let journal = create(&root, &workspace);
     let path = journal.path().to_path_buf();
-    let alias = path.with_file_name("alias.jsonl");
+    let file_name = path.file_name().expect("journal filename");
+    let alias_directory = root.join("symbolic-link-alias");
+    fs::create_dir(&alias_directory).expect("symlink alias directory");
+    let alias = alias_directory.join(file_name);
     drop(journal);
     symlink(&path, &alias).expect("create symlink");
     assert!(matches!(
