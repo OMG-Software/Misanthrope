@@ -64,11 +64,14 @@ As the relevant components are implemented, include:
 | Git | Hostile config/hooks/helpers, metadata paths, changed push approvals |
 | Persistence | Partial operations, migration failure, recovery without replay |
 | Frontend | Untrusted rendering, IPC authorization, no secret disclosure |
-| Sessions | Concurrent edits, separate worktrees, shared repository state |
-| Instructions | Visible prompt/serialized request match, scope ordering, revisions, safe rendering, no secret leakage |
+| Sessions | Concurrent edits/worktrees, JSONL naming/schema/durability, index rebuild, archive/restore, safe resume |
+| MCP | Version/transport compatibility, authorization, untrusted content, local confinement, OAuth/redirects, cancellation |
+| LM Studio | Model discovery, token/no-token profiles, streamed tools, context limits, unavailable models, no hosted-tool bypass |
+| Instructions | Compiled base/UI/request match, runtime replacement denial, role-injection attempts, preference/task precedence, revisions, safe rendering |
 | Compaction | Token thresholds and smaller limits, summary injection, concurrent steering, tool-pair integrity, bounded failure |
 | LLM caches | Content/policy/account isolation, revocation, stale/poisoned entries, quota/clear, no side-effect replay |
 | Skills | Package/link validation, scope overrides, disabled loading, script containment, live disable and context invalidation |
+| Memories | Explicit project/global choice, identity isolation, lifecycle, injection, stale facts, bounded retrieval, invalidation, no replay resurrection |
 
 Use deterministic local provider mocks in normal tests. Live-provider tests must
 be explicit opt-in, use disposable data and a budget, and report which endpoint
@@ -86,6 +89,15 @@ cached artifacts. A model refusing an attack is not proof that the core denied
 an unauthorized action. Inspect the actual execution and disclosure boundaries.
 Measure efficiency on useful tasks, including compaction/cache overhead and task
 correctness; do not infer savings from cache configuration alone.
+
+The [MCP](mcp.md) and [session storage](session-storage.md) guides add connection,
+archive, persistence, corruption, and recovery cases. Run real process/file tests
+on both platforms before claiming containment or durability. Parser/example
+checks are not those runtime tests. Qualify LM Studio's endpoint/model/auth mode
+separately; OpenAI compatibility is not proof of complete OpenAI API behaviour.
+The [memory contract](memories.md) adds scope/lifecycle cases. Check both allowed
+global reuse and denied project-memory disclosure; a successful retrieval alone
+does not establish correct scope or current factual accuracy.
 
 ## Cargo verification baseline
 

@@ -6,6 +6,18 @@ Changes are recorded here before a release version is assigned.
 
 ### Added
 
+- User-selected project/global memories with review, edit, delete, disable,
+  scoped retrieval, provenance, and context/cache invalidation requirements.
+- A memory-scope ADR and memory guidance in draft system prompt version 0.1.2.
+- A compiled, read-only base prompt contract with separate lower-priority user
+  customization and current-task input; draft prompt version 0.1.1.
+- MCP client requirements for stdio and Streamable HTTP, scoped server/tool
+  permissions, authentication, untrusted context, and supervised execution.
+- Session archive/restore and versioned JSONL journals in a UTC date tree, with
+  stable filenames, a rebuildable index, crash recovery, and no action replay.
+- LM Studio as a separate model connection with explicit endpoint, model,
+  authentication, and capability qualification.
+- MCP/session acceptance requirements and supporting architecture decisions.
 - Product priorities for secure operation, prompt injection defence, and efficiency.
 - A visible, versioned SYSTEM prompt draft and scoped custom-instruction design.
 - Configurable token-based auto-compaction, safe context budgets, provenance,

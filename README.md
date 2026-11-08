@@ -24,7 +24,7 @@ Security takes priority when an optimization would weaken these boundaries.
 ## Planned features
 
 - **Multiple model providers:** OpenAI, Anthropic / Claude, Ollama Local,
-  Ollama Cloud, and OpenRouter.
+  Ollama Cloud, OpenRouter, and LM Studio.
 - **Subscription authentication:** Required ChatGPT and Claude subscription
   connections, alongside separate API-key connections. Provider eligibility
   and approval remain implementation gates.
@@ -44,9 +44,16 @@ Security takes priority when an optimization would weaken these boundaries.
 - **Development panels:** Terminal tabs, background task status and logs, and
   file and hunk diffs.
 - **Persistent sessions:** New and resumable sessions in a tree grouped by
-  working folder, with search, sorting, and session status.
-- **Visible SYSTEM prompt:** Inspect the versioned base prompt and append custom
-  instructions at application, workspace, and session scope. See the
+  working folder, with search, sorting, and session status. Save versioned JSONL
+  journals at `sessions/<year>/<month>/<date>/misanthrope-<time>-<guid>.jsonl`.
+- **Session archives:** Archive and restore conversations without deleting or
+  moving their transcripts. See [session storage](docs/session-storage.md).
+- **MCP support:** Connect local stdio and remote Streamable HTTP servers for
+  tools, resources, and prompt templates through core-owned permissions. See
+  [MCP support](docs/mcp.md).
+- **Visible SYSTEM prompt:** Inspect a versioned base prompt compiled into the
+  Rust application and shown read-only. Add separate user preferences at
+  application, workspace, and session scope. See the
   [initial prompt draft](prompts/system.md) and [instruction design](docs/agent-instructions.md).
 - **Automatic compaction:** Configure a trigger in tokens; 200k means 200,000
   tokens. Show any earlier trigger required by the selected model's safe budget.
@@ -54,6 +61,9 @@ Security takes priority when an optimization would weaken these boundaries.
   with scoped storage, invalidation, usage reporting, and clear controls.
 - **Skills settings:** Add, remove, enable, and disable versioned skill packages.
   Skills use the same permission policy and controlled tools as other work.
+- **Project and global memories:** Save reusable facts or preferences with an
+  explicit This project or Global choice. Review, edit, delete, or disable
+  entries and control their use in each session. See [memories](docs/memories.md).
 - **Change review and recovery:** Session change tracking, checkpoints, and
   worktrees to help review and recover changes.
 
@@ -68,6 +78,7 @@ Security takes priority when an optimization would weaken these boundaries.
 | Ollama Local | Local Ollama API |
 | Ollama Cloud | Authenticated cloud API |
 | OpenRouter | OpenRouter API with explicit upstream routing controls |
+| LM Studio | Configured local OpenAI-compatible API, with server-token authentication where enabled |
 
 API-key and subscription connections are distinct authentication and billing
 profiles. Subscription-backed usage for both ChatGPT and Claude is required for
@@ -84,11 +95,13 @@ explicit rather than being assumed to work identically across providers.
 
 - **Rust core:** Session management, agent execution, provider adapters,
   authentication, permissions, file access, toolchain profiles, Git operations,
-  task supervision, prompt assembly, context management, caching, and skills.
+  task supervision, prompt assembly, context management, caching, skills, MCP,
+  and scoped memories.
 - **Desktop interface:** Tauri with a bundled TypeScript web interface.
 - **Execution backends:** Separate Windows and Linux sandbox implementations.
-- **Local storage:** Persistent session records, settings, task results, and
-  change history.
+- **Local storage:** Versioned JSONL session journals, archive/restore events,
+  a rebuildable folder/search index, settings, scoped memories, and referenced
+  task artifacts.
 - **Credential handling:** Operating-system credential storage, accessed through
   narrow services in the Rust core.
 
@@ -124,9 +137,9 @@ access. The sandbox will not automatically expose the user's home directory,
 credentials, or unrelated projects. If required isolation is unavailable,
 affected operations will be refused.
 
-Model connections, Git connections, and general task networking will have
-separate controls. Sending source context to a cloud model is a data transfer
-even when terminal networking is disabled. A local Ollama endpoint can also route
+Model connections, Git connections, MCP connections, and general task networking
+will have separate controls. Sending source context to a cloud model is a data
+transfer even when terminal networking is disabled. A local Ollama endpoint can also route
 requests to cloud models, so local and cloud execution must remain distinct.
 
 Prompt injection can still cause harmful actions within permissions the user
@@ -134,8 +147,8 @@ grants. Write access permits damage inside that writable workspace. The design
 aims to contain access and provide review and recovery; it does not promise to
 prevent every malicious instruction.
 
-Prompts, custom instructions, skills, summaries, and cached artifacts cannot
-grant permissions. See [context management](docs/context-management.md) and
+Prompts, custom instructions, memories, skills, summaries, and cached artifacts
+cannot grant permissions. See [context management](docs/context-management.md) and
 [skills](docs/skills.md) for their trust boundaries and acceptance requirements.
 
 ## Roadmap
@@ -143,11 +156,12 @@ grant permissions. See [context management](docs/context-management.md) and
 1. Define the threat model, workspace boundary, and permission contract.
 2. Resolve subscription integration eligibility and validate both login/usage paths.
 3. Prove Windows/Linux isolation, representative toolchains, and process cleanup.
-4. Build the Rust core, desktop interface, and persistent session tree.
+4. Build the Rust core, desktop interface, JSONL persistence, session tree, and
+   archive/restore flow with crash recovery.
 5. Add provider adapters, streamed conversations, and validated tool calls.
-6. Add visible instructions, token accounting, compaction, safe caching, and
-   skills settings with their boundary tests and efficiency measurements.
-7. Add scoped file tools, sandboxed terminals, and background task management.
+6. Add visible instructions, token accounting, compaction, safe caching, skills,
+   and project/global memories with boundary tests and efficiency measurements.
+7. Add scoped file tools, sandboxed terminals, background tasks, and MCP clients.
 8. Add mediated Git workflows, diff review, checkpoints, and crash recovery.
 9. Verify the full workflow on both platforms and prepare installers and
    documentation.

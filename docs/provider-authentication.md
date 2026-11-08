@@ -20,6 +20,7 @@ do not silently replace it with API billing or defer it.
 | Ollama Local | Local service configuration; authentication where configured | Existing local-provider plan |
 | Ollama Cloud | Provider cloud credentials | Existing cloud-provider plan |
 | OpenRouter | User API key and explicit upstream routing | Existing routing plan |
+| LM Studio | Explicit local server profile; LM Studio API token when required | Required; endpoint/model/auth qualification pending |
 
 The provider, authentication method, account/workspace, billing mode, and model
 capabilities form one connection profile. Do not infer all of these from a
@@ -73,6 +74,51 @@ evidence of that approval. Keep the requirement open and the blocker visible;
 a separately billed Anthropic API connection remains a different profile.
 
 ## Settings and account lifecycle
+
+### LM Studio connection requirements
+
+LM Studio documents OpenAI-compatible model, Chat Completions, and Responses
+endpoints. It also supports API tokens, with server authentication disabled by
+default in the current documentation. Use a distinct LM Studio connection
+profile; do not send an OpenAI API key or ChatGPT subscription token to it.
+[API compatibility](https://lmstudio.ai/docs/developer/openai-compat),
+[server authentication](https://lmstudio.ai/docs/developer/core/authentication)
+
+Provide an explicit server URL, model selection/discovery, endpoint mode,
+connection test, and token configuration. Suggest loopback
+http://localhost:1234/v1 as an editable starting address, not as proof of a running
+server. Allow a no-token profile only for the explicitly selected local service.
+If authentication is enabled, use its scoped LM Studio token through the
+credential service. A separately selected non-loopback service requires
+authenticated HTTPS; never silently redirect requests or credentials.
+
+Qualify Chat Completions and Responses independently for the chosen server
+version and model. Reuse wire-format code only where its contract matches.
+Model IDs, chat templates, token accounting, context limits, streaming, structured
+output, and tool-call reliability are not established by the OpenAI-compatible
+label. Resolve the loaded model's safe context budget or require a validated
+profile. Malformed tool-like text remains text; do not execute it heuristically.
+[Tool use](https://lmstudio.ai/docs/developer/openai-compat/tools)
+
+Keep local session history and portable compaction in Misanthrope. Do not assume
+that provider-native caching, state, or compaction has the OpenAI API contract.
+Do not submit provider-managed Remote MCP or hosted execution tools through this
+profile. Route MCP through the [core-owned clients](mcp.md); a provider's own tool
+execution could bypass those controls.
+[LM Studio Responses features](https://lmstudio.ai/docs/developer/openai-compat/responses)
+
+Starting the service, changing its settings, downloading models, or installing
+software are separate explicit operations. Connecting for inference does not
+authorize them. If the selected service loads an already installed model on
+demand, describe that as part of the selected inference profile and qualify its
+resource limits. This grants no general model-management authority.
+
+Test model discovery, absent/unloaded models, token and no-token modes,
+authentication failure, streaming/cancellation, validated tool calls, changed
+context limits, and absence of unexpected cloud fallback on both supported
+platforms. No LM Studio runtime checks have run yet.
+
+### Shared settings and lifecycle
 
 - Provide separate subscription and API-key connection choices for OpenAI and
   Anthropic/Claude. Identify the account, workspace where applicable, selected

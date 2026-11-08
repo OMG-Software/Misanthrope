@@ -27,6 +27,9 @@ automated checks already exist.
 | [System prompt draft](../prompts/system.md) | Versioned initial base instructions for the coding assistant |
 | [Context management](context-management.md) | Token-based compaction, cache classes, invalidation, and efficiency measures |
 | [Skills](skills.md) | Settings, package validation, enablement, loading, and controlled scripts |
+| [MCP support](mcp.md) | Server connections, transports, credentials, capabilities, and tool authorization |
+| [Session storage](session-storage.md) | JSONL layout/schema, durable journals, archive/restore, and safe resume |
+| [Memories](memories.md) | User-selected project/global scope, management, retrieval, and lifecycle |
 | [Repository checks](repository-checks.md) | CodeRabbit, CodeQL, Sonar, credentials, and main protection |
 | [ADR register](adr/index.md) | Lasting decisions, alternatives, and consequences |
 | [Changelog](../CHANGELOG.md) | Changes awaiting release |
@@ -46,6 +49,9 @@ automated checks already exist.
 | Prompt text, user additions, or instruction assembly | Agent instructions, prompt draft, and security rules |
 | Model context, compaction, or LLM artifact caching | Context management, security rules, and testing standards |
 | Skills, imports, enablement, or skill resources | Skills, agent instructions, and relevant security/testing guidance |
+| MCP connections, tools, resources, prompts, or client capabilities | MCP, security rules, and testing standards |
+| Session format, persistence, archives, restore, or resume | Session storage, security rules, and testing standards |
+| Memory saving, scope, retrieval, deletion, or reuse | Memories, agent instructions, context management, and security/testing guidance |
 | Product scope or the proposed architecture | Root README |
 | Project implementation status or module guidance | Root AGENTS.md and relevant directory guidance |
 | A lasting decision with a plausible alternative | New ADR and register entry |

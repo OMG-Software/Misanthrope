@@ -25,6 +25,10 @@ and verify them using the [testing standards](testing-standards.md).
 - Follow the [instruction](agent-instructions.md), [context](context-management.md),
   and [skills](skills.md) contracts. Keep policy and operation state outside
   generated text. Never deserialize a model summary into an approval or grant.
+- Compile the visible base prompt into the application. Do not accept runtime
+  replacements or promote editable preferences into the base's instruction
+  channel. Prompt priority guides the model; core authorization must still deny
+  unauthorized actions even when model instruction following fails.
 - Preserve source trust when transforming content. Repository/skill/tool text
   must not become a trusted user addition through summarization or cache reuse.
 - Validate current access before using cached data. Content hashes and TTLs do
@@ -40,6 +44,10 @@ and verify them using the [testing standards](testing-standards.md).
   new dependent work and observe cleanup of attributed tasks before completion.
 - Do not replay cached model tool calls or infer a fresh verification from an
   old result. Reconcile ambiguous side effects against core-owned records.
+- Follow the [memory contract](memories.md). Only the trusted user flow can save
+  or broaden a memory's scope. Project IDs, source trust, current revisions, and
+  per-user protections govern retrieval. Memories cannot alter permissions.
+  Withdrawal invalidates dependent context; old journals cannot recreate entries.
 
 ## Filesystem boundary
 
@@ -102,6 +110,20 @@ and verify them using the [testing standards](testing-standards.md).
 - Parse malformed, oversized, interrupted, and unsupported provider responses as
   controlled failures. Model-supplied claims of success are not execution results.
 
+## MCP boundary
+
+- Follow the [MCP contract](mcp.md). Core-owned clients must authorize calls
+  independently of model requests, server metadata, annotations, and prompts.
+- Launch local servers through the same confined runner as development tools.
+  SDK defaults must not create an unrestricted process or inherit host secrets.
+- Give remote MCP traffic its own explicit destination/account/tool scopes.
+  Treat authorization discovery URLs, redirects, tool headers, resources, and
+  results as untrusted. Do not pass unrelated tokens to servers.
+- Expose only implemented client capabilities. Server-requested input or work
+  cannot silently grant consent, model usage, host access, or UI privileges.
+- Revoke affected calls/grants on disable and observe local cleanup. Preserve
+  uncertain remote outcomes; disconnection is not evidence of rollback.
+
 ## Git and credentials
 
 - Treat Git configuration, hooks, filters, helpers, external diff/merge commands,
@@ -156,6 +178,11 @@ and verify them using the [testing standards](testing-standards.md).
   transaction and migration integrity during failure and restart.
 - Store tool lifecycle and authorization records outside the task's writable
   view. An interrupted operation must remain visibly incomplete until reconciled.
+- Follow [session storage](session-storage.md) for core-owned JSONL journals,
+  single-writer durability, bounded parsing, recovery, and archive transitions.
+  Keep journals/indexes/artifacts outside task access and redact known secrets
+  before persistence. Historical grants or transcript role labels cannot confer
+  current authority. Never execute recorded tool calls during replay or restore.
 - Review dependency updates, build scripts, procedural macros, frontend packages,
   and update mechanisms as executable supply-chain inputs.
 - Explain the threat, failure behaviour, and tests for changes to these

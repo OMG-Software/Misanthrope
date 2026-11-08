@@ -37,6 +37,11 @@ claim of tested application support. No runtime or sandbox backend exists yet.
   that its dependencies and child programs work in confinement.
 - Verify subscription sign-in and usage under the
   [authentication contract](provider-authentication.md) on both target systems.
+- Qualify LM Studio model connections and both MCP transports on Windows/Linux.
+  Verify local server confinement, credential separation, and cleanup.
+- Verify [session storage](session-storage.md) on supported filesystems: per-user
+  protection, native filename/path handling, exclusive ownership, durable append,
+  interrupted-write recovery, and archive/restore across restart.
 
 Read the [security rules](security-coding-rules.md) and
 [testing standards](testing-standards.md) for the acceptance requirements.

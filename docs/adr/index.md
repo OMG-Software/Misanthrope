@@ -20,3 +20,7 @@ meaningful alternative does not need an ADR.
 | [0003: Use scoped development toolchain profiles](0003-use-scoped-development-toolchain-profiles.md) | Accepted | 2026-11-08 |
 | [0004: Require pull requests and repository analysis](0004-require-pull-requests-and-repository-analysis.md) | Accepted | 2026-11-08 |
 | [0005: Keep agent context subordinate to runtime policy](0005-keep-agent-context-subordinate-to-runtime-policy.md) | Accepted | 2026-11-08 |
+| [0006: Mediate MCP through core-owned clients](0006-mediate-mcp-through-core-owned-clients.md) | Accepted | 2026-11-08 |
+| [0007: Store session journals as dated JSONL](0007-store-session-journals-as-dated-jsonl.md) | Accepted | 2026-11-08 |
+| [0008: Compile the base prompt and separate user preferences](0008-compile-the-base-prompt-and-separate-user-preferences.md) | Accepted | 2026-11-08 |
+| [0009: Require user-selected project and global memories](0009-require-user-selected-project-and-global-memories.md) | Accepted | 2026-11-08 |

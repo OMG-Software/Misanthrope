@@ -21,6 +21,10 @@ not a claim that automated enforcement already exists.
 - Prompt assembly must follow the [instruction contract](agent-instructions.md).
   Follow [context management](context-management.md) for compaction/caching and
   the [skills contract](skills.md) for skill packages and lifecycle.
+- Follow the [MCP contract](mcp.md) for external tool connections and the
+  [session storage contract](session-storage.md) for JSONL journals and archives.
+- Follow the [memory contract](memories.md) for saved context and project/global
+  scope. Memory retrieval must not change permissions or elevate source trust.
 - Check provider and operating-system contracts against their official
   documentation. Another assistant's output or a passing test is not authority.
 - Document assumptions, limits, and failure behaviour. Do not claim that Rust's
