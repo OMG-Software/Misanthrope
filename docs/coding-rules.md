@@ -5,8 +5,9 @@ and project tooling. Workflow requirements also cover documentation.
 **Must** means required. **Prefer** defines the default; explain a departure
 where the choice can be reviewed.
 
-The project has no implementation yet. These are contribution requirements,
-not a claim that automated enforcement already exists.
+The repository has an early Rust CLI/core prototype. These are contribution
+requirements. The existence of a prototype or passing checks does not establish
+that planned security controls or release requirements are complete.
 
 ## Authority and scope
 
@@ -186,10 +187,9 @@ not a claim that automated enforcement already exists.
 - This section selects the toolchain for building Misanthrope itself.
   User-project compilers, interpreters, and development tools have separate
   scoped profiles defined in the development-tool contract.
-- When the first Cargo project is added, select a stable Rust edition and pin
-  an exact toolchain in `rust-toolchain.toml`, including the rustfmt and Clippy
-  components. Set the supported minimum version in `rust-version` and verify
-  that claim separately where it differs.
+- The workspace uses Rust edition 2024 and pins Rust 1.99.1 in
+  `rust-toolchain.toml`, with rustfmt and Clippy. The workspace package sets
+  `rust-version = "1.99.1"`. Recheck this claim if either value changes.
 - Use the pinned toolchain's default rustfmt style. Put any agreed exceptions
   in a reviewed configuration; do not copy C++ formatting or include-order rules.
 - Commit `Cargo.lock` for this application and use locked resolution in normal
@@ -228,11 +228,14 @@ not a claim that automated enforcement already exists.
 ## Enforcement and verification limits
 
 The [repository-checks guide](repository-checks.md) defines review and analysis.
-No Cargo manifest, application tests, or frontend tooling exists yet.
-When implementation begins, configure and run the checks in the testing
-guide and record what each one actually covers. Rustfmt checks formatting;
-Clippy and the compiler check selected properties; tests check exercised cases.
-None establishes prompt-injection resistance or sandbox correctness by itself.
+The Cargo workspace contains `misanthrope-core`, `misanthrope-cli`, and
+`misanthrope-platform`; `.github/workflows/rust.yml` runs formatting, Clippy,
+tests, and doc tests on Ubuntu 24.04 and Windows Server 2025. The frontend and
+execution sandbox are not implemented. Rustfmt checks formatting; Clippy and
+the compiler check selected properties; tests check exercised cases. None
+establishes prompt-injection resistance or sandbox correctness by itself. See
+[testing standards](testing-standards.md) and
+[development instructions](development.md) for current commands and limits.
 
 ## Adaptation and references
 

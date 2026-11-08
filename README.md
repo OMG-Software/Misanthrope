@@ -1,14 +1,17 @@
 # Misanthrope
 
-**A Rust-based coding assistant harness for Windows and Linux.**
+**A Rust coding-assistant prototype for Windows and Linux.**
 
-Misanthrope is a planned desktop application that connects language models to
-controlled development tools. It will bring model connections, workspace
-permissions, Git workflows, terminals, and coding sessions into one interface.
+Misanthrope aims to connect language models to controlled development tools.
+The current code is an early Rust core and command-line prototype. A desktop
+interface, workspace tools, Git workflows, and an execution sandbox remain
+planned.
 
-> **Status: planning and pre-implementation.** This repository currently contains
-> the initial project files. The features below are planned. There is no runnable
-> application, build procedure, or verified sandbox implementation yet.
+> **Status: early prototype, not release-ready.** The Rust CLI can inspect the
+> compiled prompt, report implemented capabilities, manage JSONL sessions, and
+> send one non-streaming chat request to an explicitly selected local LM Studio
+> model. It cannot read or edit workspace files or run commands. No execution
+> sandbox is implemented.
 
 ## Goals
 
@@ -21,10 +24,65 @@ permissions, Git workflows, terminals, and coding sessions into one interface.
 
 Security takes priority when an optimization would weaken these boundaries.
 
+## Current prototype
+
+The workspace contains three Rust crates: `misanthrope-core`, `misanthrope-cli`,
+and `misanthrope-platform`. The CLI command is `misanthrope`. It provides:
+
+- `prompt`: print the compiled, read-only base prompt, version, and SHA-256 digest.
+- `capabilities`: report what this prototype implements and rejects.
+- `session`: create, inspect, archive, restore, and explicitly interrupt an
+  abandoned turn in a JSONL journal.
+- `chat`: send one user turn to an already-running LM Studio server at a literal
+  loopback HTTP endpoint. It does not discover, start, or download models, and it
+  rejects model tool requests. The chat path does not read workspace files.
+
+Prompt assembly sends the compiled base in the system role. Optional user
+preferences and conversation history remain user or assistant messages. The
+CLI can record a chat turn and its request manifest in a JSONL journal. It
+refuses to chat with an archived session or one with an incomplete prior turn;
+it does not replay recorded actions. An abandoned turn must be inspected and
+marked interrupted before chat can continue.
+
+The platform crate checks an already-open journal handle for file type and link
+properties. This narrow check does not protect parent paths or contain a
+process. The planned filesystem, process, network, Git, MCP, memory, and tool
+permission controls are not implemented. See the
+[development guide](docs/development.md) for setup and command details.
+
+The current CLI has no operating-system credential service. Its optional local
+server token input remains prototype wiring; it is not a release credential
+boundary. Do not treat the prototype as release-ready or use it to handle
+sensitive credentials.
+
+To build and run the prototype with the pinned Rust toolchain:
+
+```sh
+cargo build --workspace --locked
+cargo run --locked -p misanthrope-cli -- capabilities
+cargo run --locked -p misanthrope-cli -- prompt
+```
+
+To send a test request, start LM Studio and load a model yourself. Replace
+YOUR_MODEL_ID with that model's ID and CONTEXT_TOKENS with its validated numeric
+context capacity before running this command:
+
+```sh
+cargo run --locked -p misanthrope-cli -- chat --workspace . --model "YOUR_MODEL_ID" --context-tokens CONTEXT_TOKENS "Say hello in one sentence."
+```
+
+The endpoint defaults to `http://127.0.0.1:1234/v1`. The required context value
+must come from the selected model's validated profile. The adapter uses a
+conservative byte-based estimate; it is not the model tokenizer. The example
+sends only the supplied message and saved chat history, not the workspace files.
+The loopback connection does not establish how LM Studio handles data upstream;
+check the server's configuration before sending sensitive text.
+
 ## Planned features
 
-- **Multiple model providers:** OpenAI, Anthropic / Claude, Ollama Local,
-  Ollama Cloud, OpenRouter, and LM Studio.
+- **Additional model providers:** OpenAI, Anthropic / Claude, Ollama Local,
+  Ollama Cloud, and OpenRouter. One bounded LM Studio chat path exists in the
+  prototype; its compatibility and security are not release-qualified.
 - **Subscription authentication:** Required ChatGPT and Claude subscription
   connections, alongside separate API-key connections. Provider eligibility
   and approval remain implementation gates.
@@ -43,17 +101,16 @@ Security takes priority when an optimization would weaken these boundaries.
   pull, and push, with controlled remote access and credential handling.
 - **Development panels:** Terminal tabs, background task status and logs, and
   file and hunk diffs.
-- **Persistent sessions:** New and resumable sessions in a tree grouped by
-  working folder, with search, sorting, and session status. Save versioned JSONL
-  journals at `sessions/<year>/<month>/<date>/misanthrope-<time>-<guid>.jsonl`.
-- **Session archives:** Archive and restore conversations without deleting or
-  moving their transcripts. See [session storage](docs/session-storage.md).
+- **Session interface:** A searchable desktop session tree grouped by working
+  folder, with sorting and status. The current CLI stores versioned JSONL
+  journals and supports inspect, archive, and restore.
 - **MCP support:** Connect local stdio and remote Streamable HTTP servers for
   tools, resources, and prompt templates through core-owned permissions. See
   [MCP support](docs/mcp.md).
-- **Visible SYSTEM prompt:** Inspect a versioned base prompt compiled into the
+- **Prompt settings UI:** Inspect the versioned base prompt compiled into the
   Rust application and shown read-only. Add separate user preferences at
-  application, workspace, and session scope. See the
+  application, workspace, and session scope. The CLI can print the compiled
+  prompt; the settings interface is not implemented. See the
   [initial prompt draft](prompts/system.md) and [instruction design](docs/agent-instructions.md).
 - **Automatic compaction:** Configure a trigger in tokens; 200k means 200,000
   tokens. Show any earlier trigger required by the selected model's safe budget.
@@ -69,16 +126,16 @@ Security takes priority when an optimization would weaken these boundaries.
 
 ## Model providers
 
-| Connection profile | Planned connection |
+| Connection profile | Current state |
 | --- | --- |
-| OpenAI API | Responses API with API-key authentication |
-| ChatGPT subscription | Provider-supported sign-in and ChatGPT plan usage |
-| Anthropic API | Claude Messages API with API-key authentication |
-| Claude subscription | Required subscription sign-in; provider approval and route unresolved |
-| Ollama Local | Local Ollama API |
-| Ollama Cloud | Authenticated cloud API |
-| OpenRouter | OpenRouter API with explicit upstream routing controls |
-| LM Studio | Configured local OpenAI-compatible API, with server-token authentication where enabled |
+| OpenAI API | Planned: Responses API with API-key authentication |
+| ChatGPT subscription | Planned: provider-supported sign-in and ChatGPT plan usage |
+| Anthropic API | Planned: Claude Messages API with API-key authentication |
+| Claude subscription | Required; provider approval and route remain unresolved |
+| Ollama Local | Planned: local Ollama API |
+| Ollama Cloud | Planned: authenticated cloud API |
+| OpenRouter | Planned: explicit upstream routing controls |
+| LM Studio | Prototype: bounded Chat Completions over literal loopback HTTP; model discovery, streaming, and release authentication remain unqualified |
 
 API-key and subscription connections are distinct authentication and billing
 profiles. Subscription-backed usage for both ChatGPT and Claude is required for
@@ -156,9 +213,9 @@ cannot grant permissions. See [context management](docs/context-management.md) a
 1. Define the threat model, workspace boundary, and permission contract.
 2. Resolve subscription integration eligibility and validate both login/usage paths.
 3. Prove Windows/Linux isolation, representative toolchains, and process cleanup.
-4. Build the Rust core, desktop interface, JSONL persistence, session tree, and
-   archive/restore flow with crash recovery.
-5. Add provider adapters, streamed conversations, and validated tool calls.
+4. Extend the Rust core and build the desktop interface, session tree, and
+   remaining persistence and recovery workflows.
+5. Expand provider adapters and add streaming and core-authorized tool workflows.
 6. Add visible instructions, token accounting, compaction, safe caching, skills,
    and project/global memories with boundary tests and efficiency measurements.
 7. Add scoped file tools, sandboxed terminals, background tasks, and MCP clients.
@@ -174,12 +231,12 @@ work.
 
 ## Contributing
 
-The project is in its planning stage. Use
+The project is in its early prototype stage. Use
 [GitHub Issues](https://github.com/OMG-Software/Misanthrope/issues) to discuss
 requirements, design proposals, and gaps in the plan.
 
-Build instructions will be added when implementation begins. See the
-[contributor guidance](AGENTS.md) for the current workflow.
+See the [development guide](docs/development.md) for the current prototype
+commands. Also read the [contributor guidance](AGENTS.md) before making changes.
 
 ## Repository checks
 

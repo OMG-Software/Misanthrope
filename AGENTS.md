@@ -2,12 +2,16 @@
 
 ## Project
 
-Misanthrope is a planned coding-assistant harness for Windows and Linux.
-The intended design has a Rust core and a bundled web interface. This repository
-does not yet contain an application, Cargo workspace, or application test suite.
+Misanthrope is an early coding-assistant prototype for Windows and Linux. The
+repository now contains a pinned Rust workspace with a core, a developer CLI,
+and narrow native journal-handle checks. The prototype is not a desktop app and
+does not provide workspace tools, process execution, or an execution sandbox.
+The bundled web interface and most planned features are not implemented.
 Repository review and analysis are defined in
 [docs/repository-checks.md](docs/repository-checks.md).
-Do not describe proposed features or security controls as implemented.
+Do not describe planned features or security controls as implemented. Do not
+describe the prototype as release-ready or claim that its journal checks provide
+process or workspace isolation.
 
 Product priorities are secure operation, prompt injection defence, and efficiency.
 Follow the owning [instruction](docs/agent-instructions.md),

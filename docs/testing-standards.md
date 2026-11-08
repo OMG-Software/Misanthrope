@@ -5,13 +5,19 @@ Use these standards with the [coding rules](coding-rules.md) and
 
 ## Current state
 
-There is no Cargo manifest, frontend project, or application test suite yet.
-[Repository review and analysis](repository-checks.md) have separate workflows.
-The Cargo commands below define the baseline to introduce with implementation;
-they are not current working installation or verification instructions.
+The pinned Cargo workspace has three crates: `misanthrope-core`,
+`misanthrope-cli`, and `misanthrope-platform`. It includes deterministic core,
+CLI, and platform tests. The desktop interface, development-tool runner, and
+execution sandbox are not implemented. [Repository review and analysis](repository-checks.md)
+have separate workflows.
 
-Documentation-only changes need documentation checks, not an invented Rust
-project or a claimed application test run.
+Use the locked Cargo commands below. They are also configured in
+`.github/workflows/rust.yml` for Ubuntu 24.04 and Windows Server 2025. A CI
+matrix or passing test suite does not establish release support or sandbox
+containment.
+
+Documentation-only changes need documentation checks. Do not report application
+tests for documentation-only work.
 
 ## Behaviour and regression tests
 
@@ -77,6 +83,14 @@ Use deterministic local provider mocks in normal tests. Live-provider tests must
 be explicit opt-in, use disposable data and a budget, and report which endpoint
 and model were tested. A mock pass is not a live-provider compatibility result.
 
+The current LM Studio adapter tests use a local HTTP fixture. They do not call a
+live model. The adapter supports one non-streaming Chat Completions request,
+rejects tool requests, requires the compiled base prompt, and accepts only a
+literal loopback HTTP endpoint. Model discovery, streaming, cancellation, and
+live model compatibility remain future qualification work. The CLI can inspect
+and archive sessions, but it does not execute recorded tool actions or resume
+an incomplete turn.
+
 The [authentication contract](provider-authentication.md) adds subscription
 acceptance gates; the [toolchain contract](development-tools.md) defines real
 development workflows to qualify on each supported OS. Documentation checks
@@ -101,8 +115,7 @@ does not establish correct scope or current factual accuracy.
 
 ## Cargo verification baseline
 
-After a Cargo workspace, toolchain pin with rustfmt and Clippy components, and
-lockfile exist, run from its root:
+The workspace pins Rust 1.99.1 and commits `Cargo.lock`. Run from its root:
 
 ```text
 cargo fmt --all -- --check
@@ -126,8 +139,8 @@ form unsupported combinations. Explicitly document any excluded combination and
 its reason. Test a claimed minimum Rust version separately when it differs from
 the pinned development toolchain.
 
-When frontend and documentation-build tooling exists, add its actual type,
-lint, rendering, and link checks here. Do not report nonexistent gates as active.
+The frontend does not exist. Add its actual type, lint, rendering, and link
+checks here when it is introduced. Do not report nonexistent gates as active.
 
 ## Evidence and completion
 

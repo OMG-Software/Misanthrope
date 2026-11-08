@@ -1,17 +1,19 @@
 # Platform support
 
-## Intended first release
+## Prototype and intended first release
 
 Windows and Linux are first-release targets. This is a target statement, not a
-claim of tested application support. No runtime or sandbox backend exists yet.
+claim of tested application or sandbox support. A Rust prototype exists. The
+platform crate validates already-open journal handles; it does not implement an
+execution sandbox or authorize workspace access.
 
 | Item | Current position |
 | --- | --- |
-| Windows versions and architectures | To be selected after native sandbox/toolchain prototypes |
-| Linux distributions, kernels, and architectures | To be selected after isolation-capability prototypes |
-| Rust edition and minimum version | To be selected with the first Cargo workspace |
-| Pinned development toolchain | Not selected yet |
-| Webview and frontend prerequisites | To be selected with the desktop scaffold |
+| Windows versions and architectures | CI uses Windows Server 2025; supported client versions and architectures are not selected |
+| Linux distributions, kernels, and architectures | CI uses Ubuntu 24.04; supported distributions, kernels, and architectures are not selected |
+| Rust edition and minimum version | Edition 2024; workspace `rust-version` is 1.99.1 |
+| Pinned development toolchain | Rust 1.99.1 in `rust-toolchain.toml`, with rustfmt and Clippy |
+| Webview and frontend prerequisites | Not selected; no desktop frontend exists |
 | User-project toolchains | Required; native installed/managed profile matrix not yet qualified |
 | macOS | Outside the first-release target |
 
@@ -25,6 +27,14 @@ claim of tested application support. No runtime or sandbox backend exists yet.
   actual target OS. A successful cross-build is insufficient.
 - Keep platform implementations behind narrow Rust interfaces. Preserve the
   same policy meaning across backends; report unavailable capabilities clearly.
+- The current `misanthrope-platform` crate checks an already-open journal file
+  handle for regular-file status, reparse-point status on Windows, and a single
+  hard link. Its Windows implementation borrows the handle for
+  `GetFileInformationByHandle`; it does not close or transfer the handle. These
+  checks do not secure parent paths, prevent all races, or contain processes.
+- The core and CLI crates forbid unsafe Rust. The platform crate keeps its
+  Windows FFI call in the narrow handle-validation function. This is not a
+  general permission to add unsafe code outside a reviewed platform boundary.
 - Treat WSL as Linux execution on a Windows host. A WSL test does not verify
   native Windows process containment.
 - Review a virtual-machine backend as a separate design if native containment
@@ -42,6 +52,11 @@ claim of tested application support. No runtime or sandbox backend exists yet.
 - Verify [session storage](session-storage.md) on supported filesystems: per-user
   protection, native filename/path handling, exclusive ownership, durable append,
   interrupted-write recovery, and archive/restore across restart.
+
+The workflow matrix in `.github/workflows/rust.yml` runs Rust checks on Ubuntu
+24.04 and Windows Server 2025. These CI hosts are not the release support matrix.
+Native Windows/Linux sandbox, process-tree, networking, and toolchain checks
+remain release gates.
 
 Read the [security rules](security-coding-rules.md) and
 [testing standards](testing-standards.md) for the acceptance requirements.
