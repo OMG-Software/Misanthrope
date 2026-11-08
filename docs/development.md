@@ -48,10 +48,13 @@ default to enabled; execute/task-network default to disabled. All decisions
 still report `execution_allowed: false`. Commands do not dispatch tools.
 See the [workspace contract](workspace-permissions.md) for limits and failures.
 
-When a root is configured, new sessions use stable registered workspace IDs.
-Invalid settings or outside-root selections fail. Existing text-only journals
-remain readable without inferred access grants. With no configured root, the
-earlier text-only behavior remains available and sets no implicit root.
+When a root is configured, new sessions use stable IDs from the persisted
+workspace registration. Invalid settings or outside-root selections fail.
+Existing text-only journals remain readable without inferred access grants.
+With no configured root, the earlier text-only behavior remains available and
+sets no implicit root. Registrations store settings and audit history; they do
+not create project folders or grant access. A broader project registry and the
+folder/session tree remain future work.
 
 ## Local chat
 
@@ -182,9 +185,10 @@ journal objects; they do not establish a development-root access broker or an
 execution boundary. Existing parent directories must remain trusted. Windows
 ACL hardening and power-loss durability qualification are still required.
 
-The workspace path and initial workspace UUID are descriptive session metadata.
-They grant no access. A persistent project registry and the folder/session tree
-are future work. The CLI's explicit journal path is a trusted operator interface;
+Session workspace IDs are descriptive metadata. They grant no access. The
+control journal persists workspace registrations, settings, revisions, and
+audit events. A broader project registry and the folder/session tree remain
+future work. The CLI's explicit journal path is a trusted operator interface;
 it must not become a raw-path command in the future web interface.
 
 ## Dependencies
@@ -195,6 +199,7 @@ Direct dependencies have specific purposes:
 | --- | --- |
 | serde / serde_json | Typed JSON serialization and bounded protocol parsing; derive macros run during compilation |
 | uuid | Random UUIDv4 identifiers and typed JSON identifiers; OS-backed randomness through its dependency graph |
+| libc (Unix only) | Locked at 0.2.191; supplies `O_DIRECTORY` and `O_NOFOLLOW` constants to safe `std::fs::OpenOptions` flag configuration, avoiding ABI-specific numeric flags without adding unsafe core code |
 | time | UTC date layout and RFC 3339 formatting/parsing |
 | sha2 | Standard SHA-256 prompt digest; no custom cryptography |
 | thiserror | Typed component errors; derive macro runs during compilation |

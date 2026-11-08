@@ -11,14 +11,22 @@ CLI, and platform tests. The core includes configuration-only workspace records,
 permission preferences, and a local settings/audit journal. Directory identity
 checks require a native file ID and directory creation time. On Linux, capture
 fails when the filesystem does not provide birth-time metadata. Windows reads a
-128-bit file ID from an open handle. These checks are configuration metadata only. No desktop interface, file
-broker, process runner, or execution sandbox exists. See [workspace permissions](workspace-permissions.md) for their
-scope and current limits. [Repository review and analysis](repository-checks.md)
-have separate workflows.
+128-bit file ID from an open handle. These checks are configuration metadata
+only. No desktop interface, file broker, process runner, or execution sandbox
+exists. See [workspace permissions](workspace-permissions.md) for their scope
+and current limits. [Repository review and analysis](repository-checks.md) have
+separate workflows.
 
 The directory-record unit tests cover native path encoding, record JSON shape,
 stability after child writes, same-path replacement, and ancestor/sibling
-observations. These tests do not qualify filesystem support or runtime
+observations. They also cover missing creation-time metadata and reject opening
+a FIFO as a directory. Control-store tests cover strict journal replay, stale
+revision rejection without a write, workspace ID reuse and replacement, moved
+or stale directory rejection, bindings, audit records, and lock contention.
+CLI workflow tests bound subprocess time and output capture, and assert the
+exact number of durable `policy_checked` events in the tested workflow. They
+exercise configuration commands and confirm that policy checks remain
+configuration-only. These tests do not qualify filesystem support or runtime
 containment.
 
 Use the locked Cargo commands below. They are also configured in
