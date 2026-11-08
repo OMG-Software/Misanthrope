@@ -18,6 +18,9 @@ not a claim that automated enforcement already exists.
   [platform targets](platform-support.md) as well.
 - Provider work must follow the [authentication contract](provider-authentication.md).
   Runner and toolchain work must follow the [development-tool contract](development-tools.md).
+- Prompt assembly must follow the [instruction contract](agent-instructions.md).
+  Follow [context management](context-management.md) for compaction/caching and
+  the [skills contract](skills.md) for skill packages and lifecycle.
 - Check provider and operating-system contracts against their official
   documentation. Another assistant's output or a passing test is not authority.
 - Document assumptions, limits, and failure behaviour. Do not claim that Rust's

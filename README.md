@@ -10,6 +10,17 @@ permissions, Git workflows, terminals, and coding sessions into one interface.
 > the initial project files. The features below are planned. There is no runnable
 > application, build procedure, or verified sandbox implementation yet.
 
+## Goals
+
+1. **Secure operation:** Enforce the user's permissions and contain development
+   tools on Windows and Linux.
+2. **Prompt injection defence:** Keep untrusted content from granting authority.
+   Use runtime controls, source tracking, and adversarial tests alongside the prompt.
+3. **Efficiency:** Reduce unnecessary model calls, repeated context processing,
+   and tool work while preserving correctness and security.
+
+Security takes priority when an optimization would weaken these boundaries.
+
 ## Planned features
 
 - **Multiple model providers:** OpenAI, Anthropic / Claude, Ollama Local,
@@ -34,6 +45,15 @@ permissions, Git workflows, terminals, and coding sessions into one interface.
   file and hunk diffs.
 - **Persistent sessions:** New and resumable sessions in a tree grouped by
   working folder, with search, sorting, and session status.
+- **Visible SYSTEM prompt:** Inspect the versioned base prompt and append custom
+  instructions at application, workspace, and session scope. See the
+  [initial prompt draft](prompts/system.md) and [instruction design](docs/agent-instructions.md).
+- **Automatic compaction:** Configure a trigger in tokens; 200k means 200,000
+  tokens. Show any earlier trigger required by the selected model's safe budget.
+- **Caching:** Reuse validated artifacts and supported provider prompt caches,
+  with scoped storage, invalidation, usage reporting, and clear controls.
+- **Skills settings:** Add, remove, enable, and disable versioned skill packages.
+  Skills use the same permission policy and controlled tools as other work.
 - **Change review and recovery:** Session change tracking, checkpoints, and
   worktrees to help review and recover changes.
 
@@ -64,7 +84,7 @@ explicit rather than being assumed to work identically across providers.
 
 - **Rust core:** Session management, agent execution, provider adapters,
   authentication, permissions, file access, toolchain profiles, Git operations,
-  and task supervision.
+  task supervision, prompt assembly, context management, caching, and skills.
 - **Desktop interface:** Tauri with a bundled TypeScript web interface.
 - **Execution backends:** Separate Windows and Linux sandbox implementations.
 - **Local storage:** Persistent session records, settings, task results, and
@@ -114,6 +134,10 @@ grants. Write access permits damage inside that writable workspace. The design
 aims to contain access and provide review and recovery; it does not promise to
 prevent every malicious instruction.
 
+Prompts, custom instructions, skills, summaries, and cached artifacts cannot
+grant permissions. See [context management](docs/context-management.md) and
+[skills](docs/skills.md) for their trust boundaries and acceptance requirements.
+
 ## Roadmap
 
 1. Define the threat model, workspace boundary, and permission contract.
@@ -121,9 +145,11 @@ prevent every malicious instruction.
 3. Prove Windows/Linux isolation, representative toolchains, and process cleanup.
 4. Build the Rust core, desktop interface, and persistent session tree.
 5. Add provider adapters, streamed conversations, and validated tool calls.
-6. Add scoped file tools, sandboxed terminals, and background task management.
-7. Add mediated Git workflows, diff review, checkpoints, and crash recovery.
-8. Verify the full workflow on both platforms and prepare installers and
+6. Add visible instructions, token accounting, compaction, safe caching, and
+   skills settings with their boundary tests and efficiency measurements.
+7. Add scoped file tools, sandboxed terminals, and background task management.
+8. Add mediated Git workflows, diff review, checkpoints, and crash recovery.
+9. Verify the full workflow on both platforms and prepare installers and
    documentation.
 
 ## Documentation

@@ -19,3 +19,4 @@ meaningful alternative does not need an ADR.
 | [0002: Require subscription authentication](0002-require-subscription-authentication.md) | Accepted | 2026-11-08 |
 | [0003: Use scoped development toolchain profiles](0003-use-scoped-development-toolchain-profiles.md) | Accepted | 2026-11-08 |
 | [0004: Require pull requests and repository analysis](0004-require-pull-requests-and-repository-analysis.md) | Accepted | 2026-11-08 |
+| [0005: Keep agent context subordinate to runtime policy](0005-keep-agent-context-subordinate-to-runtime-policy.md) | Accepted | 2026-11-08 |

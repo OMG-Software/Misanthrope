@@ -65,6 +65,10 @@ As the relevant components are implemented, include:
 | Persistence | Partial operations, migration failure, recovery without replay |
 | Frontend | Untrusted rendering, IPC authorization, no secret disclosure |
 | Sessions | Concurrent edits, separate worktrees, shared repository state |
+| Instructions | Visible prompt/serialized request match, scope ordering, revisions, safe rendering, no secret leakage |
+| Compaction | Token thresholds and smaller limits, summary injection, concurrent steering, tool-pair integrity, bounded failure |
+| LLM caches | Content/policy/account isolation, revocation, stale/poisoned entries, quota/clear, no side-effect replay |
+| Skills | Package/link validation, scope overrides, disabled loading, script containment, live disable and context invalidation |
 
 Use deterministic local provider mocks in normal tests. Live-provider tests must
 be explicit opt-in, use disposable data and a budget, and report which endpoint
@@ -74,6 +78,14 @@ The [authentication contract](provider-authentication.md) adds subscription
 acceptance gates; the [toolchain contract](development-tools.md) defines real
 development workflows to qualify on each supported OS. Documentation checks
 cannot establish login entitlement or compiler compatibility.
+
+The [instruction](agent-instructions.md), [context](context-management.md), and
+[skills](skills.md) guides own detailed acceptance cases. Include malicious
+instructions in direct and indirect content, including compaction summaries and
+cached artifacts. A model refusing an attack is not proof that the core denied
+an unauthorized action. Inspect the actual execution and disclosure boundaries.
+Measure efficiency on useful tasks, including compaction/cache overhead and task
+correctness; do not infer savings from cache configuration alone.
 
 ## Cargo verification baseline
 
