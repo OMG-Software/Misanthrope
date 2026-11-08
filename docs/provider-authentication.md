@@ -52,6 +52,12 @@ or token settings UI. This is a prototype-only developer input. Task execution
 and task environments do not exist in the prototype; this does not qualify the
 future task-environment credential boundary.
 
+The CLI redacts exact occurrences of that currently configured token from new
+user text, preferences, titles, and assistant text before retention or display.
+It also redacts the current token from historical text before sending context.
+This is known-token redaction, not general secret detection or retroactive
+cleanup of existing journals. Ordinary string storage does not guarantee erasure.
+
 The adapter returns assistant text, `finish_reason`, and optional provider usage
 to the CLI, which emits them in JSON output. The session journal stores the
 assistant text but not provider usage or `finish_reason`. Loopback identifies
@@ -161,7 +167,8 @@ Test model discovery, absent/unloaded models, token and no-token modes,
 authentication failure, streaming/cancellation, validated tool calls, changed
 context limits, and absence of unexpected cloud fallback on both supported
 platforms. The current prototype does not implement model discovery, streaming,
-or tool calls. No live LM Studio/Gemma smoke result is recorded.
+or tool calls. The Windows Gemma smoke check above covers one live profile;
+full platform and authentication qualification remains pending.
 
 ### Shared settings and lifecycle
 

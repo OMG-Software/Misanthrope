@@ -42,6 +42,7 @@ pub struct LocalModelClient {
     context_tokens: u64,
     max_output_tokens: u32,
     authorization: Option<HeaderValue>,
+    request_timeout: Duration,
 }
 
 impl fmt::Debug for LocalModelClient {
@@ -125,6 +126,16 @@ impl LocalModelClient {
     /// It rejects hostnames, non-loopback addresses, redirects, proxies, and
     /// URLs that could route a credential or prompt to another destination.
     pub fn new(config: LocalModelConfig, token: Option<String>) -> Result<Self, ProviderError> {
+        Self::with_timeout(config, token, REQUEST_TIMEOUT)
+    }
+
+    /// Build the same validated transport with a short deadline in unit tests.
+    /// Production callers always use the fixed thirty-second deadline in `new`.
+    fn with_timeout(
+        config: LocalModelConfig,
+        token: Option<String>,
+        request_timeout: Duration,
+    ) -> Result<Self, ProviderError> {
         let mut endpoint = validate_base_url(&config.base_url)?;
         if config.model.is_empty()
             || config.model.len() > 256
@@ -153,7 +164,7 @@ impl LocalModelClient {
             .redirect(Policy::none())
             .retry(reqwest::retry::never())
             .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(REQUEST_TIMEOUT)
+            .timeout(request_timeout)
             .build()
             .map_err(|_| ProviderError::Transport)?;
 
@@ -164,6 +175,7 @@ impl LocalModelClient {
             context_tokens: config.context_tokens,
             max_output_tokens: config.max_output_tokens,
             authorization,
+            request_timeout,
         })
     }
 
@@ -208,6 +220,7 @@ impl LocalModelClient {
         let mut request = self
             .client
             .post(self.endpoint.clone())
+            .timeout(self.request_timeout)
             .header(reqwest::header::CONTENT_TYPE, "application/json");
         if let Some(authorization) = &self.authorization {
             request = request.header(AUTHORIZATION, authorization.clone());
@@ -220,6 +233,7 @@ impl LocalModelClient {
     }
 }
 
+/// Reject destinations which could redirect prompts or credentials off loopback.
 fn validate_base_url(base_url: &str) -> Result<Url, ProviderError> {
     if base_url.chars().any(char::is_control) || !base_url.starts_with("http://") {
         return Err(ProviderError::InvalidConfiguration);
@@ -277,6 +291,7 @@ fn validate_base_url(base_url: &str) -> Result<Url, ProviderError> {
     Ok(parsed)
 }
 
+/// Bound input with a byte-based estimate and reserve output plus template headroom.
 fn estimate_context(
     messages: &[ModelMessage],
     max_output_tokens: u32,
@@ -300,6 +315,7 @@ fn estimate_context(
         .ok_or(ProviderError::ContextLimit)
 }
 
+/// Bound escaped strings before allocating the complete encoded request.
 fn estimate_serialized_request_size(
     messages: &[ModelMessage],
     model: &str,
@@ -321,6 +337,7 @@ fn estimate_serialized_request_size(
         .ok_or(ProviderError::RequestTooLarge)
 }
 
+/// Count JSON escape expansion with checked arithmetic rather than allocating it.
 fn json_string_len(value: &str) -> Result<u64, ProviderError> {
     value.chars().try_fold(2_u64, |length, character| {
         let encoded_len = match character {
@@ -334,6 +351,7 @@ fn json_string_len(value: &str) -> Result<u64, ProviderError> {
     })
 }
 
+/// Parse one bounded assistant response; never expose server error bodies.
 fn parse_response(response: Response) -> Result<ModelReply, ProviderError> {
     let status = response.status();
     if !status.is_success() {
@@ -398,6 +416,7 @@ fn parse_response(response: Response) -> Result<ModelReply, ProviderError> {
     })
 }
 
+/// Accept explicit empty action fields while refusing all actual action requests.
 fn reject_actions(
     tool_calls: Option<&Value>,
     function_call: Option<&Value>,
@@ -415,8 +434,10 @@ fn reject_actions(
     Ok(())
 }
 
+/// Preserve optional provider counters without interpreting them as verified cost.
 fn parse_usage(value: &Value) -> Result<Usage, ProviderError> {
     let object = value.as_object().ok_or(ProviderError::MalformedResponse)?;
+    /// Refuse non-integer or negative counters; absence is not a fabricated zero.
     fn optional_count(
         object: &serde_json::Map<String, Value>,
         key: &str,
@@ -435,4 +456,157 @@ fn parse_usage(value: &Value) -> Result<Usage, ProviderError> {
         completion_tokens: optional_count(object, "completion_tokens")?,
         total_tokens: optional_count(object, "total_tokens")?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Instant;
+
+    /// Give the server its own deadline and cancellation path, independent of HTTP timeouts.
+    fn slow_response(
+        drip_body: bool,
+    ) -> (LocalModelClient, mpsc::Sender<()>, thread::JoinHandle<bool>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("private fixture");
+        listener.set_nonblocking(true).expect("bounded accept");
+        let address = listener.local_addr().expect("address");
+        let (cancel, cancelled) = mpsc::channel();
+        let task = thread::spawn(move || {
+            let end = Instant::now() + Duration::from_secs(2);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < end, "fixture accept deadline");
+                        thread::sleep(Duration::from_millis(2));
+                    }
+                    Err(error) => panic!("fixture accept: {error}"),
+                }
+            };
+            stream
+                .set_nonblocking(false)
+                .expect("blocking accepted stream");
+            stream
+                .set_read_timeout(Some(Duration::from_millis(250)))
+                .expect("read deadline");
+            stream
+                .set_write_timeout(Some(Duration::from_millis(250)))
+                .expect("write deadline");
+            let mut bytes = Vec::new();
+            let mut buffer = [0_u8; 8192];
+            loop {
+                assert!(
+                    bytes.len() <= 256 * 1024 && Instant::now() < end,
+                    "bounded request"
+                );
+                if let Some(header_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n")
+                {
+                    let headers = std::str::from_utf8(&bytes[..header_end]).expect("ASCII headers");
+                    let length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().expect("body length"))
+                        })
+                        .expect("Content-Length");
+                    assert!(length <= 256 * 1024, "bounded declared request");
+                    if bytes.len() >= header_end + 4 + length {
+                        break;
+                    }
+                }
+                let count = stream.read(&mut buffer).expect("request bytes");
+                assert!(count > 0, "request must be complete");
+                bytes.extend_from_slice(&buffer[..count]);
+            }
+            if drip_body {
+                let body = br#"{"choices":[{"message":{"role":"assistant","content":"completed slowly"},"finish_reason":"stop"}]}"#;
+                let headers = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                if stream.write_all(headers.as_bytes()).is_err() {
+                    return true;
+                }
+                for chunk in body.chunks(8) {
+                    if Instant::now() >= end || stream.write_all(chunk).is_err() {
+                        break;
+                    }
+                    match cancelled.recv_timeout(Duration::from_millis(80)) {
+                        Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    }
+                }
+            } else {
+                // Withhold headers, but never wait indefinitely for a faulty client.
+                match cancelled.recv_timeout(Duration::from_secs(2)) {
+                    Ok(())
+                    | Err(mpsc::RecvTimeoutError::Disconnected | mpsc::RecvTimeoutError::Timeout) =>
+                        {}
+                }
+            }
+            true
+        });
+        let client = LocalModelClient::with_timeout(
+            LocalModelConfig {
+                base_url: format!("http://{address}/v1"),
+                model: "fixture".to_owned(),
+                context_tokens: 131_072,
+                max_output_tokens: 32,
+            },
+            None,
+            Duration::from_millis(250),
+        )
+        .expect("client");
+        (client, cancel, task)
+    }
+
+    /// Observe fixture cleanup even when the timeout assertion is expected to fail.
+    fn assert_bounded_transport_failure(drip_body: bool) {
+        let (client, cancel, task) = slow_response(drip_body);
+        let started = Instant::now();
+        let result = client.complete(&[
+            ModelMessage {
+                role: ModelRole::System,
+                content: BASE_PROMPT.to_owned(),
+            },
+            ModelMessage {
+                role: ModelRole::User,
+                content: "request".to_owned(),
+            },
+        ]);
+        let elapsed = started.elapsed();
+        // Receiver disconnection also requests cleanup; either outcome is safe.
+        // A disconnected receiver means the fixture is already exiting. The
+        // bounded join below still observes completion in either case.
+        let _ = cancel.send(());
+        let end = Instant::now() + Duration::from_secs(3);
+        while !task.is_finished() {
+            assert!(Instant::now() < end, "fixture cleanup deadline");
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert!(
+            task.join().expect("fixture thread"),
+            "fixture received complete request"
+        );
+        assert_eq!(result, Err(ProviderError::Transport));
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "request exceeded its independent total deadline: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn request_deadline_bounds_stalled_response_headers() {
+        assert_bounded_transport_failure(false);
+    }
+
+    #[test]
+    fn request_deadline_bounds_a_dripping_response_body() {
+        assert_bounded_transport_failure(true);
+    }
 }

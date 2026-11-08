@@ -105,9 +105,8 @@ Use a trusted, separately reviewed path when a fork requires a Sonar analysis.
 The source root is the repository, including Rust crates, workflow, and tooling
 files. The explicit exclusions cover .git, target, node_modules, dist, and
 coverage directories at any depth. They do not cover every generated directory;
-review exclusions as the repository grows. No Rust compilation, Clippy execution,
-or coverage import is configured in the Sonar workflow; use the Rust workflow
-for those checks.
+review exclusions as the repository grows. Use the Rust workflow for compilation
+and Clippy checks. Coverage reporting is not configured in either workflow.
 
 Check the current Sonar result and quality gate for each pull request. Do not
 present a missing, empty, or failed analysis as proof that application code

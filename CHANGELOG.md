@@ -4,6 +4,18 @@ Changes are recorded here before a release version is assigned.
 
 ## Unreleased
 
+### Fixed
+
+- Reserve terminal journal capacity, recover full legacy active turns with one
+  bounded terminal tail, and test write-success/sync-failure handling.
+- Preflight encoded request events before starting turns, mark deterministic
+  reply-size failures as failed turns, and retain locators on chat errors.
+- Return lossless native journal locators and support reopening paths that are
+  not Unicode; prevent renaming open Windows journals with delete sharing denied.
+- Redact the configured local server token from retained/displayed chat text
+  and resumed context, and apply a total deadline to each model request.
+- Add review regression tests and clarify smoke-check, coverage, and CLI examples.
+
 ### Added
 
 - First Rust 0.1.0 CLI prototype, with a pinned toolchain, locked dependencies,

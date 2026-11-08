@@ -82,6 +82,14 @@ current invocation and is recorded in its manifest. Resume does not silently
 reuse earlier custom instructions or model settings. Supply them again when
 needed. The current compiled base always replaces historical base snapshots.
 
+Results also include a lossless journal_native object. The journal string is
+null when the path cannot be represented as Unicode; journal_display is always
+display text. Supply the serialized native object with --journal-native instead
+of a positional path for session commands, or instead of --journal for chat.
+Only the originating OS's encoding is accepted. Post-open chat failures include
+the same locator under error.session, so a failed first request can be inspected
+without searching for its journal or creating another session.
+
 Archive and restore keep the same filename and session ID. They start no work.
 Archiving an active turn fails. If the CLI stopped during a turn, inspect the
 journal, then explicitly mark that turn failed before resuming or archiving:
@@ -107,6 +115,15 @@ planned. See the complete [session contract](session-storage.md).
 | Encoded provider response | 1 MiB |
 | Encoded journal event, including LF | 64 KiB |
 | Journal | 8 MiB and 10,000 events |
+
+These are ordinary quotas. Active turns reserve one terminal event and 1 KiB
+for it. CLI requests preflight their encoded manifest and user event, and reserve
+space for a maximum-size assistant event before recording the turn marker. A
+deterministic reply-size failure closes the turn; an uncertain write/sync failure
+stops the writer instead. For older journals already full with an active turn,
+one terminal recovery event of at most 1 KiB may exceed the ordinary quotas.
+Readers accept only that bounded exception. Full journals remain inspectable;
+further ordinary events require a new session. No history is removed to make room.
 
 The context guard estimates input from UTF-8 bytes plus fixed message overhead,
 then reserves the configured output tokens and headroom. This is a conservative

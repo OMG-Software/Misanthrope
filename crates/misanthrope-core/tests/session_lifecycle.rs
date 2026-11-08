@@ -307,6 +307,137 @@ fn hard_linked_journal_handles_are_rejected() {
     ));
 }
 
+#[cfg(windows)]
+#[test]
+fn windows_journals_deny_renaming_during_creation_and_reopen() {
+    let (_temporary, root, workspace) = setup();
+    let journal = create(&root, &workspace);
+    let path = journal.path().to_path_buf();
+    let renamed = path.with_extension("renamed");
+    assert!(
+        fs::rename(&path, &renamed).is_err(),
+        "created writer must deny delete sharing"
+    );
+    drop(journal);
+    let reopened = SessionJournal::open(&path).expect("reopen");
+    assert!(
+        fs::rename(&path, &renamed).is_err(),
+        "reopened writer must deny delete sharing"
+    );
+    drop(reopened);
+    fs::rename(&path, &renamed).expect("rename after ownership ends");
+}
+
+/// Construct a valid pre-reservation journal without thousands of sync calls.
+fn legacy_full_journal(byte_limit: bool) -> (TempDir, std::path::PathBuf) {
+    let (temporary, root, workspace) = setup();
+    let journal = create(&root, &workspace);
+    let path = journal.path().to_path_buf();
+    drop(journal);
+    let mut bytes = fs::read(&path).expect("initial record");
+    let first: serde_json::Value = serde_json::from_slice(&bytes).expect("first record");
+    let session_id = first["session_id"].clone();
+    let request_id = Uuid::new_v4();
+    let mut seq = 1_u64;
+    let event = |seq, kind, payload| {
+        serde_json::json!({
+            "schema_version":1,"session_id":session_id,"event_id":Uuid::new_v4(),
+            "seq":seq,"timestamp":"2026-11-08T00:00:00Z","type":kind,"payload":payload
+        })
+    };
+    let mut append = |value: serde_json::Value| {
+        bytes.extend(serde_json::to_vec(&value).expect("event"));
+        bytes.push(b'\n');
+    };
+    append(event(
+        seq,
+        "turn.started",
+        serde_json::json!({"request_id":request_id}),
+    ));
+    seq += 1;
+    if byte_limit {
+        loop {
+            let mut value = event(
+                seq,
+                "message.recorded",
+                serde_json::json!({"role":"user","source":"user_cli","text":""}),
+            );
+            let overhead = serde_json::to_vec(&value).expect("event").len() + 1;
+            let remaining = 8 * 1024 * 1024 - bytes.len();
+            if remaining < overhead {
+                break;
+            }
+            value["payload"]["text"] =
+                serde_json::Value::String("x".repeat((remaining - overhead).min(16 * 1024)));
+            bytes.extend(serde_json::to_vec(&value).expect("event"));
+            bytes.push(b'\n');
+            seq += 1;
+        }
+        assert_eq!(bytes.len(), 8 * 1024 * 1024);
+    } else {
+        while seq < 10_000 {
+            let value = event(
+                seq,
+                "message.recorded",
+                serde_json::json!({"role":"user","source":"user_cli","text":""}),
+            );
+            bytes.extend(serde_json::to_vec(&value).expect("event"));
+            bytes.push(b'\n');
+            seq += 1;
+        }
+    }
+    fs::write(&path, bytes).expect("legacy full journal");
+    (temporary, path)
+}
+
+#[test]
+fn legacy_full_active_journals_allow_one_bounded_terminal_recovery() {
+    for byte_limit in [false, true] {
+        let (_temporary, path) = legacy_full_journal(byte_limit);
+        let mut journal = SessionJournal::open(&path).expect("open full legacy journal");
+        let request_id = journal.snapshot().active_turn.expect("active legacy turn");
+        journal
+            .fail_turn(request_id, "operator_interrupted")
+            .expect("recover full legacy turn");
+        assert_eq!(journal.snapshot().active_turn, None);
+        assert!(matches!(
+            journal.record_message(MessageRole::User, "no ordinary overflow"),
+            Err(SessionError::LimitReached)
+        ));
+        drop(journal);
+        assert_eq!(
+            SessionJournal::open(&path)
+                .expect("reopen recovered journal")
+                .snapshot()
+                .active_turn,
+            None
+        );
+        let mut bytes = fs::read(&path).expect("recovered bytes");
+        let first: serde_json::Value = serde_json::from_slice(
+            bytes
+                .split(|byte| *byte == b'\n')
+                .next()
+                .expect("first line"),
+        )
+        .expect("first record");
+        let extra = serde_json::json!({"schema_version":1,"session_id":first["session_id"],
+            "event_id":Uuid::new_v4(),"seq":bytes.iter().filter(|byte| **byte == b'\n').count(),
+            "timestamp":"2026-11-08T00:00:00Z","type":"message.recorded",
+            "payload":{"role":"user","source":"user_cli","text":"forged overflow"}});
+        bytes.extend(serde_json::to_vec(&extra).expect("extra record"));
+        bytes.push(b'\n');
+        fs::write(&path, &bytes).expect("import ordinary overflow");
+        assert!(
+            matches!(
+                SessionJournal::open(&path),
+                Err(SessionError::InvalidJournal(_))
+            ),
+            "reader must also deny ordinary overflow"
+        );
+        assert_eq!(fs::read(&path).expect("unchanged invalid import"), bytes);
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn symbolic_link_journal_paths_are_rejected() {

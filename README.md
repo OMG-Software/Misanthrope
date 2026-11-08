@@ -63,10 +63,12 @@ cargo run --locked -p misanthrope-cli -- capabilities
 cargo run --locked -p misanthrope-cli -- prompt
 ```
 
-To send a test request, start LM Studio and load a model yourself, then run:
+To send a test request, start LM Studio and load a model yourself. Replace
+YOUR_MODEL_ID with that model's ID and CONTEXT_TOKENS with its validated numeric
+context capacity before running this command:
 
 ```sh
-cargo run --locked -p misanthrope-cli -- chat --workspace . --model <loaded-model-id> --context-tokens <validated-context-size> "Say hello in one sentence."
+cargo run --locked -p misanthrope-cli -- chat --workspace . --model "YOUR_MODEL_ID" --context-tokens CONTEXT_TOKENS "Say hello in one sentence."
 ```
 
 The endpoint defaults to `http://127.0.0.1:1234/v1`. The required context value

@@ -7,12 +7,14 @@ use misanthrope_core::prompt::{
     self, BASE_PROMPT, BASE_PROMPT_VERSION, ConversationMessage, ConversationRole,
 };
 use misanthrope_core::provider::{LocalModelClient, LocalModelConfig};
-use misanthrope_core::session::{MessageRole, RequestManifest, SessionJournal};
+use misanthrope_core::session::{
+    MessageRole, NativePath, RequestManifest, SessionError, SessionJournal,
+};
 use serde::Serialize;
 use serde_json::json;
 use std::env;
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 #[derive(Parser)]
@@ -54,27 +56,43 @@ enum SessionCommand {
     },
     /// Read a selected journal without executing its recorded content.
     Inspect {
-        journal: PathBuf,
+        #[command(flatten)]
+        locator: JournalArgs,
     },
     Archive {
-        journal: PathBuf,
+        #[command(flatten)]
+        locator: JournalArgs,
     },
     Restore {
-        journal: PathBuf,
+        #[command(flatten)]
+        locator: JournalArgs,
     },
     /// Mark an abandoned turn failed without retrying its model request.
     Interrupt {
-        journal: PathBuf,
+        #[command(flatten)]
+        locator: JournalArgs,
     },
 }
 
 #[derive(Args)]
+struct JournalArgs {
+    #[arg(required_unless_present = "journal_native")]
+    journal: Option<PathBuf>,
+    /// Lossless journal_native JSON returned by an earlier command.
+    #[arg(long, conflicts_with = "journal")]
+    journal_native: Option<String>,
+}
+
+#[derive(Args)]
 struct ChatArgs {
-    #[arg(long, required_unless_present = "journal", conflicts_with = "journal")]
+    #[arg(long, required_unless_present_any = ["journal", "journal_native"], conflicts_with_all = ["journal", "journal_native"])]
     workspace: Option<PathBuf>,
     /// Resume this explicit journal. Historical grants never authorize tools.
     #[arg(long)]
     journal: Option<PathBuf>,
+    /// Resume using the lossless journal_native JSON from an earlier result.
+    #[arg(long, conflicts_with = "journal")]
+    journal_native: Option<String>,
     #[arg(long, default_value = "Local model chat")]
     title: String,
     #[arg(long, default_value = "http://127.0.0.1:1234/v1")]
@@ -93,9 +111,28 @@ struct ChatArgs {
     message: String,
 }
 
+#[derive(Serialize)]
 struct CliError {
     code: &'static str,
     message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session: Option<Box<JournalLocator>>,
+}
+
+#[derive(Clone, Serialize)]
+struct JournalLocator {
+    session_id: uuid::Uuid,
+    journal: Option<String>,
+    journal_display: String,
+    journal_native: NativePath,
+}
+
+#[derive(Serialize)]
+struct JournalOutput<T> {
+    #[serde(flatten)]
+    locator: JournalLocator,
+    #[serde(flatten)]
+    detail: T,
 }
 
 impl CliError {
@@ -103,21 +140,24 @@ impl CliError {
         Self {
             code,
             message: message.into(),
+            session: None,
         }
+    }
+
+    /// Preserve the existing session locator on all post-open chat failures.
+    fn with_session(mut self, session: JournalLocator) -> Self {
+        self.session = Some(Box::new(session));
+        self
     }
 }
 
+/// Emit controlled JSON errors; never render untrusted text as terminal escapes.
 fn main() -> ExitCode {
     match run(Cli::parse()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             // A closed error stream cannot be repaired by recursively printing.
-            if serde_json::to_writer(
-                io::stderr().lock(),
-                &json!({"error": {"code": error.code, "message": error.message}}),
-            )
-            .is_err()
-            {
+            if serde_json::to_writer(io::stderr().lock(), &json!({"error": error})).is_err() {
                 return ExitCode::FAILURE;
             }
             ExitCode::FAILURE
@@ -125,6 +165,7 @@ fn main() -> ExitCode {
     }
 }
 
+/// Dispatch trusted operator commands without providing any model execution route.
 fn run(cli: Cli) -> Result<(), CliError> {
     match cli.command {
         Command::Prompt => print_json(&json!({
@@ -153,21 +194,25 @@ fn run(cli: Cli) -> Result<(), CliError> {
                     .map_err(session_error)?;
                 print_session(&journal)
             }
-            SessionCommand::Inspect { journal } => {
-                print_session(&SessionJournal::open(&journal).map_err(session_error)?)
+            SessionCommand::Inspect { locator } => {
+                let path = resolve_journal(locator.journal, locator.journal_native)?;
+                print_session(&SessionJournal::open(&path).map_err(session_error)?)
             }
-            SessionCommand::Archive { journal } => {
-                let mut journal = SessionJournal::open(&journal).map_err(session_error)?;
+            SessionCommand::Archive { locator } => {
+                let path = resolve_journal(locator.journal, locator.journal_native)?;
+                let mut journal = SessionJournal::open(&path).map_err(session_error)?;
                 journal.archive().map_err(session_error)?;
                 print_session(&journal)
             }
-            SessionCommand::Restore { journal } => {
-                let mut journal = SessionJournal::open(&journal).map_err(session_error)?;
+            SessionCommand::Restore { locator } => {
+                let path = resolve_journal(locator.journal, locator.journal_native)?;
+                let mut journal = SessionJournal::open(&path).map_err(session_error)?;
                 journal.restore().map_err(session_error)?;
                 print_session(&journal)
             }
-            SessionCommand::Interrupt { journal } => {
-                let mut journal = SessionJournal::open(&journal).map_err(session_error)?;
+            SessionCommand::Interrupt { locator } => {
+                let path = resolve_journal(locator.journal, locator.journal_native)?;
+                let mut journal = SessionJournal::open(&path).map_err(session_error)?;
                 if let Some(request_id) = journal.snapshot().active_turn {
                     journal
                         .fail_turn(request_id, "operator_interrupted")
@@ -180,7 +225,8 @@ fn run(cli: Cli) -> Result<(), CliError> {
     }
 }
 
-fn chat(data_dir: Option<PathBuf>, args: ChatArgs) -> Result<(), CliError> {
+/// Validate the provider before opening storage, then attach recovery information.
+fn chat(data_dir: Option<PathBuf>, mut args: ChatArgs) -> Result<(), CliError> {
     let token = match env::var("MISANTHROPE_LM_TOKEN") {
         Ok(value) if !value.is_empty() => Some(value),
         Ok(_) | Err(env::VarError::NotPresent) => None,
@@ -198,11 +244,23 @@ fn chat(data_dir: Option<PathBuf>, args: ChatArgs) -> Result<(), CliError> {
             context_tokens: args.context_tokens,
             max_output_tokens: args.max_output_tokens,
         },
-        token,
+        // CLI retains one copy for text redaction; the client owns its header.
+        token.clone(),
     )
     .map_err(provider_error)?;
-    let mut journal = match &args.journal {
-        Some(path) => SessionJournal::open(path).map_err(session_error)?,
+    args.title = redact_known_secret(&args.title, token.as_deref());
+    args.message = redact_known_secret(&args.message, token.as_deref());
+    args.instructions = redact_known_secret(&args.instructions, token.as_deref());
+    let path = if args.journal.is_some() || args.journal_native.is_some() {
+        Some(resolve_journal(
+            args.journal.take(),
+            args.journal_native.take(),
+        )?)
+    } else {
+        None
+    };
+    let mut journal = match path {
+        Some(path) => SessionJournal::open(&path).map_err(session_error)?,
         None => {
             let workspace = args.workspace.as_deref().ok_or_else(|| {
                 CliError::new("configuration", "A workspace or journal is required")
@@ -211,6 +269,18 @@ fn chat(data_dir: Option<PathBuf>, args: ChatArgs) -> Result<(), CliError> {
                 .map_err(session_error)?
         }
     };
+    let locator = journal_locator(&journal)?;
+    chat_turn(&mut journal, &client, args, token.as_deref())
+        .map_err(|error| error.with_session(locator))
+}
+
+/// Preflight deterministic failures before starting; preserve uncertain I/O state.
+fn chat_turn(
+    journal: &mut SessionJournal,
+    client: &LocalModelClient,
+    args: ChatArgs,
+    token: Option<&str>,
+) -> Result<(), CliError> {
     if journal.snapshot().archived {
         return Err(CliError::new(
             "session",
@@ -232,7 +302,7 @@ fn chat(data_dir: Option<PathBuf>, args: ChatArgs) -> Result<(), CliError> {
                 MessageRole::User => ConversationRole::User,
                 MessageRole::Assistant => ConversationRole::Assistant,
             },
-            content: message.text.clone(),
+            content: redact_known_secret(&message.text, token),
         })
         .collect();
     history.push(ConversationMessage {
@@ -241,26 +311,27 @@ fn chat(data_dir: Option<PathBuf>, args: ChatArgs) -> Result<(), CliError> {
     });
     let messages = prompt::assemble(&args.instructions, &history)
         .map_err(|error| CliError::new("prompt", error.to_string()))?;
+    let manifest = RequestManifest {
+        base_prompt: BASE_PROMPT.to_owned(),
+        prompt_version: BASE_PROMPT_VERSION.to_owned(),
+        prompt_sha256: prompt::base_prompt_sha256(),
+        custom_instructions: args.instructions,
+        model: args.model,
+        base_url: args.endpoint,
+        context_tokens: args.context_tokens,
+        max_output_tokens: args.max_output_tokens,
+    };
     journal
-        .record_message(MessageRole::User, &args.message)
+        .preflight_request(&args.message, &manifest)
         .map_err(session_error)?;
     let request_id = journal.start_turn().map_err(session_error)?;
     journal
-        .record_manifest(
-            request_id,
-            RequestManifest {
-                base_prompt: BASE_PROMPT.to_owned(),
-                prompt_version: BASE_PROMPT_VERSION.to_owned(),
-                prompt_sha256: prompt::base_prompt_sha256(),
-                custom_instructions: args.instructions,
-                model: args.model,
-                base_url: args.endpoint,
-                context_tokens: args.context_tokens,
-                max_output_tokens: args.max_output_tokens,
-            },
-        )
+        .record_message(MessageRole::User, &args.message)
         .map_err(session_error)?;
-    let reply = match client.complete(&messages) {
+    journal
+        .record_manifest(request_id, manifest)
+        .map_err(session_error)?;
+    let mut reply = match client.complete(&messages) {
         Ok(reply) => reply,
         Err(error) => {
             journal
@@ -274,6 +345,7 @@ fn chat(data_dir: Option<PathBuf>, args: ChatArgs) -> Result<(), CliError> {
             return Err(provider_error(error));
         }
     };
+    reply.content = redact_known_secret(&reply.content, token);
     // Keep every accepted reply resumable within the journal and prompt limits.
     // The wire response limit also covers protocol metadata, so it is larger.
     if reply.content.len() > 16 * 1024 {
@@ -285,17 +357,27 @@ fn chat(data_dir: Option<PathBuf>, args: ChatArgs) -> Result<(), CliError> {
             "Assistant text exceeds the 16 KiB session message limit",
         ));
     }
-    journal
-        .record_message(MessageRole::Assistant, &reply.content)
-        .map_err(session_error)?;
+    if let Err(error) = journal.record_message(MessageRole::Assistant, &reply.content) {
+        if matches!(
+            error,
+            SessionError::LimitReached | SessionError::InvalidValue(_)
+        ) {
+            journal
+                .fail_turn(request_id, "response_too_large")
+                .map_err(session_error)?;
+        }
+        // Failed writes/syncs can have changed storage. Do not overwrite that
+        // uncertain state with a fabricated terminal event or an automatic retry.
+        return Err(session_error(error));
+    }
     journal.complete_turn(request_id).map_err(session_error)?;
-    print_json(&json!({
-        "session_id": journal.snapshot().session_id,
-        "journal": display_path(journal.path()),
-        "reply": reply,
-    }))
+    print_json(&JournalOutput {
+        locator: journal_locator(journal)?,
+        detail: json!({"reply":reply}),
+    })
 }
 
+/// Choose trusted application storage; repository content cannot set this value.
 fn data_root(override_path: Option<PathBuf>) -> Result<PathBuf, CliError> {
     if let Some(path) = override_path {
         return Ok(path);
@@ -306,17 +388,55 @@ fn data_root(override_path: Option<PathBuf>) -> Result<PathBuf, CliError> {
 }
 
 fn print_session(journal: &SessionJournal) -> Result<(), CliError> {
-    print_json(&json!({
-        "journal": display_path(journal.path()),
-        "session": journal.snapshot(),
-    }))
+    print_json(&JournalOutput {
+        locator: journal_locator(journal)?,
+        detail: json!({"session":journal.snapshot()}),
+    })
 }
 
-fn display_path(path: &Path) -> String {
-    // Display only. Reopening always uses the original native Path supplied by the caller.
-    path.to_string_lossy().into_owned()
+/// Separate human display from a locator that preserves every native path unit.
+fn journal_locator(journal: &SessionJournal) -> Result<JournalLocator, CliError> {
+    Ok(JournalLocator {
+        session_id: journal.snapshot().session_id,
+        journal: journal.path().to_str().map(str::to_owned),
+        journal_display: journal.path().to_string_lossy().into_owned(),
+        journal_native: NativePath::from_path(journal.path()).map_err(session_error)?,
+    })
 }
 
+/// Decode only the current OS's bounded native locator; never authorize its path.
+fn resolve_journal(path: Option<PathBuf>, native: Option<String>) -> Result<PathBuf, CliError> {
+    match (path, native) {
+        (Some(path), None) => Ok(path),
+        (None, Some(encoded)) if encoded.len() <= 256 * 1024 => {
+            let native: NativePath = serde_json::from_str(&encoded)
+                .map_err(|_| CliError::new("configuration", "Invalid native journal locator"))?;
+            native.to_path_buf().map_err(session_error)
+        }
+        _ => Err(CliError::new(
+            "configuration",
+            "Supply one journal path or native locator",
+        )),
+    }
+}
+
+/// Remove the configured credential from untrusted text before retention or egress.
+/// If replacement would itself contain the credential, discard that text instead.
+fn redact_known_secret(text: &str, token: Option<&str>) -> String {
+    match token.filter(|token| !token.is_empty()) {
+        Some(token) => {
+            let result = text.replace(token, "[REDACTED]");
+            if result.contains(token) {
+                String::new()
+            } else {
+                result
+            }
+        }
+        None => text.to_owned(),
+    }
+}
+
+/// Serialize untrusted strings as escaped JSON and propagate broken output errors.
 fn print_json(value: &impl Serialize) -> Result<(), CliError> {
     let mut output = io::stdout().lock();
     serde_json::to_writer(&mut output, value)

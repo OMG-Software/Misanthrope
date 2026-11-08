@@ -23,6 +23,8 @@ const MAX_EVENT_BYTES: usize = 64 * 1024;
 const MAX_JOURNAL_BYTES: usize = 8 * 1024 * 1024;
 const MAX_EVENTS: usize = 10_000;
 const MAX_FAILURE_CODE_BYTES: usize = 128;
+// A terminal envelope plus the most-escaped allowed failure code fits in 1 KiB.
+const TERMINAL_RESERVE_BYTES: usize = 1024;
 
 /// A failure while creating, reading, or changing a session journal.
 #[derive(Debug, Error)]
@@ -79,7 +81,8 @@ pub enum NativePath {
 }
 
 impl NativePath {
-    fn from_path(path: &Path) -> Result<Self, SessionError> {
+    /// Encode a native path without replacing invalid Unicode. This grants no access.
+    pub fn from_path(path: &Path) -> Result<Self, SessionError> {
         #[cfg(unix)]
         {
             use std::os::unix::ffi::OsStrExt;
@@ -97,6 +100,24 @@ impl NativePath {
                 "native paths are unsupported on this platform",
             ))
         }
+    }
+
+    /// Restore a path on its originating OS without a lossy text conversion.
+    /// Returns an error for a foreign encoding; it never guesses a translation.
+    pub fn to_path_buf(&self) -> Result<PathBuf, SessionError> {
+        #[cfg(unix)]
+        if let Self::UnixBytes(units) = self {
+            use std::os::unix::ffi::OsStringExt;
+            return Ok(PathBuf::from(std::ffi::OsString::from_vec(units.clone())));
+        }
+        #[cfg(windows)]
+        if let Self::WindowsUtf16(units) = self {
+            use std::os::windows::ffi::OsStringExt;
+            return Ok(PathBuf::from(std::ffi::OsString::from_wide(units)));
+        }
+        Err(SessionError::InvalidValue(
+            "path encoding does not match this OS",
+        ))
     }
 }
 
@@ -144,6 +165,8 @@ pub struct SessionJournal {
     bytes: u64,
     next_seq: u64,
     poisoned: bool,
+    #[cfg(test)]
+    fail_next_sync: bool,
 }
 
 impl SessionJournal {
@@ -179,6 +202,7 @@ impl SessionJournal {
         let path = dir.join(filename);
         let mut create_options = OpenOptions::new();
         create_options.read(true).write(true).create_new(true);
+        configure_journal_options(&mut create_options);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
@@ -225,6 +249,8 @@ impl SessionJournal {
             bytes: u64::try_from(bytes.len()).map_err(|_| SessionError::LimitReached)?,
             next_seq: 1,
             poisoned: false,
+            #[cfg(test)]
+            fail_next_sync: false,
         })
     }
 
@@ -269,6 +295,8 @@ impl SessionJournal {
             bytes,
             next_seq,
             poisoned: false,
+            #[cfg(test)]
+            fail_next_sync: false,
         })
     }
 
@@ -280,6 +308,71 @@ impl SessionJournal {
     /// Return the last fully validated durable snapshot.
     pub fn snapshot(&self) -> &SessionSnapshot {
         &self.snapshot
+    }
+
+    /// Check a complete CLI request before recording its turn marker.
+    ///
+    /// This checks encoded event sizes and reserves one maximum-size assistant
+    /// event plus a terminal record. No journal bytes or snapshot state change.
+    /// The exclusive writer must retain ownership until dispatch and completion.
+    pub fn preflight_request(
+        &self,
+        text: &str,
+        manifest: &RequestManifest,
+    ) -> Result<(), SessionError> {
+        self.ensure_mutable()?;
+        if self.snapshot.archived || self.snapshot.active_turn.is_some() {
+            return Err(SessionError::InvalidValue(
+                "request requires an idle unarchived session",
+            ));
+        }
+        if text.len() > MAX_MESSAGE_BYTES {
+            return Err(SessionError::InvalidValue("message exceeds 16 KiB"));
+        }
+        validate_manifest(manifest)?;
+        let request_id = Uuid::nil();
+        let mut seq = self.next_seq;
+        let mut size = self.bytes;
+        // A nine-digit fractional timestamp bounds any timestamp written later.
+        let timestamp = "2026-11-08T00:00:00.999999999Z";
+        let mut measure = |kind, payload: Value| -> Result<(), SessionError> {
+            let encoded = encode_event(&EventRecord {
+                schema_version: SCHEMA_VERSION,
+                session_id: self.snapshot.session_id,
+                event_id: Uuid::nil(),
+                seq,
+                timestamp: timestamp.to_owned(),
+                event_type: kind,
+                payload: &payload,
+            })?;
+            size = size
+                .checked_add(u64::try_from(encoded.len()).map_err(|_| SessionError::LimitReached)?)
+                .ok_or(SessionError::LimitReached)?;
+            seq = seq.checked_add(1).ok_or(SessionError::LimitReached)?;
+            Ok(())
+        };
+        measure("turn.started", serde_json::json!({"request_id":request_id}))?;
+        measure(
+            "message.recorded",
+            serde_json::json!({"role":"user","source":"user_cli","text":text}),
+        )?;
+        measure(
+            "request.manifest",
+            serde_json::json!({"request_id":request_id,"manifest":manifest}),
+        )?;
+        let final_bytes = size
+            .checked_add(
+                u64::try_from(MAX_EVENT_BYTES + TERMINAL_RESERVE_BYTES)
+                    .map_err(|_| SessionError::LimitReached)?,
+            )
+            .ok_or(SessionError::LimitReached)?;
+        let final_count = seq.checked_add(2).ok_or(SessionError::LimitReached)?;
+        if final_bytes > u64::try_from(MAX_JOURNAL_BYTES).map_err(|_| SessionError::LimitReached)?
+            || final_count > u64::try_from(MAX_EVENTS).map_err(|_| SessionError::LimitReached)?
+        {
+            return Err(SessionError::LimitReached);
+        }
+        Ok(())
     }
 
     /// Append a bounded user or assistant message and sync it to disk.
@@ -393,6 +486,7 @@ impl SessionJournal {
         self.commit_accounting(bytes)
     }
 
+    /// Append one terminal event before releasing the active-turn state.
     fn finish_turn(
         &mut self,
         request_id: Uuid,
@@ -412,6 +506,7 @@ impl SessionJournal {
         self.commit_accounting(bytes)
     }
 
+    /// Refuse all mutations after an uncertain write or sync outcome.
     fn ensure_mutable(&self) -> Result<(), SessionError> {
         if self.poisoned {
             Err(SessionError::Poisoned)
@@ -420,15 +515,14 @@ impl SessionJournal {
         }
     }
 
+    /// Enforce ordinary quotas while preserving capacity for turn termination.
+    /// A legacy full active journal may append exactly one bounded terminal tail.
     fn append<T: Serialize>(
         &mut self,
         event_type: &'static str,
         payload: &T,
     ) -> Result<Vec<u8>, SessionError> {
         self.ensure_mutable()?;
-        if self.next_seq >= u64::try_from(MAX_EVENTS).map_err(|_| SessionError::LimitReached)? {
-            return Err(SessionError::LimitReached);
-        }
         let now = OffsetDateTime::now_utc();
         let event = EventRecord {
             schema_version: SCHEMA_VERSION,
@@ -444,14 +538,46 @@ impl SessionJournal {
             .bytes
             .checked_add(u64::try_from(bytes.len()).map_err(|_| SessionError::LimitReached)?)
             .ok_or(SessionError::LimitReached)?;
-        if new_len > u64::try_from(MAX_JOURNAL_BYTES).map_err(|_| SessionError::LimitReached)? {
-            return Err(SessionError::LimitReached);
+        let terminal = matches!(event_type, "turn.completed" | "turn.failed");
+        let event_limit = u64::try_from(MAX_EVENTS).map_err(|_| SessionError::LimitReached)?;
+        let byte_limit =
+            u64::try_from(MAX_JOURNAL_BYTES).map_err(|_| SessionError::LimitReached)?;
+        if terminal {
+            if self.snapshot.active_turn.is_none()
+                || bytes.len() > TERMINAL_RESERVE_BYTES
+                || self.next_seq > event_limit
+                || self.bytes > byte_limit
+                || new_len
+                    > byte_limit
+                        + u64::try_from(TERMINAL_RESERVE_BYTES)
+                            .map_err(|_| SessionError::LimitReached)?
+            {
+                return Err(SessionError::LimitReached);
+            }
+        } else {
+            let reserve = self.snapshot.active_turn.is_some() || event_type == "turn.started";
+            let required_count = self
+                .next_seq
+                .checked_add(1 + u64::from(reserve))
+                .ok_or(SessionError::LimitReached)?;
+            let reserved_bytes = if reserve {
+                u64::try_from(TERMINAL_RESERVE_BYTES).map_err(|_| SessionError::LimitReached)?
+            } else {
+                0
+            };
+            if required_count > event_limit
+                || new_len
+                    .checked_add(reserved_bytes)
+                    .is_none_or(|size| size > byte_limit)
+            {
+                return Err(SessionError::LimitReached);
+            }
         }
         let write_result = self
             .file
             .seek(SeekFrom::End(0))
             .and_then(|_| self.file.write_all(&bytes))
-            .and_then(|()| self.file.sync_all());
+            .and_then(|()| self.sync_journal());
         if let Err(error) = write_result {
             self.poisoned = true;
             return Err(SessionError::Io(error));
@@ -459,6 +585,16 @@ impl SessionJournal {
         Ok(bytes)
     }
 
+    /// Sync the written bytes. The test hook models failure after a real write.
+    fn sync_journal(&mut self) -> io::Result<()> {
+        #[cfg(test)]
+        if std::mem::take(&mut self.fail_next_sync) {
+            return Err(io::Error::other("injected journal sync failure"));
+        }
+        self.file.sync_all()
+    }
+
+    /// Advance accounting only after the append and sync both succeed.
     fn commit_accounting(&mut self, bytes: Vec<u8>) -> Result<(), SessionError> {
         self.bytes = self
             .bytes
@@ -576,6 +712,7 @@ struct ManifestPayload {
 #[serde(deny_unknown_fields)]
 struct EmptyPayload {}
 
+/// Bound retained titles and refuse titles with no visible text.
 fn validate_title(title: &str) -> Result<(), SessionError> {
     if title.trim().is_empty() || title.len() > MAX_TITLE_BYTES {
         return Err(SessionError::InvalidValue(
@@ -585,6 +722,7 @@ fn validate_title(title: &str) -> Result<(), SessionError> {
     Ok(())
 }
 
+/// Bound decoded fields before JSON encoding applies the separate wire limit.
 fn validate_manifest(manifest: &RequestManifest) -> Result<(), SessionError> {
     let fields = [
         manifest.base_prompt.len(),
@@ -605,6 +743,7 @@ fn validate_manifest(manifest: &RequestManifest) -> Result<(), SessionError> {
     Ok(())
 }
 
+/// Normalize event clocks to UTC; sequence numbers remain the ordering authority.
 fn format_timestamp(timestamp: OffsetDateTime) -> Result<String, SessionError> {
     timestamp
         .to_offset(UtcOffset::UTC)
@@ -612,6 +751,7 @@ fn format_timestamp(timestamp: OffsetDateTime) -> Result<String, SessionError> {
         .map_err(|_| SessionError::InvalidValue("timestamp cannot be formatted"))
 }
 
+/// Include JSON escape expansion and the final LF in the event byte quota.
 fn encode_event<T: Serialize>(event: &EventRecord<'_, T>) -> Result<Vec<u8>, SessionError> {
     let mut bytes = serde_json::to_vec(event)
         .map_err(|_| SessionError::InvalidValue("event cannot be serialized"))?;
@@ -622,18 +762,22 @@ fn encode_event<T: Serialize>(event: &EventRecord<'_, T>) -> Result<Vec<u8>, Ses
     Ok(bytes)
 }
 
+/// Read at most the ordinary quota plus one terminal recovery record.
 fn read_bounded(file: &mut File) -> Result<Vec<u8>, SessionError> {
     file.seek(SeekFrom::Start(0))?;
-    let read_limit =
-        u64::try_from(MAX_JOURNAL_BYTES + 1).map_err(|_| SessionError::LimitReached)?;
+    let read_limit = u64::try_from(MAX_JOURNAL_BYTES + TERMINAL_RESERVE_BYTES + 1)
+        .map_err(|_| SessionError::LimitReached)?;
     let mut contents = Vec::new();
     file.take(read_limit).read_to_end(&mut contents)?;
-    if contents.len() > MAX_JOURNAL_BYTES {
-        return Err(SessionError::InvalidJournal("journal exceeds 8 MiB"));
+    if contents.len() > MAX_JOURNAL_BYTES + TERMINAL_RESERVE_BYTES {
+        return Err(SessionError::InvalidJournal(
+            "journal exceeds bounded recovery capacity",
+        ));
     }
     Ok(contents)
 }
 
+/// Validate every event and transition without interpreting content as work.
 fn replay(contents: &[u8], filename_id: Uuid) -> Result<SessionSnapshot, SessionError> {
     if contents.is_empty() || contents[0..contents.len().min(3)] == [0xef, 0xbb, 0xbf] {
         return Err(SessionError::InvalidJournal(
@@ -650,6 +794,7 @@ fn replay(contents: &[u8], filename_id: Uuid) -> Result<SessionSnapshot, Session
     let mut snapshot: Option<SessionSnapshot> = None;
     let mut expected_seq = 0_u64;
     let mut total_events = 0_usize;
+    let mut consumed_bytes = 0_usize;
     for raw_line in contents.split_inclusive(|byte| *byte == b'\n') {
         if raw_line.len() > MAX_EVENT_BYTES {
             return Err(SessionError::InvalidJournal("event exceeds 64 KiB"));
@@ -664,6 +809,25 @@ fn replay(contents: &[u8], filename_id: Uuid) -> Result<SessionSnapshot, Session
         let value: Value = parse_strict_json(line)?;
         let envelope: EventEnvelope = serde_json::from_value(value)
             .map_err(|_| SessionError::InvalidJournal("event envelope is invalid"))?;
+        let end = consumed_bytes
+            .checked_add(raw_line.len())
+            .ok_or(SessionError::LimitReached)?;
+        if (end > MAX_JOURNAL_BYTES || total_events >= MAX_EVENTS)
+            && (!matches!(
+                envelope.event_type.as_str(),
+                "turn.completed" | "turn.failed"
+            ) || !snapshot
+                .as_ref()
+                .is_some_and(|state| state.active_turn.is_some())
+                || consumed_bytes > MAX_JOURNAL_BYTES
+                || total_events > MAX_EVENTS
+                || raw_line.len() > TERMINAL_RESERVE_BYTES)
+        {
+            return Err(SessionError::InvalidJournal(
+                "only one terminal recovery event may exceed ordinary quotas",
+            ));
+        }
+        consumed_bytes = end;
         if envelope.schema_version != SCHEMA_VERSION {
             return Err(SessionError::InvalidJournal("unsupported schema version"));
         }
@@ -807,7 +971,7 @@ fn replay(contents: &[u8], filename_id: Uuid) -> Result<SessionSnapshot, Session
         total_events = total_events
             .checked_add(1)
             .ok_or(SessionError::LimitReached)?;
-        if total_events > MAX_EVENTS {
+        if total_events > MAX_EVENTS + 1 {
             return Err(SessionError::InvalidJournal(
                 "journal exceeds 10,000 events",
             ));
@@ -825,6 +989,7 @@ fn replay(contents: &[u8], filename_id: Uuid) -> Result<SessionSnapshot, Session
     ))
 }
 
+/// Reject transcript changes while replay says the session is archived.
 fn ensure_not_archived(snapshot: &SessionSnapshot) -> Result<(), SessionError> {
     if snapshot.archived {
         Err(SessionError::InvalidJournal(
@@ -835,6 +1000,7 @@ fn ensure_not_archived(snapshot: &SessionSnapshot) -> Result<(), SessionError> {
     }
 }
 
+/// Require parseable UTC metadata without using clocks to reorder events.
 fn validate_timestamp(value: &str) -> Result<(), SessionError> {
     let timestamp = OffsetDateTime::parse(value, &Rfc3339)
         .map_err(|_| SessionError::InvalidJournal("timestamp is not RFC 3339"))?;
@@ -844,11 +1010,13 @@ fn validate_timestamp(value: &str) -> Result<(), SessionError> {
     Ok(())
 }
 
+/// Apply the selected event's typed schema and reject unsupported fields.
 fn decode_payload<T: for<'de> Deserialize<'de>>(value: Value) -> Result<T, SessionError> {
     serde_json::from_value(value)
         .map_err(|_| SessionError::InvalidJournal("event payload is invalid"))
 }
 
+/// Reject duplicate keys at every depth and require exactly one JSON value.
 fn parse_strict_json(bytes: &[u8]) -> Result<Value, SessionError> {
     let mut deserializer = serde_json::Deserializer::from_slice(bytes);
     let value = StrictValue::deserialize(&mut deserializer).map_err(|_| {
@@ -905,6 +1073,7 @@ impl<'de> Deserialize<'de> for StrictValue {
             fn visit_unit<E>(self) -> Result<Self::Value, E> {
                 Ok(StrictValue(Value::Null))
             }
+            /// Keep duplicate-key checks active inside nested array elements.
             fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
             where
                 A: SeqAccess<'de>,
@@ -915,6 +1084,7 @@ impl<'de> Deserialize<'de> for StrictValue {
                 }
                 Ok(StrictValue(Value::Array(values)))
             }
+            /// Detect repeated keys before converting an object to a JSON map.
             fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
             where
                 A: MapAccess<'de>,
@@ -933,18 +1103,33 @@ impl<'de> Deserialize<'de> for StrictValue {
     }
 }
 
+/// Open with native link checks and Windows replacement protection enabled.
 fn open_existing(path: &Path) -> Result<File, SessionError> {
     let mut options = OpenOptions::new();
     options.read(true).write(true);
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-    }
+    configure_journal_options(&mut options);
     Ok(options.open(path)?)
 }
 
+/// Keep Windows files at their path while the journal owner holds the handle.
+fn configure_journal_options(options: &mut OpenOptions) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ_AND_WRITE: u32 = 0x0000_0003;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options
+            .share_mode(FILE_SHARE_READ_AND_WRITE)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = options;
+    }
+}
+
+/// Validate the opened object and detect Unix path replacement during opening.
+/// Parent directories must still be trusted; this is not a filesystem broker.
 fn check_open_file(path: &Path, file: &File) -> Result<(), SessionError> {
     let opened = file.metadata()?;
     if !opened.is_file() {
@@ -971,6 +1156,7 @@ fn check_open_file(path: &Path, file: &File) -> Result<(), SessionError> {
     Ok(())
 }
 
+/// Inspect the existing handle through the platform boundary, without reopening.
 fn check_link_count(file: &File) -> Result<(), SessionError> {
     match misanthrope_platform::validate_journal_handle(file) {
         Ok(()) => Ok(()),
@@ -981,6 +1167,7 @@ fn check_link_count(file: &File) -> Result<(), SessionError> {
     }
 }
 
+/// Distinguish an existing writer from an unavailable or failed locking facility.
 fn map_lock_error(error: std::fs::TryLockError) -> SessionError {
     match error {
         std::fs::TryLockError::WouldBlock => SessionError::Busy,
@@ -988,6 +1175,7 @@ fn map_lock_error(error: std::fs::TryLockError) -> SessionError {
     }
 }
 
+/// Request private Unix modes for new directories; do not alter existing ACLs.
 fn create_private_directories(path: &Path) -> Result<(), SessionError> {
     #[cfg(unix)]
     {
@@ -1003,6 +1191,7 @@ fn create_private_directories(path: &Path) -> Result<(), SessionError> {
     Ok(())
 }
 
+/// Sync the Unix directory entry; Windows directory durability is not qualified.
 fn sync_parent_directory(directory: &Path) -> Result<(), SessionError> {
     #[cfg(unix)]
     {
@@ -1058,5 +1247,78 @@ mod tests {
             original_bytes
         );
         assert!(matches!(journal.start_turn(), Err(SessionError::Poisoned)));
+    }
+
+    #[test]
+    fn sync_failure_after_write_preserves_snapshot_and_poisons_writer() {
+        let temporary = tempfile::tempdir().expect("private test directory");
+        let mut journal = SessionJournal::create(
+            &temporary.path().join("data"),
+            temporary.path(),
+            "sync failure",
+        )
+        .expect("journal");
+        let snapshot = journal.snapshot.clone();
+        let original_len = journal.file.metadata().expect("metadata").len();
+        journal.fail_next_sync = true;
+        assert!(matches!(
+            journal.record_message(MessageRole::User, "written but uncertain"),
+            Err(SessionError::Io(_))
+        ));
+        assert!(
+            journal.file.metadata().expect("metadata").len() > original_len,
+            "write must precede sync failure"
+        );
+        assert_eq!(journal.snapshot, snapshot);
+        assert!(matches!(journal.start_turn(), Err(SessionError::Poisoned)));
+    }
+
+    #[test]
+    fn active_turn_keeps_an_event_slot_and_bytes_for_termination() {
+        for by_bytes in [false, true] {
+            let temporary = tempfile::tempdir().expect("private test directory");
+            let mut journal = SessionJournal::create(
+                &temporary.path().join("data"),
+                temporary.path(),
+                "capacity",
+            )
+            .expect("journal");
+            let initial_bytes = journal.bytes;
+            let initial_count = journal.next_seq;
+            if by_bytes {
+                journal.bytes =
+                    u64::try_from(super::MAX_JOURNAL_BYTES - super::TERMINAL_RESERVE_BYTES)
+                        .expect("size");
+            } else {
+                journal.next_seq = u64::try_from(super::MAX_EVENTS - 1).expect("count");
+            }
+            let idle = journal.snapshot.clone();
+            assert!(
+                matches!(journal.start_turn(), Err(SessionError::LimitReached)),
+                "starting must also reserve its terminal capacity"
+            );
+            assert_eq!(journal.snapshot, idle);
+            journal.bytes = initial_bytes;
+            journal.next_seq = initial_count;
+            let request_id = journal.start_turn().expect("start turn");
+            // Isolate accounting boundaries without thousands of sync operations.
+            if by_bytes {
+                journal.bytes =
+                    u64::try_from(super::MAX_JOURNAL_BYTES - super::TERMINAL_RESERVE_BYTES)
+                        .expect("size");
+            } else {
+                journal.next_seq = u64::try_from(super::MAX_EVENTS - 1).expect("count");
+            }
+            let before = journal.snapshot.clone();
+            assert!(matches!(
+                journal.record_message(MessageRole::Assistant, "no room"),
+                Err(SessionError::LimitReached)
+            ));
+            assert_eq!(journal.snapshot, before);
+            journal
+                .fail_turn(request_id, "operator_interrupted")
+                .expect("reserved terminal capacity");
+            assert_eq!(journal.snapshot.active_turn, None);
+        }
     }
 }

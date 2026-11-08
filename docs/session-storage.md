@@ -31,6 +31,10 @@ workspace access confinement. Directory crash durability and Windows ACL
 behavior have not been qualified. The implementation does not claim equivalent
 crash durability on Windows and Unix.
 
+Windows creation and reopening omit delete sharing, so a journal cannot be
+renamed or replaced while its writer holds the file handle. This is separate
+from the exclusive writer lock and the existing link checks.
+
 The v1 prototype has this exact event subset. Every event also has the common
 envelope described below. Payload objects reject unknown fields.
 
@@ -58,9 +62,23 @@ archive it. There are no session-owned processes or MCP connections to clean up
 in this prototype. `chat --journal` does not resume an active turn; it requires
 an explicit interrupt first.
 
-Opening reads at most 8 MiB and rejects files above that limit. Each event is at
-most 64 KiB, a message is at most 16 KiB, a title is 1 to 256 UTF-8 bytes, and a
-journal has at most 10,000 events. The reader requires a final newline, accepts
+Ordinary journals are limited to 8 MiB and 10,000 events. Each event is at most
+64 KiB, a message is at most 16 KiB, and a title is 1 to 256 UTF-8 bytes. Both
+decoded and encoded limits apply. Active turns reserve one terminal event and
+1 KiB for it. CLI chat preflights the encoded user message and manifest, plus
+capacity for the reply and termination, before recording the turn marker.
+The marker precedes the user message. Deterministic reply-size failures close
+the turn; uncertain I/O failures poison the writer and retain recovery state.
+
+A legacy journal already full with an active turn may append one terminal
+recovery event of at most 1 KiB beyond ordinary quotas. The reader accepts at
+most 8 MiB plus 1 KiB and 10,001 events, and permits overflow only for that
+single matching terminal record. Ordinary records cannot use recovery capacity.
+A full journal remains inspectable; it needs a new session for further chat
+or other ordinary mutations. No event is discarded or rewritten to make room.
+See [ADR-0011](adr/0011-reserve-terminal-journal-capacity.md).
+
+The reader requires a final newline, accepts
 LF and CRLF, and rejects a BOM, duplicate JSON keys, unknown schema versions,
 unknown events, unknown fields, repeated event IDs, invalid transitions,
 sequence gaps, and a session ID that conflicts with the filename. It validates
@@ -71,9 +89,16 @@ read-only inspection UI yet.
 The request manifest does not include usage or `finish_reason`. The CLI returns
 those provider fields in its JSON output, but does not append them to the
 journal. The prototype has no streaming, artifact, index, compaction, migration,
-or memory events. It does not redact sensitive content from user messages; the
-LM Studio token is not put in the request manifest or deliberately recorded as
-a transcript message.
+or memory events. The CLI redacts the currently configured LM Studio token from
+new conversation text, preferences, titles, and replies before retention and
+output. It redacts that same token from historical context before inference.
+There is no general secret detector or automatic cleanup of older stored text.
+The token itself is never intentionally added to the request manifest.
+
+CLI results carry a lossless native journal locator as well as separate display
+text. The journal string is null for paths that are not Unicode. Pass the
+journal_native JSON to --journal-native when reopening on the same OS.
+Post-open chat errors include this locator under error.session.
 
 These are implemented prototype facts, not a claim that the full release
 contract below is complete.
