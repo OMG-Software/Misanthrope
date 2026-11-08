@@ -64,6 +64,7 @@ pub enum ControlError {
 }
 
 impl From<StorageError> for ControlError {
+    /// Preserve I/O causes and lock conflicts when crossing the storage boundary.
     fn from(value: StorageError) -> Self {
         match value {
             StorageError::Io(error) => Self::Io(error),
@@ -95,6 +96,7 @@ impl WorkspaceRegistration {
     }
 }
 
+/// Reject malformed persisted IDs before constructing typed workspace metadata.
 fn deserialize_workspace_id<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<WorkspaceId, D::Error> {
@@ -247,6 +249,7 @@ impl ControlStore {
         Ok(Some(store))
     }
 
+    /// Capture trusted storage identity before initialization or validated replay.
     fn empty(file: File, data_directory: &Path) -> Result<Self, ControlError> {
         Ok(Self {
             file,
@@ -314,6 +317,9 @@ impl ControlStore {
         self.check_directory_scope(&directory)?;
         for workspace in &self.snapshot.workspaces {
             if workspace.directory.same_directory(&directory) {
+                if !workspace.directory.is_current()? {
+                    return Err(ControlError::DirectoryChanged);
+                }
                 return Ok(workspace.clone());
             }
             if workspace.directory.path == directory.path {
@@ -427,13 +433,18 @@ impl ControlStore {
         Ok(decision)
     }
 
+    /// Require a current storage record before interpreting negative ancestry checks.
     fn check_storage_overlap(&self, directory: &DirectoryRecord) -> Result<(), ControlError> {
+        if !self.data_directory.is_current()? {
+            return Err(ControlError::DirectoryChanged);
+        }
         if directory.contains(&self.data_directory)? || self.data_directory.contains(directory)? {
             return Err(ControlError::StorageOverlap);
         }
         Ok(())
     }
 
+    /// Recheck storage separation and current root membership without granting I/O.
     fn check_directory_scope(&self, directory: &DirectoryRecord) -> Result<(), ControlError> {
         let root = self
             .snapshot
@@ -447,6 +458,7 @@ impl ControlStore {
         Ok(())
     }
 
+    /// Prevent any further mutation or binding after an uncertain journal append.
     fn ensure_healthy(&self) -> Result<(), ControlError> {
         if self.poisoned {
             Err(ControlError::Poisoned)
@@ -454,6 +466,7 @@ impl ControlStore {
             Ok(())
         }
     }
+    /// Reject stale trusted settings commands before filesystem checks or writes.
     fn check_revision(&self, expected: u64) -> Result<(), ControlError> {
         self.ensure_healthy()?;
         if expected != self.revision() {
@@ -464,6 +477,7 @@ impl ControlStore {
         }
         Ok(())
     }
+    /// Reserve a new configuration revision without allowing counter wraparound.
     fn next_revision(&self) -> Result<u64, ControlError> {
         self.revision()
             .checked_add(1)
@@ -514,6 +528,7 @@ impl ControlStore {
         Ok(())
     }
 
+    /// Sync appended bytes; tests can model failure after a successful write.
     fn sync(&self) -> io::Result<()> {
         #[cfg(test)]
         if self.fail_next_sync {
@@ -522,6 +537,8 @@ impl ControlStore {
         self.file.sync_all()
     }
 
+    /// Validate one delta against the preceding state, for replay and append preflight.
+    /// Filesystem observations and expired bindings are never restored from this log.
     fn apply(
         state: &mut ControlSnapshot,
         entry: &AuditEntry,
@@ -624,6 +641,7 @@ impl ControlStore {
     }
 }
 
+/// Restrict store, event, and session metadata to non-nil version 4 identifiers.
 fn valid_uuid(value: Uuid) -> bool {
     !value.is_nil() && value.get_version() == Some(Version::Random)
 }
@@ -633,6 +651,7 @@ mod tests {
     use super::*;
     use std::fs;
 
+    /// Read through the owner because Windows rejects reads from a second handle.
     fn persisted_bytes(store: &mut ControlStore) -> Vec<u8> {
         store
             .file
@@ -646,6 +665,7 @@ mod tests {
         bytes
     }
 
+    /// A failed write must leave acknowledged state unchanged and disable the writer.
     #[test]
     fn write_failure_preserves_state_and_poisons_future_settings() {
         let directory = tempfile::tempdir().expect("private temporary directory");
@@ -672,6 +692,7 @@ mod tests {
         ));
     }
 
+    /// Bytes can reach disk before sync fails, but no unaudited result may escape.
     #[test]
     fn failed_audit_sync_returns_no_decision_and_poisons_writer() {
         let directory = tempfile::tempdir().expect("private temporary directory");
@@ -714,6 +735,7 @@ mod tests {
         ));
     }
 
+    /// Replay must reject tampered envelopes without repairing the original bytes.
     #[test]
     fn replay_rejects_sequence_revision_and_duplicate_event_ids_without_changes() {
         for corruption in ["sequence", "revision", "event_id", "store_id", "timestamp"] {
@@ -749,6 +771,7 @@ mod tests {
         }
     }
 
+    /// Exhausted capacities reject mutations rather than discard settings or audit.
     #[test]
     fn byte_event_and_audit_limits_fail_without_mutating_state() {
         let directory = tempfile::tempdir().expect("private temporary directory");

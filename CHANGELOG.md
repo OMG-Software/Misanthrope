@@ -6,6 +6,13 @@ Changes are recorded here before a release version is assigned.
 
 ### Fixed
 
+- Reject stale saved workspace paths before reusing registrations, and reject
+  moved application storage before interpreting overlap checks.
+- Open Unix workspace selections as directories so named pipes cannot hold the
+  control-store lock indefinitely; test unsupported creation-time metadata.
+- Bound workspace CLI test processes, check the exact policy-audit event count,
+  and document registry status and internal policy contracts.
+
 - Reject indeterminate ancestor walks and invalid control-file links before
   accepting workspace configuration or selecting legacy session behavior.
 

@@ -6,6 +6,7 @@ use misanthrope_core::policy::{DecisionReason, Operation, PermissionSet, PolicyR
 use tempfile::TempDir;
 use uuid::Uuid;
 
+/// An incomplete ancestry search must not establish storage separation.
 #[test]
 fn ancestor_limit_cannot_allow_development_root_inside_application_storage() {
     let temporary = tempfile::tempdir().expect("private temporary directory");
@@ -25,6 +26,7 @@ fn ancestor_limit_cannot_allow_development_root_inside_application_storage() {
 
 const CONTROL_FILE: &str = "control-v1.jsonl";
 
+/// A dangling directory entry must never select unconfigured compatibility mode.
 #[cfg(unix)]
 #[test]
 fn dangling_control_link_is_invalid_state_not_absent_state() {
@@ -49,6 +51,7 @@ struct Fixture {
     second_workspace: PathBuf,
 }
 
+/// Keep trusted application storage and both project folders in separate subtrees.
 fn fixture() -> Fixture {
     let temporary = tempfile::tempdir().expect("private temporary directory");
     let data = temporary.path().join("app-data");
@@ -67,6 +70,7 @@ fn fixture() -> Fixture {
     }
 }
 
+/// Initialize the real journal and explicitly select the fixture's development root.
 fn open_store(fixture: &Fixture) -> ControlStore {
     let mut store = ControlStore::open(&fixture.data).expect("open control store");
     let revision = store.revision();
@@ -76,6 +80,7 @@ fn open_store(fixture: &Fixture) -> ControlStore {
     store
 }
 
+/// Use the current revision so callers can isolate the behavior under test.
 fn register(store: &mut ControlStore, path: &Path) -> WorkspaceRegistration {
     store
         .register_workspace(path, store.revision())
@@ -90,6 +95,7 @@ fn control_path(data: &Path) -> PathBuf {
     data.join(CONTROL_FILE)
 }
 
+/// Compare closed-file bytes because invalid replay must never rewrite its evidence.
 fn expect_invalid_unchanged(data: &Path) {
     let path = control_path(data);
     let before = fs::read(&path).expect("read tampered journal before open");
@@ -102,6 +108,7 @@ fn expect_invalid_unchanged(data: &Path) {
     );
 }
 
+/// Registry identity and default flags must survive a fresh writer and replay.
 #[test]
 fn workspace_ids_and_default_flags_survive_reopen_and_reregistration_is_idempotent() {
     let fixture = fixture();
@@ -312,6 +319,7 @@ fn a_binding_from_another_store_is_denied() {
     assert!(!decision.execution_allowed());
 }
 
+/// New objects at a saved path must not inherit its non-default permission choices.
 #[test]
 fn replacing_workspace_directory_blocks_binding_and_reregistration() {
     let fixture = fixture();
@@ -347,6 +355,59 @@ fn replacing_workspace_directory_blocks_binding_and_reregistration() {
     );
 }
 
+/// Renaming an object must not return an ID whose saved path is unavailable.
+#[test]
+fn renamed_workspace_cannot_reuse_registration_with_a_missing_saved_path() {
+    let fixture = fixture();
+    let mut store = open_store(&fixture);
+    let registration = register(&mut store, &fixture.workspace);
+    let renamed = fixture.root.join("renamed-workspace");
+    let revision = store.revision();
+    let audit_before = serde_json::to_value(store.audit(100).expect("audit before rename"))
+        .expect("serialize audit");
+    fs::rename(&fixture.workspace, &renamed).expect("rename workspace within root");
+
+    assert!(matches!(
+        store.register_workspace(&renamed, revision),
+        Err(ControlError::DirectoryChanged)
+    ));
+    assert_eq!(store.revision(), revision);
+    assert_eq!(
+        serde_json::to_value(store.audit(100).expect("unchanged audit")).expect("serialize audit"),
+        audit_before
+    );
+    assert!(store.workspace(registration.id()).is_some());
+    assert!(matches!(
+        store.bind_session(session_id(), registration.id()),
+        Err(ControlError::DirectoryChanged)
+    ));
+}
+
+/// An open Unix journal can move; stale app-data paths cannot prove separation.
+#[cfg(unix)]
+#[test]
+fn moved_application_storage_is_rejected_before_root_overlap_check() {
+    let fixture = fixture();
+    let mut store = ControlStore::open(&fixture.data).expect("control store");
+    let moved = fixture.root.join("moved-app-data");
+    fs::rename(&fixture.data, &moved).expect("move storage while its writer is open");
+
+    assert!(matches!(
+        store.set_development_root(&fixture.root, 0),
+        Err(ControlError::DirectoryChanged)
+    ));
+    assert_eq!(store.revision(), 0);
+    assert!(!store.has_development_root());
+    assert_eq!(store.audit(100).expect("unchanged audit").len(), 1);
+    drop(store);
+    let reopened = ControlStore::open_existing(&moved)
+        .expect("original journal remains valid")
+        .expect("moved journal exists");
+    assert_eq!(reopened.revision(), 0);
+    assert!(!reopened.has_development_root());
+}
+
+/// Registering a sibling of the development root must not widen configured scope.
 #[test]
 fn registration_outside_the_development_root_is_rejected() {
     let fixture = fixture();
@@ -360,6 +421,7 @@ fn registration_outside_the_development_root_is_rejected() {
     assert!(matches!(error, ControlError::DirectoryChanged));
 }
 
+/// Reject either ancestor relationship between task data and application storage.
 #[test]
 fn application_storage_overlap_is_rejected_in_both_directions() {
     let temporary = tempfile::tempdir().expect("private temporary directory");
@@ -383,6 +445,7 @@ fn application_storage_overlap_is_rejected_in_both_directions() {
     assert!(matches!(error, ControlError::StorageOverlap));
 }
 
+/// Compatibility detection must not create storage when the control file is absent.
 #[test]
 fn opening_missing_existing_store_does_not_create_files_or_directories() {
     let temporary = tempfile::tempdir().expect("private temporary directory");
@@ -400,6 +463,7 @@ fn opening_missing_existing_store_does_not_create_files_or_directories() {
     assert!(!control_path(&missing).exists());
 }
 
+/// Independent handles cannot concurrently mutate one settings source of truth.
 #[test]
 fn a_second_control_store_writer_receives_busy() {
     let fixture = fixture();
@@ -416,6 +480,7 @@ fn a_second_control_store_writer_receives_busy() {
     drop(first);
 }
 
+/// Invalid persisted control state must fail without automatic reset or repair.
 #[test]
 fn malformed_control_journals_fail_without_repair() {
     for corruption in ["duplicate-key", "unknown-schema", "truncated-tail", "empty"] {

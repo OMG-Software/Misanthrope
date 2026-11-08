@@ -31,17 +31,18 @@ configuration selection; it does not authorize later I/O. Native path units are
 preserved without Unicode replacement. Ancestor checks compare live directory
 identities, with a maximum of 256 ancestors. Exhausting the bound is an error,
 never proof that two directories are separate. They do not use string prefixes.
-Directory creation-time support is required; unsupported filesystems fail. On
-Unix, identity capture opens the selection with `O_DIRECTORY | O_NOFOLLOW` so a
-FIFO or final-component link cannot be treated as a directory or block opening.
+Directory creation-time support is required; unsupported filesystems fail.
+After resolving a trusted selection, Unix opens the canonical path with
+`O_DIRECTORY | O_NOFOLLOW`. A FIFO or a newly introduced final-component link
+then fails at open. This does not protect parent-directory races.
 
 Registering the same directory again reuses its ID without a revision change.
 Aliases of that directory can reuse the same ID. A replacement at a registered
 path cannot inherit the old ID or preferences. If a saved workspace path is
 missing or now names a different directory, binding or registration fails with
 `DirectoryChanged`. Renaming or moving a workspace does not migrate its
-registration. Registering it at a new path cannot reuse its old ID or
-preferences. Bindings recheck the root and workspace identity and root
+registration. While its saved path is missing or stale, registration at a new
+path cannot reuse the old ID or preferences. Bindings recheck workspace identity and root
 membership. The application data directory and development root must not
 overlap in either direction; the saved application-data directory identity is
 checked before the overlap check. Stale data-directory identity fails closed.

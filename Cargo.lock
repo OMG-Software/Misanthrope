@@ -601,6 +601,7 @@ dependencies = [
 name = "misanthrope-core"
 version = "0.2.0"
 dependencies = [
+ "libc",
  "misanthrope-platform",
  "reqwest",
  "serde",

@@ -23,7 +23,7 @@ observations. They also cover missing creation-time metadata and reject opening
 a FIFO as a directory. Control-store tests cover strict journal replay, stale
 revision rejection without a write, workspace ID reuse and replacement, moved
 or stale directory rejection, bindings, audit records, and lock contention.
-CLI workflow tests bound subprocess time and output capture, and assert the
+CLI workflow tests bound subprocess waits and captured stream reads, and assert the
 exact number of durable `policy_checked` events in the tested workflow. They
 exercise configuration commands and confirm that policy checks remain
 configuration-only. These tests do not qualify filesystem support or runtime
