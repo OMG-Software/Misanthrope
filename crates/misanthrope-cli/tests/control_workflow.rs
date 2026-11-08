@@ -1,21 +1,160 @@
 use serde_json::{Value, json};
-use std::fs;
+use std::fs::{self, File};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use uuid::Uuid;
 
+const CLI_DEADLINE: Duration = Duration::from_secs(10);
+const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const MAX_CAPTURE_BYTES: u64 = 1024 * 1024;
+const HANG_FIXTURE_ENV: &str = "MISANTHROPE_CONTROL_WORKFLOW_HANG_FIXTURE";
+
+struct BoundedOutput {
+    output: Output,
+    timed_out: bool,
+}
+
+/// Run a child with a deadline and bounded output reads.
+///
+/// Temporary files avoid a full output pipe blocking the child. Reads are capped at
+/// 1 MiB after exit; temporary-file disk growth is not capped. The caller gets the
+/// status and both streams only after the child has exited or been killed and reaped.
+fn run_with_deadline(mut command: Command, timeout: Duration) -> io::Result<BoundedOutput> {
+    let stdout_file = tempfile::tempfile()?;
+    let stderr_file = tempfile::tempfile()?;
+    let mut stdout_reader = stdout_file.try_clone()?;
+    let mut stderr_reader = stderr_file.try_clone()?;
+    command
+        .stdout(Stdio::from(stdout_file))
+        .stderr(Stdio::from(stderr_file));
+    let deadline = Instant::now().checked_add(timeout).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "process timeout is too large")
+    })?;
+    let mut child = command.spawn()?;
+    let mut timed_out = false;
+
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break child.wait()?,
+            Ok(None) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    timed_out = true;
+                    break terminate_and_reap(&mut child)?;
+                }
+                thread::sleep(remaining.min(PROCESS_POLL_INTERVAL));
+            }
+            Err(error) => {
+                return match terminate_and_reap(&mut child) {
+                    Ok(_) => Err(error),
+                    Err(cleanup_error) => Err(cleanup_error),
+                };
+            }
+        }
+    };
+
+    Ok(BoundedOutput {
+        output: Output {
+            status,
+            stdout: read_capture(&mut stdout_reader)?,
+            stderr: read_capture(&mut stderr_reader)?,
+        },
+        timed_out,
+    })
+}
+
+/// Kill a running child and wait for its exit status before returning.
+fn terminate_and_reap(child: &mut Child) -> io::Result<ExitStatus> {
+    match child.kill() {
+        Ok(()) => child.wait(),
+        Err(kill_error) => match child.try_wait()? {
+            Some(_) => child.wait(),
+            None => Err(kill_error),
+        },
+    }
+}
+
+/// Read at most the configured capture limit from an exited child output file.
+fn read_capture(file: &mut File) -> io::Result<Vec<u8>> {
+    if file.metadata()?.len() > MAX_CAPTURE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "child output exceeds the 1 MiB capture limit",
+        ));
+    }
+    file.seek(SeekFrom::Start(0))?;
+    let mut bytes = Vec::new();
+    file.take(MAX_CAPTURE_BYTES + 1).read_to_end(&mut bytes)?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_CAPTURE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "child output exceeds the 1 MiB capture limit",
+        ));
+    }
+    Ok(bytes)
+}
+
+/// Run the CLI with the suite deadline and retain both output streams for assertions.
 fn run_cli(data_root: &Path, args: &[&str]) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_misanthrope"));
     command
         .env_remove("MISANTHROPE_LM_TOKEN")
+        .env_remove(HANG_FIXTURE_ENV)
         .arg("--data-dir")
         .arg(data_root)
-        .args(args)
-        .output()
-        .expect("run Misanthrope CLI")
+        .args(args);
+    let result = run_with_deadline(command, CLI_DEADLINE).expect("run Misanthrope CLI");
+    assert!(
+        !result.timed_out,
+        "CLI exceeded its 10-second deadline: stdout={} stderr={}",
+        String::from_utf8_lossy(&result.output.stdout),
+        String::from_utf8_lossy(&result.output.stderr)
+    );
+    result.output
 }
 
+/// Park only when the timeout regression launches this test in a child process.
+#[test]
+fn process_timeout_fixture() {
+    if std::env::var_os(HANG_FIXTURE_ENV).is_some() {
+        let mut stdout = io::stdout().lock();
+        stdout
+            .write_all(b"HANG_FIXTURE_READY\n")
+            .expect("write child readiness marker");
+        stdout.flush().expect("flush child readiness marker");
+        loop {
+            thread::park();
+        }
+    }
+}
+/// Verify that the deadline kills and reaps a child that does not exit.
+#[test]
+fn process_deadline_kills_and_reaps_a_hung_child() {
+    // Given a fixture child that parks indefinitely after the test harness starts it.
+    let executable = std::env::current_exe().expect("current test executable");
+    let mut command = Command::new(executable);
+    command
+        .env_remove("MISANTHROPE_LM_TOKEN")
+        .env(HANG_FIXTURE_ENV, "1")
+        .args(["process_timeout_fixture", "--nocapture"]);
+
+    // When the deadline expires, the helper kills and waits for the child process.
+    let result =
+        run_with_deadline(command, Duration::from_secs(3)).expect("run bounded hanging fixture");
+    assert!(result.timed_out, "the fixture must exceed its deadline");
+    assert!(
+        String::from_utf8_lossy(&result.output.stdout).contains("HANG_FIXTURE_READY"),
+        "the child must reach its parked state before timeout"
+    );
+    assert!(
+        !result.output.status.success(),
+        "the killed child must report a non-success exit"
+    );
+}
 fn json_output(output: &Output) -> Value {
     serde_json::from_slice(&output.stdout).expect("CLI stdout is JSON")
 }
@@ -255,7 +394,14 @@ fn workspace_commands_persist_cas_permissions_policy_and_audit_results() {
         .as_array()
         .expect("audit entries")
         .clone();
-    assert!(entries.len() >= 5, "checks must be audited: {entries:?}");
+    let policy_checks = entries
+        .iter()
+        .filter(|entry| entry["action"]["type"] == "policy_checked")
+        .count();
+    assert_eq!(
+        policy_checks, 9,
+        "expected four default, four enabled, and one cross-workspace check; entries: {entries:#?}"
+    );
 }
 
 #[test]
@@ -319,6 +465,49 @@ fn configured_sessions_keep_workspace_ids_and_fail_closed_outside_the_root() {
     assert_eq!(journal_count, 2, "outside session must not be written");
 }
 
+/// Verify Unix FIFO paths fail promptly and release the settings-store lock.
+#[cfg(unix)]
+#[test]
+fn fifo_paths_fail_promptly_and_release_the_control_store() {
+    // Given a FIFO below a valid development root and private application data.
+    let temporary = TempDir::new().expect("private temporary directory");
+    let development_root = temporary.path().join("development");
+    fs::create_dir(&development_root).expect("create development root");
+    let fifo = development_root.join("workspace-fifo");
+    let mut mkfifo = Command::new("mkfifo");
+    mkfifo.arg(&fifo).env_remove("MISANTHROPE_LM_TOKEN");
+    let created = run_with_deadline(mkfifo, CLI_DEADLINE).expect("run mkfifo fixture command");
+    assert!(!created.timed_out, "mkfifo fixture command must finish");
+    assert_success(&created.output);
+
+    // When the FIFO is selected as the root, the CLI must return a controlled failure.
+    let root_data = temporary.path().join("root-application-data");
+    let root_attempt = run_cli(
+        &root_data,
+        &["workspace", "set-root", path_arg(&fifo), "--revision", "0"],
+    );
+    assert_control_error(&root_attempt);
+    let after_root_failure = run_cli(&root_data, &["workspace", "status"]);
+    assert_success(&after_root_failure);
+    let after_root_failure = json_output(&after_root_failure);
+    assert_eq!(after_root_failure["revision"], 0);
+    assert_eq!(after_root_failure["development_root"], Value::Null);
+
+    // When the valid root is configured, registering the FIFO also fails and releases the lock.
+    let registration_data = temporary.path().join("registration-application-data");
+    let root_snapshot = set_root(&registration_data, &development_root);
+    assert_eq!(root_snapshot["revision"], 1);
+    let registration_attempt = run_cli(
+        &registration_data,
+        &["workspace", "register", path_arg(&fifo), "--revision", "1"],
+    );
+    assert_control_error(&registration_attempt);
+    let after_registration_failure = run_cli(&registration_data, &["workspace", "status"]);
+    assert_success(&after_registration_failure);
+    let after_registration_failure = json_output(&after_registration_failure);
+    assert_eq!(after_registration_failure["revision"], 1);
+    assert_ne!(after_registration_failure["development_root"], Value::Null);
+}
 #[test]
 fn corrupt_control_state_fails_closed_for_new_sessions() {
     // Given a private application-data directory with a corrupt control journal.
