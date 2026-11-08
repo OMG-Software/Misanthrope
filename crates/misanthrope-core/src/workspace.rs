@@ -3,7 +3,7 @@
 //! These records describe a selected directory. They are not access grants and
 //! do not prove containment at the time a file is opened.
 
-#[cfg(windows)]
+#[cfg(any(unix, windows))]
 use std::fs::OpenOptions;
 use std::fs::{self, File};
 use std::io;
@@ -46,6 +46,17 @@ impl DirectoryRecord {
     /// This is for a trusted configuration selection. The result is not an
     /// access grant and must not replace checks on the object later opened.
     pub(crate) fn capture(path: &Path) -> io::Result<Self> {
+        Self::capture_with_created(path, |metadata| metadata.created())
+    }
+
+    /// Capture a directory and preserve the original creation-time error.
+    ///
+    /// The reader is injected so tests can verify that unsupported creation
+    /// metadata fails closed. This function has no modification-time fallback.
+    fn capture_with_created(
+        path: &Path,
+        created: impl FnOnce(&fs::Metadata) -> io::Result<SystemTime>,
+    ) -> io::Result<Self> {
         let canonical_path = fs::canonicalize(path)?;
         if !canonical_path.is_absolute() {
             return Err(invalid_input("canonical workspace path is not absolute"));
@@ -55,7 +66,7 @@ impl DirectoryRecord {
         validate_directory_metadata(&metadata)?;
         let identity = misanthrope_platform::directory_identity(&file)?;
         let (creation_pre_epoch, creation_seconds, creation_nanos) =
-            encode_system_time(metadata.created()?);
+            encode_system_time(created(&metadata)?);
         let path = NativePath::from_path(&canonical_path)
             .map_err(|_| invalid_input("workspace path cannot be encoded natively"))?;
         let record = Self {
@@ -170,6 +181,9 @@ impl DirectoryRecord {
     }
 }
 
+/// Store a time as a before-epoch flag plus the exact duration magnitude.
+///
+/// This preserves the `SystemTime` value reported by the host metadata API.
 fn encode_system_time(value: SystemTime) -> (bool, u64, u32) {
     match value.duration_since(UNIX_EPOCH) {
         Ok(duration) => (false, duration.as_secs(), duration.subsec_nanos()),
@@ -180,10 +194,16 @@ fn encode_system_time(value: SystemTime) -> (bool, u64, u32) {
     }
 }
 
+/// Open a directory without following its final link or blocking on special files.
 fn open_directory(path: &Path) -> io::Result<File> {
     #[cfg(unix)]
     {
-        File::open(path)
+        use std::os::unix::fs::OpenOptionsExt;
+
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(path)
     }
     #[cfg(windows)]
     {
@@ -208,6 +228,9 @@ fn open_directory(path: &Path) -> io::Result<File> {
     }
 }
 
+/// Require an ordinary directory and reject a Windows reparse-point handle.
+///
+/// The check describes the opened object. It does not secure its parent path.
 fn validate_directory_metadata(metadata: &fs::Metadata) -> io::Result<()> {
     if !metadata.is_dir() {
         return Err(invalid_input("workspace path is not a directory"));
@@ -223,6 +246,7 @@ fn validate_directory_metadata(metadata: &fs::Metadata) -> io::Result<()> {
     Ok(())
 }
 
+/// Build a consistent error for invalid directory metadata or path shape.
 fn invalid_input(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
 }
@@ -250,6 +274,34 @@ mod tests {
             decoded.live_path().expect("native path decodes"),
             record.live_path().expect("path decodes")
         );
+    }
+
+    #[test]
+    fn regular_files_are_rejected_as_workspace_directories() {
+        let file = tempfile::NamedTempFile::new().expect("temporary file");
+
+        let error = DirectoryRecord::capture(file.path()).expect_err("file is not a directory");
+
+        assert!(matches!(
+            error.kind(),
+            io::ErrorKind::InvalidInput | io::ErrorKind::NotADirectory
+        ));
+    }
+
+    #[test]
+    fn unavailable_creation_time_propagates_without_fallback() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+
+        let error = DirectoryRecord::capture_with_created(directory.path(), |_| {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "directory creation time unavailable",
+            ))
+        })
+        .expect_err("capture must fail when creation time is unavailable");
+
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        assert_eq!(error.to_string(), "directory creation time unavailable");
     }
 
     #[test]
