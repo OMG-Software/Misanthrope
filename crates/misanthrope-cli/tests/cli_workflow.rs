@@ -1,4 +1,5 @@
 use misanthrope_core::prompt::{BASE_PROMPT, BASE_PROMPT_VERSION, base_prompt_sha256};
+use misanthrope_core::session::{MessageRole, SessionJournal};
 use serde_json::{Value, json};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -526,4 +527,106 @@ fn non_loopback_endpoint_fails_before_creating_application_data() {
         !data_dir.exists(),
         "invalid endpoint must be rejected first"
     );
+}
+#[test]
+fn active_turn_refuses_chat_then_interrupt_is_idempotent_and_allows_archive() {
+    let temporary = TempDir::new().expect("create private test directory");
+    let data_dir = temporary.path().join("application-data");
+    let workspace = temporary.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("create private workspace");
+    let mut journal = SessionJournal::create(&data_dir, &workspace, "active fixture")
+        .expect("create private session journal");
+    let session_id = journal.snapshot().session_id;
+    let request_id = journal
+        .start_turn()
+        .expect("start interrupted fixture turn");
+    let journal_path = journal.path().to_path_buf();
+    drop(journal);
+    let before_chat = std::fs::read(&journal_path).expect("read active journal bytes");
+
+    let journal_arg = journal_path.to_str().expect("journal path is Unicode");
+    let chat = run_resumed_chat(&journal_path, "http://127.0.0.1:9/v1", "must not be sent");
+    assert!(!chat.status.success());
+    let chat_error: Value = serde_json::from_slice(&chat.stderr).expect("CLI error is JSON");
+    assert_eq!(chat_error["error"]["code"], "session");
+    assert_eq!(
+        std::fs::read(&journal_path).expect("read journal after refused chat"),
+        before_chat,
+        "refused chat must not alter or fail the active turn"
+    );
+    let reopened = SessionJournal::open(&journal_path).expect("reopen active journal");
+    assert_eq!(reopened.snapshot().active_turn, Some(request_id));
+    assert_eq!(reopened.snapshot().session_id, session_id);
+    drop(reopened);
+
+    let interrupt = run_cli(&["session", "interrupt", journal_arg]);
+    assert_success(&interrupt);
+    let interrupted = output_json(&interrupt);
+    assert_eq!(interrupted["session"]["session_id"], session_id.to_string());
+    assert_eq!(interrupted["session"]["active_turn"], Value::Null);
+    let interrupted_bytes = std::fs::read(&journal_path).expect("read interrupted journal");
+    let events = read_events(&journal_path);
+    let failure = events.last().expect("interrupt records terminal event");
+    assert_eq!(failure["type"], "turn.failed");
+    assert_eq!(failure["payload"]["request_id"], request_id.to_string());
+    assert_eq!(failure["payload"]["code"], "operator_interrupted");
+
+    let repeated = run_cli(&["session", "interrupt", journal_arg]);
+    assert_success(&repeated);
+    assert_eq!(
+        output_json(&repeated)["session"]["event_count"],
+        interrupted["session"]["event_count"]
+    );
+    assert_eq!(
+        std::fs::read(&journal_path).expect("read journal after repeated interrupt"),
+        interrupted_bytes,
+        "idle interrupt must not append another journal event"
+    );
+
+    let archived = run_cli(&["session", "archive", journal_arg]);
+    assert_success(&archived);
+    assert_eq!(output_json(&archived)["session"]["archived"], true);
+}
+
+#[test]
+fn oversized_provider_reply_fails_turn_without_recording_assistant_message() {
+    let temporary = TempDir::new().expect("create private test directory");
+    let data_dir = temporary.path().join("application-data");
+    let workspace = temporary.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("create private workspace");
+    let journal = SessionJournal::create(&data_dir, &workspace, "oversized reply fixture")
+        .expect("create private session journal");
+    let journal_path = journal.path().to_path_buf();
+    drop(journal);
+
+    let oversized_content = "x".repeat(16 * 1024 + 1);
+    let server = MockServer::start(completion_response(&oversized_content));
+    let output = run_resumed_chat(
+        &journal_path,
+        &server.endpoint,
+        "request with oversized response",
+    );
+    let request = server.finish();
+
+    assert!(!output.status.success());
+    assert_eq!(request["messages"][0]["content"], BASE_PROMPT);
+    let error: Value = serde_json::from_slice(&output.stderr).expect("CLI error is JSON");
+    assert_eq!(error["error"]["code"], "provider");
+
+    let reopened = SessionJournal::open(&journal_path).expect("reopen failed-turn journal");
+    assert_eq!(reopened.snapshot().active_turn, None);
+    assert_eq!(reopened.snapshot().messages.len(), 1);
+    assert_eq!(reopened.snapshot().messages[0].role, MessageRole::User);
+    assert_eq!(
+        reopened.snapshot().messages[0].text,
+        "request with oversized response"
+    );
+    drop(reopened);
+    let events = read_events(&journal_path);
+    let failure = events.last().expect("oversized reply records failed turn");
+    assert_eq!(failure["type"], "turn.failed");
+    assert_eq!(failure["payload"]["code"], "response_too_large");
+    assert!(!events.iter().any(|event| {
+        event["type"] == "message.recorded" && event["payload"]["role"] == "assistant"
+    }));
 }
