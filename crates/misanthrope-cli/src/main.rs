@@ -1,8 +1,11 @@
 //! Developer CLI for the first Misanthrope core prototype.
 #![forbid(unsafe_code)]
 
+mod control_cli;
+
 use clap::{Args, Parser, Subcommand};
 use directories::ProjectDirs;
+use misanthrope_core::control::ControlStore;
 use misanthrope_core::prompt::{
     self, BASE_PROMPT, BASE_PROMPT_VERSION, ConversationMessage, ConversationRole,
 };
@@ -41,6 +44,11 @@ enum Command {
     Session {
         #[command(subcommand)]
         action: SessionCommand,
+    },
+    /// Configure workspaces and inspect configuration-only permission policy.
+    Workspace {
+        #[command(subcommand)]
+        action: control_cli::WorkspaceCommand,
     },
     /// Send one turn to an explicitly selected local LM Studio model.
     Chat(ChatArgs),
@@ -180,6 +188,10 @@ fn run(cli: Cli) -> Result<(), CliError> {
             "archive_restore": true,
             "compiled_prompt": true,
             "local_model_chat": true,
+            "workspace_registry": true,
+            "permission_policy": true,
+            "permission_audit": true,
+            "policy_decision": "configuration_only",
             "workspace_file_tools": false,
             "process_execution": false,
             "mcp": false,
@@ -192,8 +204,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
                 let token = read_lm_token()?;
                 let title = redact_known_secret(&title, token.as_deref());
                 let data_root = data_root(cli.data_dir)?;
-                let journal = SessionJournal::create(&data_root, &workspace, &title)
-                    .map_err(session_error)?;
+                let journal = create_session(&data_root, &workspace, &title)?;
                 print_session(&journal)
             }
             SessionCommand::Inspect { locator } => {
@@ -223,6 +234,10 @@ fn run(cli: Cli) -> Result<(), CliError> {
                 print_session(&journal)
             }
         },
+        Command::Workspace { action } => {
+            let data_root = data_root(cli.data_dir)?;
+            control_cli::run(action, &data_root)
+        }
         Command::Chat(args) => chat(cli.data_dir, args),
     }
 }
@@ -258,8 +273,7 @@ fn chat(data_dir: Option<PathBuf>, mut args: ChatArgs) -> Result<(), CliError> {
             let workspace = args.workspace.as_deref().ok_or_else(|| {
                 CliError::new("configuration", "A workspace or journal is required")
             })?;
-            SessionJournal::create(&data_root(data_dir)?, workspace, &args.title)
-                .map_err(session_error)?
+            create_session(&data_root(data_dir)?, workspace, &args.title)?
         }
     };
     let locator = journal_locator(&journal)?;
@@ -368,6 +382,41 @@ fn chat_turn(
         locator: journal_locator(journal)?,
         detail: json!({"reply":reply}),
     })
+}
+
+/// Create a session with current registry metadata when a trusted root is configured.
+///
+/// An absent or valid unconfigured store preserves legacy session creation. Corrupt
+/// control state or an invalid workspace under a configured root fails closed.
+fn create_session(
+    data_root: &std::path::Path,
+    workspace: &std::path::Path,
+    title: &str,
+) -> Result<SessionJournal, CliError> {
+    let registration_id = match ControlStore::open_existing(data_root)
+        .map_err(|error| CliError::new("control", error.to_string()))?
+    {
+        Some(mut store) if store.has_development_root() => {
+            let registration = store
+                .register_workspace(workspace, store.revision())
+                .map_err(|error| CliError::new("control", error.to_string()))?;
+            let id = registration.id();
+            drop(store);
+            Some(id)
+        }
+        Some(store) => {
+            drop(store);
+            None
+        }
+        None => None,
+    };
+
+    let journal = match registration_id {
+        Some(id) => SessionJournal::create_with_workspace_id(data_root, workspace, title, id),
+        None => SessionJournal::create(data_root, workspace, title),
+    }
+    .map_err(session_error)?;
+    Ok(journal)
 }
 
 /// Choose trusted application storage; repository content cannot set this value.
