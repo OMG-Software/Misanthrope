@@ -8,6 +8,8 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 const SUCCESS: &str = r#"{"choices":[{"message":{"role":"assistant","content":"A plain reply."},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":4,"total_tokens":16}}"#;
+const MAX_REQUEST_HEADER_BYTES: usize = 16 * 1024;
+const MAX_REQUEST_BODY_BYTES: usize = 256 * 1024;
 
 struct Fixture {
     address: String,
@@ -17,19 +19,35 @@ struct Fixture {
 impl Fixture {
     fn start(status: &str, body: &[u8], extra_headers: &str) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind local fixture");
+        listener
+            .set_nonblocking(true)
+            .expect("make fixture accept bounded");
         let address = listener.local_addr().expect("fixture address");
         let body = body.to_vec();
         let extra_headers = extra_headers.to_owned();
         let status = status.to_owned();
         let task = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept local request");
+            let accept_deadline = Instant::now() + Duration::from_secs(5);
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(connection) => break connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < accept_deadline, "fixture accept timed out");
+                        thread::sleep(Duration::from_millis(2));
+                    }
+                    Err(error) => panic!("fixture accept failed: {error}"),
+                }
+            };
+            stream
+                .set_nonblocking(false)
+                .expect("make accepted fixture stream blocking");
             stream
                 .set_read_timeout(Some(Duration::from_secs(3)))
                 .expect("set fixture read timeout");
             stream
                 .set_write_timeout(Some(Duration::from_secs(3)))
                 .expect("set fixture write timeout");
-            let (head, request_body) = read_request(&mut stream);
+            let (head, request_body) = read_request(&mut stream).expect("read bounded request");
             let response = format!(
                 "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n{extra_headers}\r\n",
                 body.len()
@@ -47,34 +65,60 @@ impl Fixture {
     }
 
     fn finish(self) -> (String, Vec<u8>) {
-        self.task.join().expect("fixture completes")
+        join_bounded(self.task, "fixture completes")
     }
 }
 
-fn read_request(stream: &mut TcpStream) -> (String, Vec<u8>) {
+fn join_bounded<T>(task: JoinHandle<T>, message: &str) -> T {
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while !task.is_finished() {
+        assert!(Instant::now() < deadline, "{message} within the deadline");
+        thread::sleep(Duration::from_millis(2));
+    }
+    task.join().expect(message)
+}
+
+fn read_request(stream: &mut TcpStream) -> std::io::Result<(String, Vec<u8>)> {
     let mut head = Vec::new();
     let mut window = Vec::with_capacity(4);
     while window.as_slice() != b"\r\n\r\n" {
+        if head.len() >= MAX_REQUEST_HEADER_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "fixture request headers exceed their byte limit",
+            ));
+        }
         let mut byte = [0_u8; 1];
-        stream.read_exact(&mut byte).expect("read request headers");
+        stream.read_exact(&mut byte)?;
         head.push(byte[0]);
         if window.len() == 4 {
             window.remove(0);
         }
         window.push(byte[0]);
     }
-    let head_text = String::from_utf8(head).expect("HTTP headers are ASCII");
+    let head_text = String::from_utf8(head)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
     let content_length = head_text
         .lines()
         .find_map(|line| {
             let (name, value) = line.split_once(':')?;
             name.eq_ignore_ascii_case("content-length")
-                .then(|| value.trim().parse::<usize>().expect("valid content length"))
+                .then(|| value.trim().parse::<usize>())
         })
-        .expect("request has a body length");
+        .transpose()
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "missing content length")
+        })?;
+    if content_length > MAX_REQUEST_BODY_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "fixture request body exceeds its byte limit",
+        ));
+    }
     let mut body = vec![0; content_length];
-    stream.read_exact(&mut body).expect("read request body");
-    (head_text, body)
+    stream.read_exact(&mut body)?;
+    Ok((head_text, body))
 }
 
 fn messages() -> Vec<ModelMessage> {
@@ -135,7 +179,7 @@ fn assert_prompt_rejected_before_connect(messages: &[ModelMessage]) {
                     stream
                         .set_write_timeout(Some(Duration::from_secs(1)))
                         .expect("set fixture write timeout");
-                    let (head, _) = read_request(&mut stream);
+                    let (head, _) = read_request(&mut stream).expect("read bounded request");
                     stream
                         .write_all(
                             format!(
@@ -152,7 +196,7 @@ fn assert_prompt_rejected_before_connect(messages: &[ModelMessage]) {
                     if Instant::now() >= deadline {
                         break None;
                     }
-                    thread::yield_now();
+                    thread::sleep(Duration::from_millis(2));
                 }
                 Err(error) => panic!("fixture accept failed: {error}"),
             }
@@ -160,7 +204,7 @@ fn assert_prompt_rejected_before_connect(messages: &[ModelMessage]) {
     });
 
     let result = model.complete(messages);
-    let unexpected_request = monitor.join().expect("bounded listener monitor completes");
+    let unexpected_request = join_bounded(monitor, "bounded listener monitor completes");
 
     assert_eq!(result, Err(ProviderError::InvalidConfiguration));
     assert!(
