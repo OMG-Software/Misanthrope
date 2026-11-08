@@ -1,4 +1,4 @@
-use crate::prompt::ModelMessage;
+use crate::prompt::{BASE_PROMPT, ModelMessage, ModelRole};
 use reqwest::Url;
 use reqwest::blocking::{Client, Response};
 use reqwest::header::{AUTHORIZATION, HeaderValue};
@@ -8,7 +8,6 @@ use serde_json::Value;
 use std::fmt;
 use std::io::Read;
 use std::net::IpAddr;
-use std::str::FromStr;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -175,6 +174,18 @@ impl LocalModelClient {
     /// Model output remains untrusted plain text and is never interpreted as an
     /// action by this adapter.
     pub fn complete(&self, messages: &[ModelMessage]) -> Result<ModelReply, ProviderError> {
+        let Some((base_message, following_messages)) = messages.split_first() else {
+            return Err(ProviderError::InvalidConfiguration);
+        };
+        if base_message.role != ModelRole::System
+            || base_message.content != BASE_PROMPT
+            || following_messages
+                .iter()
+                .any(|message| message.role == ModelRole::System)
+        {
+            return Err(ProviderError::InvalidConfiguration);
+        }
+
         let estimate = estimate_context(messages, self.max_output_tokens)?;
         if estimate > self.context_tokens {
             return Err(ProviderError::ContextLimit);

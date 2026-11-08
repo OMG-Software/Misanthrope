@@ -1,11 +1,11 @@
-use misanthrope_core::prompt::{ModelMessage, ModelRole};
+use misanthrope_core::prompt::{BASE_PROMPT, ModelMessage, ModelRole};
 use misanthrope_core::provider::{
     LocalModelClient, LocalModelConfig, ModelReply, ProviderError, Usage,
 };
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const SUCCESS: &str = r#"{"choices":[{"message":{"role":"assistant","content":"A plain reply."},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":4,"total_tokens":16}}"#;
 
@@ -81,7 +81,7 @@ fn messages() -> Vec<ModelMessage> {
     vec![
         ModelMessage {
             role: ModelRole::System,
-            content: "Fixed base instructions".to_owned(),
+            content: BASE_PROMPT.to_owned(),
         },
         ModelMessage {
             role: ModelRole::User,
@@ -111,10 +111,71 @@ fn client(address: String, token: Option<String>) -> LocalModelClient {
     .expect("valid local model client")
 }
 
+fn assert_prompt_rejected_before_connect(messages: &[ModelMessage]) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind no-call fixture");
+    listener
+        .set_nonblocking(true)
+        .expect("make no-call fixture nonblocking");
+    let address = format!(
+        "http://{}/v1",
+        listener.local_addr().expect("fixture address")
+    );
+    let model = client(address, None);
+    let monitor = thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_millis(250);
+        loop {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream
+                        .set_nonblocking(false)
+                        .expect("make accepted fixture stream blocking");
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(3)))
+                        .expect("set fixture read timeout");
+                    stream
+                        .set_write_timeout(Some(Duration::from_secs(1)))
+                        .expect("set fixture write timeout");
+                    let (head, _) = read_request(&mut stream);
+                    stream
+                        .write_all(
+                            format!(
+                                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                SUCCESS.len(),
+                                SUCCESS
+                            )
+                            .as_bytes(),
+                        )
+                        .expect("reply to any unexpected request");
+                    break Some(head);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        break None;
+                    }
+                    thread::yield_now();
+                }
+                Err(error) => panic!("fixture accept failed: {error}"),
+            }
+        }
+    });
+
+    let result = model.complete(messages);
+    let unexpected_request = monitor.join().expect("bounded listener monitor completes");
+
+    assert_eq!(result, Err(ProviderError::InvalidConfiguration));
+    assert!(
+        unexpected_request.is_none(),
+        "invalid prompt must not reach server"
+    );
+}
+
 #[test]
 fn sends_prompt_roles_without_tools_and_parses_plain_reply() {
     let fixture = Fixture::start("200 OK", SUCCESS.as_bytes(), "");
-    let model = client(fixture.address, Some("local-secret-token".to_owned()));
+    let model = client(
+        fixture.address.clone(),
+        Some("local-secret-token".to_owned()),
+    );
 
     let reply = model.complete(&messages()).expect("valid completion");
     let (head, body) = fixture.finish();
@@ -129,6 +190,7 @@ fn sends_prompt_roles_without_tools_and_parses_plain_reply() {
     assert_eq!(request["stream"], false);
     assert_eq!(request["max_tokens"], 512);
     assert_eq!(request["messages"][0]["role"], "system");
+    assert_eq!(request["messages"][0]["content"], BASE_PROMPT);
     assert_eq!(request["messages"][1]["role"], "user");
     assert_eq!(request["messages"][2]["role"], "assistant");
     assert_eq!(request["messages"][3]["content"], "Last user request");
@@ -151,7 +213,10 @@ fn sends_prompt_roles_without_tools_and_parses_plain_reply() {
 #[test]
 fn does_not_leak_token_on_authentication_failure() {
     let fixture = Fixture::start("401 Unauthorized", b"server echoed local-secret-token", "");
-    let model = client(fixture.address, Some("local-secret-token".to_owned()));
+    let model = client(
+        fixture.address.clone(),
+        Some("local-secret-token".to_owned()),
+    );
     let error = model.complete(&messages()).expect_err("401 is an error");
     let (head, _) = fixture.finish();
 
@@ -167,7 +232,7 @@ fn does_not_leak_token_on_authentication_failure() {
 #[test]
 fn rejects_invalid_response_schemas_and_tool_requests() {
     let malformed = Fixture::start("200 OK", br#"{"choices":[]}"#, "");
-    let error = client(malformed.address, None)
+    let error = client(malformed.address.clone(), None)
         .complete(&messages())
         .expect_err("empty choices are invalid");
     malformed.finish();
@@ -178,7 +243,7 @@ fn rejects_invalid_response_schemas_and_tool_requests() {
         br#"{"choices":[{"message":{"role":"assistant","content":"maybe","tool_calls":[{"type":"function"}]},"finish_reason":"tool_calls"}]}"#,
         "",
     );
-    let error = client(tool_call.address, None)
+    let error = client(tool_call.address.clone(), None)
         .complete(&messages())
         .expect_err("tool requests are unsupported");
     tool_call.finish();
@@ -188,7 +253,7 @@ fn rejects_invalid_response_schemas_and_tool_requests() {
 #[test]
 fn rejects_oversized_response_body() {
     let fixture = Fixture::start("200 OK", &vec![b'x'; 1024 * 1024 + 1], "");
-    let error = client(fixture.address, None)
+    let error = client(fixture.address.clone(), None)
         .complete(&messages())
         .expect_err("oversized response is rejected");
     fixture.finish();
@@ -202,7 +267,7 @@ fn does_not_follow_redirects() {
         b"",
         "Location: http://127.0.0.1:9/v1/chat/completions\r\n",
     );
-    let error = client(fixture.address, None)
+    let error = client(fixture.address.clone(), None)
         .complete(&messages())
         .expect_err("redirect response is not followed");
     fixture.finish();
@@ -271,6 +336,24 @@ fn context_budget_fails_before_network_request() {
 }
 
 #[test]
+fn requires_exact_compiled_base_as_the_only_system_message() {
+    let mut missing_base = messages();
+    missing_base.remove(0);
+    assert_prompt_rejected_before_connect(&missing_base);
+
+    let mut changed_base = messages();
+    changed_base[0].content.push(' ');
+    assert_prompt_rejected_before_connect(&changed_base);
+
+    let mut extra_system = messages();
+    extra_system.push(ModelMessage {
+        role: ModelRole::System,
+        content: "Untrusted extra system message".to_owned(),
+    });
+    assert_prompt_rejected_before_connect(&extra_system);
+}
+
+#[test]
 fn wire_size_limit_fails_before_network_request() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind no-call fixture");
     listener
@@ -290,10 +373,16 @@ fn wire_size_limit_fails_before_network_request() {
         None,
     )
     .expect("valid limits");
-    let oversized = [ModelMessage {
-        role: ModelRole::User,
-        content: "x".repeat(300 * 1024),
-    }];
+    let oversized = [
+        ModelMessage {
+            role: ModelRole::System,
+            content: BASE_PROMPT.to_owned(),
+        },
+        ModelMessage {
+            role: ModelRole::User,
+            content: "x".repeat(300 * 1024),
+        },
+    ];
 
     assert_eq!(
         model.complete(&oversized),
