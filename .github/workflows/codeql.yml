@@ -47,7 +47,13 @@ jobs:
               ):
                   raise SystemExit("Rust source requires Cargo.toml or rust-project.json for CodeQL.")
               languages.append("rust")
-          if any(path.endswith((".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts")) for path in files):
+          javascript_extensions = (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts")
+          excluded_directories = {"node_modules", "bower_components"}
+          if any(
+              path.endswith(javascript_extensions)
+              and excluded_directories.isdisjoint(PurePosixPath(path).parts)
+              for path in files
+          ):
               languages.append("javascript-typescript")
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write("languages=" + json.dumps(languages) + "\n")

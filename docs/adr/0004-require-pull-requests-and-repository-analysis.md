@@ -39,6 +39,7 @@ checks. Review those gates separately when the intended checks are verified.
 ## Consequences
 
 Main updates require GitHub pull-request merges. App installation and config
-files alone are not passing analyses. CI has limited permissions and no secrets
-for forked pull requests. Additional app build, test, lint, and coverage checks
+files alone are not passing analyses. Fork pull requests do not receive configured
+repository secrets, but their actions can still access a limited GITHUB_TOKEN.
+Additional app build, test, lint, and coverage checks
 remain work for the implementation scaffold.

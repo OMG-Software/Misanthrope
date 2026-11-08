@@ -12,6 +12,9 @@ knowledge_base:
     enabled: true
     filePatterns:
       - AGENTS.md
-      - docs/coding-rules.md
-      - docs/security-coding-rules.md
-      - docs/testing-standards.md
+      - files: docs/coding-rules.md
+        applyTo: "**"
+      - files: docs/security-coding-rules.md
+        applyTo: "**"
+      - files: docs/testing-standards.md
+        applyTo: "**"

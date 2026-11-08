@@ -28,6 +28,8 @@ The organization installation already covers this repository. The root
 `.coderabbit.yaml` enables automatic and incremental reviews without the
 default pause after a fixed number of reviewed commits. Its guideline list
 includes contributor, coding, security, and testing rules.
+The guides stored under docs are explicitly mapped to all repository paths;
+their directory location must not limit application-code reviews.
 
 A valid file or installed app is not proof of a review. Verify a real review on
 the current pull-request head. CodeRabbit feedback needs human or coordinator
@@ -42,6 +44,17 @@ The workflow always analyzes GitHub Actions. It adds Rust when tracked Rust
 source and a Cargo manifest or rust-project.json exist, and JavaScript/TypeScript
 when matching tracked source files exist. Rust source without an analysis
 manifest fails language selection rather than being silently omitted.
+
+Manifest discovery is repository-wide, not proof that every Rust file belongs
+to a Cargo target. Inspect extraction diagnostics when source is introduced.
+A successful selection or scan does not prove a full Cargo build or complete
+semantic coverage of snippets outside the application project.
+
+JavaScript detection excludes the extractor's default node_modules and
+bower_components directories. The supported standalone extensions are .js,
+.jsx, .ts, .tsx, .mjs, .cjs, .mts, and .cts. HTML-only inline scripts do not
+activate this language in the current detector. Revisit that scope if the
+frontend uses inline JavaScript; do not infer coverage from a green Actions scan.
 
 Each selected language uses the no-build mode and security-extended queries.
 No application build is claimed. CodeQL's Rust processing can still execute
@@ -65,12 +78,31 @@ Configure the `SONAR_TOKEN` repository secret with the intended project's
 analysis credential. Never commit or print the token. The job fails explicitly
 if the credential is missing. It waits for the server's quality-gate result.
 
-Fork pull requests do not receive secrets and skip this job. Do not use
+To set up a personal analysis token:
+
+1. Sign in to SonarQube Cloud using the GitHub account with analysis permission.
+2. Open My account > Access Tokens > Personal Tokens.
+3. Generate a token named misanthrope-github-actions with an explicit expiry.
+4. Copy it directly to GitHub Settings > Secrets and variables > Actions >
+   New repository secret, with the name SONAR_TOKEN.
+
+The token is created in Sonar, not GitHub. Do not paste it into a chat or commit
+it. If the organization plan provides scoped organization tokens, prefer a
+token restricted to this project's analysis and required read access.
+
+Dependabot-triggered workflows use Dependabot secrets, not Actions secrets.
+If Dependabot is enabled, configure SONAR_TOKEN in GitHub's Dependabot secret
+store too. Without it, the credential check intentionally fails for those runs.
+
+Fork pull requests do not receive the configured Sonar secret and skip this job.
+Their other actions can still access a limited GITHUB_TOKEN. Do not use
 `pull_request_target` to run fork code with the Sonar credential.
 Use a trusted, separately reviewed path when a fork requires a Sonar analysis.
 
 The source root is the repository, including workflow and tooling files.
-Generated build directories, dependency trees, and coverage output are excluded.
+The explicit exclusions cover .git, target, node_modules, dist, and coverage
+directories at any depth. They do not cover every generated directory; add
+other generated paths, such as build outputs, with the relevant scaffold.
 Update source/test classification and report paths with the application scaffold.
 No Rust compilation, Clippy execution, or coverage import is configured here.
 
@@ -98,4 +130,6 @@ missing or empty analysis as proof that application code passed.
 - [CodeQL workflow options](https://docs.github.com/en/code-security/reference/code-scanning/workflow-configuration-options)
 - [Sonar GitHub setup](https://docs.sonarsource.com/sonarqube-cloud/getting-started/github)
 - [Sonar analysis methods](https://docs.sonarsource.com/sonarqube-cloud/analyzing-source-code/automatic-analysis)
+- [Sonar personal tokens](https://docs.sonarsource.com/sonarqube-cloud/managing-your-account/managing-tokens)
+- [Dependabot workflow credentials](https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-on-actions)
 - [Branch rules](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets)

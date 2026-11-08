@@ -19,3 +19,5 @@ Changes are recorded here before a release version is assigned.
   analysis, and SonarQube Cloud CI configuration.
 - PR-only main protection with no bypass actors and blocks on force-pushes
   and branch deletion.
+- Repository-wide CodeRabbit guideline scopes, vendor-aware CodeQL selection,
+  and precise analysis coverage and Sonar credential setup guidance.
