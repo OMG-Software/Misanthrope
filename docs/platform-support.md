@@ -4,8 +4,9 @@
 
 Windows and Linux are first-release targets. This is a target statement, not a
 claim of tested application or sandbox support. A Rust prototype exists. The
-platform crate validates already-open journal handles; it does not implement an
-execution sandbox or authorize workspace access.
+core now records configuration-only workspace directory identity and policy.
+These checks help detect changed configuration. They do not broker filesystem
+operations, authorize workspace access, or implement an execution sandbox.
 
 | Item | Current position |
 | --- | --- |
@@ -15,6 +16,7 @@ execution sandbox or authorize workspace access.
 | Pinned development toolchain | Rust 1.99.1 in `rust-toolchain.toml`, with rustfmt and Clippy |
 | Webview and frontend prerequisites | Not selected; no desktop frontend exists |
 | User-project toolchains | Required; native installed/managed profile matrix not yet qualified |
+| Workspace directory identity | Configuration-only metadata check; required native ID and creation time must be available |
 | macOS | Outside the first-release target |
 
 ## Support requirements
@@ -30,10 +32,19 @@ execution sandbox or authorize workspace access.
 - The current `misanthrope-platform` crate checks an already-open journal file
   handle for regular-file status, reparse-point status on Windows, and a single
   hard link. Its Windows implementation borrows the handle for
-  `GetFileInformationByHandle`; it does not close or transfer the handle. These
-  checks do not secure parent paths, prevent all races, or contain processes.
-- The core and CLI crates forbid unsafe Rust. The platform crate keeps its
-  Windows FFI call in the narrow handle-validation function. This is not a
+  `GetFileInformationByHandle`; it does not close or transfer the handle.
+- Workspace registration also records a configuration-time directory identity.
+  Linux uses the live handle's device and inode values. It also requires a
+  creation time from the filesystem (`statx` birth time, `btime`); if the kernel
+  or filesystem does not provide it, capture fails. Do not substitute a
+  modification or change time. Windows reads the volume serial and 128-bit file
+  ID from an open directory handle with
+  `GetFileInformationByHandleEx(FileIdInfo)`, and records its creation time.
+  These checks do not authorize later file access, secure every parent path,
+  prevent every path-swap race, or contain processes. Filesystem support for
+  creation-time metadata is not release-qualified.
+- The core and CLI crates forbid unsafe Rust. The platform crate keeps Windows FFI in narrow journal-handle validation and
+  directory-identity functions. This is not a
   general permission to add unsafe code outside a reviewed platform boundary.
 - Treat WSL as Linux execution on a Windows host. A WSL test does not verify
   native Windows process containment.

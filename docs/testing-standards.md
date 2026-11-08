@@ -7,9 +7,19 @@ Use these standards with the [coding rules](coding-rules.md) and
 
 The pinned Cargo workspace has three crates: `misanthrope-core`,
 `misanthrope-cli`, and `misanthrope-platform`. It includes deterministic core,
-CLI, and platform tests. The desktop interface, development-tool runner, and
-execution sandbox are not implemented. [Repository review and analysis](repository-checks.md)
+CLI, and platform tests. The core includes configuration-only workspace records,
+permission preferences, and a local settings/audit journal. Directory identity
+checks require a native file ID and directory creation time. On Linux, capture
+fails when the filesystem does not provide birth-time metadata. Windows reads a
+128-bit file ID from an open handle. These checks are configuration metadata only. No desktop interface, file
+broker, process runner, or execution sandbox exists. See [workspace permissions](workspace-permissions.md) for their
+scope and current limits. [Repository review and analysis](repository-checks.md)
 have separate workflows.
+
+The directory-record unit tests cover native path encoding, record JSON shape,
+stability after child writes, same-path replacement, and ancestor/sibling
+observations. These tests do not qualify filesystem support or runtime
+containment.
 
 Use the locked Cargo commands below. They are also configured in
 `.github/workflows/rust.yml` for Ubuntu 24.04 and Windows Server 2025. A CI
@@ -52,7 +62,10 @@ tests for documentation-only work.
 - Bound every waiting integration test. A timeout is a failure, not a skip.
 - Cross-compilation and mocks cannot establish operating-system containment.
   Run actual filesystem, process-tree, IPC, and network tests on both Windows
-  and Linux before claiming those properties.
+  and Linux before claiming those properties. The workspace identity tests are
+  configuration checks only. The [workspace permission contract](workspace-permissions.md)
+  defines their scope and the additional platform and filesystem checks needed;
+  they do not qualify runtime containment.
 
 ## Required boundary coverage
 
@@ -60,7 +73,8 @@ As the relevant components are implemented, include:
 
 | Area | Required cases |
 | --- | --- |
-| Permissions | Allowed/denied requests, stale grants, scope mismatch, revocation |
+| Permissions | Allowed/denied requests, stale grants, scope mismatch, revocation; workspace registration and directory replacement |
+| Workspace identity | Native paths, stable directory IDs after child writes, ancestor/sibling checks, missing creation-time metadata failure |
 | Files | Traversal, native paths, symlinks/junctions, hard links, path-swap races |
 | Processes | Descendant escape attempts, limits, cleanup, startup failure |
 | Networking | Disabled egress, host-local access, redirects, provider routing |
