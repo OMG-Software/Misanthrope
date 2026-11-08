@@ -23,6 +23,10 @@ automated checks already exist.
 | [Platform support](platform-support.md) | Windows/Linux targets and the evidence needed for support |
 | [Provider authentication](provider-authentication.md) | Required subscription/API profiles, provider evidence, and readiness gates |
 | [Development tools](development-tools.md) | Installed/managed toolchains, runtime grants, outputs, caches, and qualification |
+| [Agent instructions](agent-instructions.md) | Product priorities, visible SYSTEM prompt, user additions, and request manifests |
+| [System prompt draft](../prompts/system.md) | Versioned initial base instructions for the coding assistant |
+| [Context management](context-management.md) | Token-based compaction, cache classes, invalidation, and efficiency measures |
+| [Skills](skills.md) | Settings, package validation, enablement, loading, and controlled scripts |
 | [Repository checks](repository-checks.md) | CodeRabbit, CodeQL, Sonar, credentials, and main protection |
 | [ADR register](adr/index.md) | Lasting decisions, alternatives, and consequences |
 | [Changelog](../CHANGELOG.md) | Changes awaiting release |
@@ -38,7 +42,10 @@ automated checks already exist.
 | Repository analysis, CI workflows, or branch rules | Repository checks and relevant testing/security guidance |
 | A supported platform or prerequisite | Platform support |
 | Provider login, subscription entitlement, or billing | Provider authentication and security rules |
-| Tool discovery, runtime access, build environments, or caches | Development tools and platform support |
+| Tool discovery, runtime access, build environments, or build/package caches | Development tools and platform support |
+| Prompt text, user additions, or instruction assembly | Agent instructions, prompt draft, and security rules |
+| Model context, compaction, or LLM artifact caching | Context management, security rules, and testing standards |
+| Skills, imports, enablement, or skill resources | Skills, agent instructions, and relevant security/testing guidance |
 | Product scope or the proposed architecture | Root README |
 | Project implementation status or module guidance | Root AGENTS.md and relevant directory guidance |
 | A lasting decision with a plausible alternative | New ADR and register entry |

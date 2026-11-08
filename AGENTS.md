@@ -9,6 +9,11 @@ Repository review and analysis are defined in
 [docs/repository-checks.md](docs/repository-checks.md).
 Do not describe proposed features or security controls as implemented.
 
+Product priorities are secure operation, prompt injection defence, and efficiency.
+Follow the owning [instruction](docs/agent-instructions.md),
+[context](docs/context-management.md), and [skills](docs/skills.md) contracts when
+working on those features. Prompts and generated context never grant authority.
+
 ## Required reading
 
 Before writing, changing, generating, or reviewing code or tests, read and follow

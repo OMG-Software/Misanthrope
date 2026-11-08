@@ -20,6 +20,27 @@ and verify them using the [testing standards](testing-standards.md).
 - Keep permission-setting controls separate from rendered untrusted content.
   Validate and limit every command exposed to a webview.
 
+## Instructions, summaries, caches, and skills
+
+- Follow the [instruction](agent-instructions.md), [context](context-management.md),
+  and [skills](skills.md) contracts. Keep policy and operation state outside
+  generated text. Never deserialize a model summary into an approval or grant.
+- Preserve source trust when transforming content. Repository/skill/tool text
+  must not become a trusted user addition through summarization or cache reuse.
+- Validate current access before using cached data. Content hashes and TTLs do
+  not authorize disclosure. Invalidate derived context after relevant permission,
+  prompt, account, source, or skill changes.
+- Keep application context caches and skill registries outside task-writable
+  storage. Protect sensitive cached code and journal data with per-user access
+  and retention rules. General caches must not store credentials.
+- Treat imported skills and their resources as untrusted packages. Bound parsing
+  and loading, reject escaping paths and unsafe links, and separate import from
+  enablement and execution. Skill metadata cannot pre-approve tools.
+- Skill scripts use the ordinary confined runner. Disabling a skill must block
+  new dependent work and observe cleanup of attributed tasks before completion.
+- Do not replay cached model tool calls or infer a fresh verification from an
+  old result. Reconcile ambiguous side effects against core-owned records.
+
 ## Filesystem boundary
 
 - The development root is the maximum host-development-data boundary.

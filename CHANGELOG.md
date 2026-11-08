@@ -6,6 +6,15 @@ Changes are recorded here before a release version is assigned.
 
 ### Added
 
+- Product priorities for secure operation, prompt injection defence, and efficiency.
+- A visible, versioned SYSTEM prompt draft and scoped custom-instruction design.
+- Configurable token-based auto-compaction, safe context budgets, provenance,
+  bounded summaries, and recovery requirements.
+- Scoped artifact and provider prompt caching, invalidation, clear controls,
+  and usage measurements without replaying side effects.
+- Skills settings for import, removal, enablement, and disablement, with validated
+  packages and the existing controlled execution boundary.
+- Acceptance requirements and an ADR for instruction/context trust boundaries.
 - Initial project overview, provider plans, and Windows/Linux development roadmap.
 - Rust coding rules adapted from Merovingian, with security and testing guidance.
 - Required contributor guidance, a documentation index, and platform targets.
