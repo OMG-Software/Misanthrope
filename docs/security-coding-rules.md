@@ -79,6 +79,16 @@ authorization. See
   preview must not write, checkpoint, or imply that replacement is enabled.
   Open a trusted proposed source without following a final link and reject
   reparse, device, or non-regular handles before reading it.
+- The [proposed replacement contract](file-access.md#proposed-replacement-contract)
+  is a review gate, not an enabled write path. Future apply must require fresh
+  read/write authority, expected exact bytes, native object checks, a durable
+  private checkpoint, bounded storage, and a separately versioned ledger.
+  Detected conflicts must leave workspace entries unchanged. Stage only in
+  private storage on the target filesystem; refuse unavailable native or
+  persistence controls. A precheck plus rename cannot guarantee no lost update
+  against independent writers. Preserve uncertain outcomes without automatic
+  retry, cleanup, or restore. A restore needs fresh current-content checks and
+  must checkpoint later user work before replacing it.
 
 The v0.3.0 native file broker currently exposes bounded read, list,
 exclusive-create, and single-directory creation through trusted CLI commands.

@@ -47,6 +47,13 @@ containment.
 - Resolve the Windows directory-option contract gap described in the
   [file-access guide](file-access.md) before qualifying a Windows backend.
   A successful native test run does not settle an omission in the API contract.
+- Existing-file replacement remains unavailable. The
+  [proposed replacement gates](file-access.md#native-backend-gates) require
+  private staging on the target filesystem, reviewed handle-relative
+  publication, security-metadata preservation, and checkpoint/directory
+  persistence evidence. Current read/create tests do not qualify those paths.
+  In particular, Windows per-user checkpoint ACLs and directory-entry durability
+  must be established before enabling that backend; there is no weaker fallback.
 - Workspace registration also records a configuration-time directory identity.
   Linux uses the live handle's device and inode values. It also requires a
   creation time from the filesystem (`statx` birth time, `btime`); if the kernel

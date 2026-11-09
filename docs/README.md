@@ -27,7 +27,7 @@ remaining product contracts.
 | [Platform support](platform-support.md) | Windows/Linux targets and the evidence needed for support |
 | [Provider authentication](provider-authentication.md) | Required subscription/API profiles, provider evidence, and readiness gates |
 | [Workspace settings](workspace-permissions.md) | Implemented workspace IDs, configuration-only permissions, revisions, audit, and remaining gates |
-| [Workspace file access](file-access.md) | Bounded native file broker, read-only edit previews, trusted CLI interface, journal, platform limits, and recovery |
+| [Workspace file access](file-access.md) | Native broker, read-only previews, journals, current recovery, and the proposed replacement/checkpoint contract |
 | [Development tools](development-tools.md) | Installed/managed toolchains, runtime grants, outputs, caches, and qualification |
 | [Agent instructions](agent-instructions.md) | Product priorities, visible SYSTEM prompt, user additions, and request manifests |
 | [System prompt draft](../prompts/system.md) | Versioned initial base instructions for the coding assistant |
