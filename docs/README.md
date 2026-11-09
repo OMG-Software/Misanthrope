@@ -19,6 +19,7 @@ remaining product contracts.
 | Document | Purpose |
 | --- | --- |
 | [Project overview](../README.md) | Product scope, proposed architecture, and roadmap |
+| [Implementation plan](../IMPLEMENTATION_PLAN.md) | Resumable baseline, phase order, acceptance criteria, and resume commands |
 | [Build and run](development.md) | Current CLI, build commands, crate boundaries, limits, and dependencies |
 | [Coding rules](coding-rules.md) | Rust design, ownership, errors, concurrency, and workflow |
 | [Security coding rules](security-coding-rules.md) | Permission, sandbox, credential, Git, and UI boundaries |

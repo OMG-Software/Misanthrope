@@ -46,6 +46,9 @@ Changes are recorded here before a release version is assigned.
 
 ### Added
 
+- Root implementation plan recording the verified baseline, phase order,
+  acceptance criteria, verification commands, and known cautions for resuming.
+
 - Rust 0.5.0 read-only edit preview: `file diff` compares a broker-read
   workspace file with trusted proposed UTF-8 content, returns exact digests and
   a bounded single-hunk diff, and never writes to the workspace or creates a
