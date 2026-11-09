@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use orangecode_core::control::ControlStore;
+use orangecode_core::control::{ControlError, ControlStore};
 use orangecode_core::files::{FileBroker, FileError, FileTarget};
 use orangecode_core::policy::{DecisionReason, PermissionSet, SessionBinding, WorkspaceId};
 use orangecode_core::session::NativePath;
@@ -430,7 +430,7 @@ fn traversal_absolute_and_hard_link_paths_cannot_read_outside_data() {
         for path in [PathBuf::from("../outside-secret.txt"), outside.clone()] {
             assert!(matches!(
                 broker.read(&binding, &target(fixture.session_id, fixture.workspace_id, path), 100),
-                Err(FileError::Native(error)) if error.kind() == std::io::ErrorKind::InvalidInput
+                Err(FileError::InvalidPath(error)) if error.kind() == std::io::ErrorKind::InvalidInput
             ));
         }
         assert!(matches!(
@@ -753,4 +753,63 @@ fn fifo_read_fails_within_a_process_deadline() {
             }
         }
     }
+}
+
+/// Manual rotation preserves complete records and does not broaden task access.
+#[test]
+fn explicit_audit_archive_preserves_bytes_and_restarts_capacity_outside_task_data() {
+    let mut fixture = Fixture::new();
+    fs::write(fixture.workspace.join("entry.txt"), b"kept").expect("fixture file");
+    let binding = fixture.binding();
+    let request = target(fixture.session_id, fixture.workspace_id, "entry.txt");
+    FileBroker::new(&mut fixture.control)
+        .read(&binding, &request, 16)
+        .expect("audited read");
+    let original = fs::read(fixture.file_audit_path()).expect("completed journal");
+    let archive_dir = fixture.temporary.path().join("operator-private-archives");
+    fs::create_dir(&archive_dir).expect("archive directory");
+
+    let mut broker = FileBroker::new(&mut fixture.control);
+    assert!(matches!(
+        broker.rotate_audit(&fixture.workspace),
+        Err(FileError::Control(ControlError::StorageOverlap))
+    ));
+    assert!(matches!(
+        broker.rotate_audit(&fixture.data),
+        Err(FileError::Control(ControlError::StorageOverlap))
+    ));
+    let receipt = broker.rotate_audit(&archive_dir).expect("explicit archive");
+    let archive_path = path_from_native(&receipt.archive);
+    assert_eq!(receipt.event_count, 3);
+    assert_eq!(
+        fs::read(&archive_path).expect("preserved archive"),
+        original
+    );
+    assert_eq!(
+        receipt.sha256,
+        Sha256::digest(&original)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    assert_eq!(
+        broker
+            .audit_archive(&archive_path, 10)
+            .expect("strict inspection")
+            .entries
+            .len(),
+        3
+    );
+    assert_eq!(
+        broker
+            .read(&binding, &request, 16)
+            .expect("fresh active log")
+            .bytes,
+        b"kept"
+    );
+    assert_eq!(broker.audit(10).expect("new log").entries.len(), 3);
+    assert_eq!(
+        fs::read(&archive_path).expect("archive stays immutable"),
+        original
+    );
 }

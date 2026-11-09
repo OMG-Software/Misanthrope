@@ -997,13 +997,11 @@ mod tests {
         workspace.create_new(&file, b"12345").expect("create file");
         let error = workspace.read(&file, 4).expect_err("oversized read");
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-        let error = read_bounded(std::io::Cursor::new(b"12345"), 4)
+        let mut cursor = std::io::Cursor::new(b"12345678901234567890");
+        let error = read_bounded(&mut cursor, 4)
             .expect_err("read-time bound catches growth after metadata preflight");
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-
-        let error = read_bounded(std::io::Cursor::new(b"12345"), 4)
-            .expect_err("read-time bound catches growth after metadata preflight");
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(cursor.position(), 5, "consume only the limit plus one byte");
     }
 
     #[test]

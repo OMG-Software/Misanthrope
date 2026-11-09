@@ -1,6 +1,7 @@
 //! Native handle validation. This does not implement an execution sandbox.
 
 pub mod broker;
+pub mod journal;
 
 use std::fs::File;
 use std::io;

@@ -4,7 +4,7 @@
 //! handles. Diagnostic policy results and serialized metadata are never grants.
 
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use orangecode_platform::broker::{self, RelativePath, Workspace};
 use serde::Serialize;
@@ -40,6 +40,9 @@ pub enum FileError {
     /// Native names, limits, or scope are invalid.
     #[error("invalid file request: {0}")]
     Invalid(&'static str),
+    /// A caller supplied an invalid relative path, rather than an I/O failure.
+    #[error("invalid target path: {0}")]
+    InvalidPath(#[source] io::Error),
     /// The opened object or required native control could not be used.
     #[error("native file operation failed: {0}")]
     Native(#[source] io::Error),
@@ -52,6 +55,15 @@ pub enum FileError {
     /// Audit validation or durability failed; read data is withheld.
     #[error("file operation audit failed: {0}")]
     Audit(#[source] Box<dyn std::error::Error + Send + Sync>),
+    /// An archive move or directory sync failed ambiguously. Inspect both paths.
+    #[error("audit rotation is uncertain; inspect archive candidate {archive:?}: {source}")]
+    RotationUncertain {
+        /// Lossless candidate archive path, whether or not the move completed.
+        archive: NativePath,
+        /// Original native move or directory sync failure.
+        #[source]
+        source: io::Error,
+    },
     /// Recovery requires an explicit trusted acknowledgement of this operation.
     #[error("file operation {operation_id} is unresolved; inspect it before acknowledgement")]
     Pending { operation_id: Uuid },
@@ -71,6 +83,20 @@ impl From<FileAuditError> for FileError {
     fn from(error: FileAuditError) -> Self {
         match error {
             FileAuditError::PendingOperation(operation_id) => Self::Pending { operation_id },
+            FileAuditError::RotationUncertain {
+                destination,
+                source,
+            } => {
+                match NativePath::from_path(&destination) {
+                    Ok(archive) => Self::RotationUncertain { archive, source },
+                    // Unsupported native encodings cannot reach a successful
+                    // native move. Keep the full original cause if they occur.
+                    Err(_) => Self::Audit(Box::new(FileAuditError::RotationUncertain {
+                        destination,
+                        source,
+                    })),
+                }
+            }
             other => Self::Audit(Box::new(other)),
         }
     }
@@ -135,6 +161,17 @@ pub struct FileAuditView {
     pub pending: Option<Uuid>,
     /// Validated journal entries encoded as descriptive JSON.
     pub entries: Vec<serde_json::Value>,
+}
+
+/// Receipt for a completed, explicitly requested operation-journal archive.
+#[derive(Debug, Serialize)]
+pub struct FileAuditArchived {
+    /// Lossless path of the preserved, strictly validated journal.
+    pub archive: NativePath,
+    /// SHA-256 of the exact archived JSONL bytes.
+    pub sha256: String,
+    /// Number of preserved events, including its store header.
+    pub event_count: usize,
 }
 
 /// Synchronous broker holding the control writer while it checks and performs I/O.
@@ -301,6 +338,52 @@ impl<'a> FileBroker<'a> {
         })
     }
 
+    /// Inspect an existing archived log without creating or appending to it.
+    ///
+    /// This is a trusted operator command. The archive must belong to this
+    /// control store and lie outside current development data.
+    pub fn audit_archive(&mut self, path: &Path, limit: usize) -> Result<FileAuditView, FileError> {
+        let (_, store_id) = self.control.file_audit_context()?;
+        let parent = path
+            .parent()
+            .ok_or(FileError::Invalid("archive needs a parent directory"))?;
+        let directory = self.control.file_archive_directory(parent)?;
+        let name = path
+            .file_name()
+            .ok_or(FileError::Invalid("archive needs a filename"))?;
+        let audit = FileAudit::open_archive(&directory.join(name), store_id)?;
+        let entries = audit
+            .entries(limit)?
+            .into_iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| FileError::Audit(Box::new(error)))?;
+        Ok(FileAuditView {
+            pending: audit.pending(),
+            entries,
+        })
+    }
+
+    /// Move one completed log into an explicitly selected existing private directory.
+    ///
+    /// No operation is retried and no archive is pruned. The destination must be
+    /// outside development data and on a filesystem supporting the native atomic
+    /// move. The next ordinary operation creates a fresh active log. An unresolved
+    /// operation prevents rotation; acknowledge it only after inspection.
+    pub fn rotate_audit(
+        &mut self,
+        archive_directory: &Path,
+    ) -> Result<FileAuditArchived, FileError> {
+        let (data_root, store_id) = self.control.file_audit_context()?;
+        let directory = self.control.file_archive_directory(archive_directory)?;
+        let archived = FileAudit::archive(&data_root, store_id, &directory)?;
+        Ok(FileAuditArchived {
+            archive: NativePath::from_path(&archived.path)?,
+            sha256: archived.sha256,
+            event_count: archived.event_count,
+        })
+    }
+
     /// Record that a user inspected an uncertain operation. This retries no I/O.
     pub fn acknowledge(&mut self, operation_id: Uuid) -> Result<(), FileError> {
         let (data_root, store_id) = self.control.file_audit_context()?;
@@ -317,7 +400,7 @@ impl<'a> FileBroker<'a> {
         operation: FileOperation,
         permission: Operation,
     ) -> Result<(Workspace, FileAudit, Uuid), FileError> {
-        let decision = self.control.evaluate(
+        let decision = self.control.check_file_policy(
             binding,
             &PolicyRequest {
                 session_id: target.session_id,
@@ -336,7 +419,8 @@ impl<'a> FileBroker<'a> {
         let relative = workspace_path
             .strip_prefix(&root_path)
             .map_err(|_| FileError::Invalid("workspace name cannot be derived beneath root"))?;
-        let relative = RelativePath::new(relative).map_err(FileError::Native)?;
+        let relative = RelativePath::new(relative)
+            .map_err(|error| FileError::Control(ControlError::WorkspacePath(error)))?;
         let workspace = Workspace::open(
             &root_path,
             scope.root.native_identity(),
@@ -390,7 +474,13 @@ impl<'a> FileBroker<'a> {
 
 /// Pure native-name checks precede any access; only listing can target the root.
 fn validate_target(target: &FileTarget, allow_root: bool) -> Result<RelativePath, FileError> {
-    let path = RelativePath::new(&target.path).map_err(FileError::Native)?;
+    let path = RelativePath::new(&target.path).map_err(|error| {
+        if error.kind() == io::ErrorKind::InvalidInput {
+            FileError::InvalidPath(error)
+        } else {
+            FileError::Native(error)
+        }
+    })?;
     if path.is_empty() && !allow_root {
         return Err(FileError::Invalid("target entry is required"));
     }

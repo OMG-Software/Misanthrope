@@ -231,8 +231,21 @@ fn cli_creates_lists_reads_and_audits_files_without_recording_contents() {
     let capabilities = run_cli(&fixture.data_root, &["capabilities"]);
     assert_success(&capabilities);
     let capabilities = json_output(&capabilities);
-    assert_eq!(capabilities["workspace_file_broker"], true);
-    assert_eq!(capabilities["exclusive_file_creation"], true);
+    let native_broker_implemented = cfg!(any(target_os = "linux", target_os = "windows"));
+    assert_eq!(
+        capabilities["workspace_file_broker_implemented"],
+        native_broker_implemented
+    );
+    let expected_availability = if native_broker_implemented {
+        serde_json::Value::Null
+    } else {
+        serde_json::Value::Bool(false)
+    };
+    assert_eq!(capabilities["workspace_file_broker"], expected_availability);
+    assert_eq!(
+        capabilities["exclusive_file_creation"],
+        expected_availability
+    );
     assert_eq!(capabilities["existing_file_replacement"], false);
     assert_eq!(capabilities["workspace_file_tools"], false);
 }
@@ -299,7 +312,7 @@ fn traversal_and_absolute_targets_cannot_reach_outside_files() {
     for target in ["../sentinel.txt", path_arg(&sentinel)] {
         let mut args = scoped_args(&fixture, "read");
         args.push(target);
-        assert_error_code(&run_cli(&fixture.data_root, &args), "file_io");
+        assert_error_code(&run_cli(&fixture.data_root, &args), "file_request");
     }
 
     // Then the sentinel remains unchanged.
@@ -342,4 +355,75 @@ fn file_commands_fail_closed_without_store_or_configured_workspace() {
         &run_cli(&configured.data_root, &["file", "acknowledge", &unknown]),
         "file_audit",
     );
+}
+
+/// Recovery commands remain usable without a selected workspace after a root change.
+#[test]
+fn cli_archives_completed_audit_and_inspects_it_after_workspace_selection_changes() {
+    let fixture = workspace_fixture();
+    fs::write(fixture.workspace.join("entry.txt"), b"kept").expect("fixture file");
+    let mut args = scoped_args(&fixture, "read");
+    args.push("entry.txt");
+    assert_success(&run_cli(&fixture.data_root, &args));
+    let before = fs::read(fixture.data_root.join("file-operations-v1.jsonl")).expect("old log");
+    let archives = fixture._temporary.path().join("operator-private-archives");
+    fs::create_dir(&archives).expect("archive directory");
+    let next_root = fixture._temporary.path().join("next-development-root");
+    fs::create_dir(&next_root).expect("new root");
+    assert_success(&run_cli(
+        &fixture.data_root,
+        &[
+            "workspace",
+            "set-root",
+            path_arg(&next_root),
+            "--revision",
+            "2",
+        ],
+    ));
+
+    let rotated = run_cli(
+        &fixture.data_root,
+        &["file", "rotate", "--archive-dir", path_arg(&archives)],
+    );
+    assert_success(&rotated);
+    let receipt = json_output(&rotated);
+    let native: orangecode_core::session::NativePath =
+        serde_json::from_value(receipt["archive"].clone()).expect("lossless archive path");
+    let path = native.to_path_buf().expect("same host");
+    assert_eq!(receipt["event_count"], 3);
+    assert_eq!(fs::read(&path).expect("archive retained"), before);
+    let inspected = run_cli(
+        &fixture.data_root,
+        &["file", "audit", "--archive", path_arg(&path)],
+    );
+    assert_success(&inspected);
+    assert_eq!(
+        json_output(&inspected)["entries"]
+            .as_array()
+            .expect("events")
+            .len(),
+        3
+    );
+    let active = run_cli(&fixture.data_root, &["file", "audit"]);
+    assert_success(&active);
+    assert_eq!(
+        json_output(&active)["entries"]
+            .as_array()
+            .expect("fresh header")
+            .len(),
+        1
+    );
+    assert_eq!(
+        fs::read(&path).expect("read-only archive inspection"),
+        before
+    );
+    let missing = archives.join("missing.jsonl");
+    assert_error_code(
+        &run_cli(
+            &fixture.data_root,
+            &["file", "audit", "--archive", path_arg(&missing)],
+        ),
+        "file_audit",
+    );
+    assert!(!missing.exists());
 }

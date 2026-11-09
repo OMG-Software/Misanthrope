@@ -33,6 +33,13 @@ volume, file ID, and creation time with current registrations. Relative paths
 are opened through these handles. String-prefix checks derive no authority.
 The diagnostic `execution_allowed` field remains false; it is not an executor
 permit. The actual broker performs the additional native checks on each call.
+Operational checks do not append to the settings journal. Admitted target
+operations have their own intent/outcome log, so repeated file requests cannot
+consume the capacity needed for settings changes. The explicit `workspace check`
+diagnostic still records `policy_checked` in the settings journal.
+File admission also stops if settings lack event space or a conservative
+permission-change byte budget. A previously full settings log cannot leave
+usable file access that the operator cannot revoke.
 
 The control writer remains locked throughout a synchronous bounded operation.
 Other OrangeCode settings writers cannot change its policy midway. This does
@@ -44,7 +51,10 @@ separate requirement. Do not describe handle checks as whole-user isolation.
 ## Native paths and objects
 
 Accept at most 4,096 native path units, 32 components, and 255 units per component.
-Names retain Unix bytes or Windows UTF-16 without lossy conversion. Refuse roots,
+Registration and binding apply the same bounds to the workspace name beneath
+the development root. An unusable scope is rejected before file operations.
+Invalid target names return a request error; unsupported native controls remain
+a separate failure. Names retain Unix bytes or Windows UTF-16 without lossy conversion. Refuse roots,
 prefixes, empty components, dot/parent components, and NUL. The empty path denotes
 the workspace for listing only. Windows also rejects alternate streams, device
 aliases, invalid characters, and trailing-dot/space spellings.
@@ -109,8 +119,10 @@ binaries provide no file broker and cannot execute operation history.
 The file-operation journal uses exclusive writer ownership, strict bounded
 JSONL replay, unique IDs, contiguous sequences, UTC timestamps, and synced
 acknowledgement. Invalid, empty, linked, incomplete, or foreign-store files
-are never reset automatically. Paths are relative metadata; contents and
-credentials are not logged. Treat even relative names as private user data.
+are never reset automatically. File contents are not logged. Relative path names
+retain their native form and may themselves contain credentials or other
+sensitive data. Protect the journal and audit output as private user data; path
+names are not redacted.
 
 An intent is durable before mutation. A read result is released only after its
 outcome is durable. Every start reserves two terminal event slots and 4 KiB
@@ -126,8 +138,43 @@ Replay exposes an unfinished or uncertain operation and starts no work. New
 file operations stop until the user explicitly acknowledges that operation
 through the trusted operator interface. Acknowledgement records inspection; it
 does not assert success, repair a file, retry a write, or grant permissions.
-The user must inspect and resolve any partial entry separately. Journal rotation,
-automatic repair, and a graphical recovery flow are future work.
+The user must inspect and resolve any partial entry separately. Automatic
+repair and a graphical recovery flow are future work.
+
+## Explicit operation-journal archive
+
+When the active log reaches its byte or event cap, use the trusted
+`file rotate --archive-dir PATH` command. The directory must already exist and
+be private, outside both application storage and the current development root.
+It must be on the same filesystem as the active log. This is an explicit export
+to operator-managed storage, not a model tool or an automatic retention policy.
+
+The command strictly replays the existing active log and refuses unfinished,
+uncertain, invalid, or missing logs. It flushes the file, closes its writer, and
+makes one native atomic no-replace move to `file-operations-<UUID>.jsonl`.
+It then syncs destination and source directories where supported. The receipt
+contains the lossless archive path, exact raw-byte SHA-256, and event count.
+No archive is overwritten, deleted, scanned automatically, or replayed as work.
+
+Each export is at most 8 MiB and 4,096 events. Active application storage keeps
+its existing bound. Repeated explicit exports consume operator-selected disk
+space; OrangeCode does not impose an aggregate quota or manage their retention.
+Keep exports private and outside present and future development roots. Move
+them elsewhere through the operator's normal file-management process when
+needed. Do not assume an export remains private after broadening a development
+root to contain it.
+
+The next ordinary operation initializes a fresh active log, preserving the
+control store and its current permissions. `file audit --archive PATH` validates
+an existing archive for that same store and returns bounded metadata without
+appending. Missing archives are not created. Inspection currently requires the
+existing read/write exclusive-lock helper, so read-only media are not supported.
+
+A move or directory-sync error can return `file_rotation_uncertain` with the
+lossless destination candidate. Inspect both the active path and candidate
+before any explicit retry. The command does not reset, retry, or repair either
+file. Windows directory power-loss durability remains unqualified.
+See [ADR-0015](adr/0015-archive-operation-logs-without-consuming-settings-capacity.md).
 
 See [workspace settings](workspace-permissions.md) for binding/configuration
 contracts and [security rules](security-coding-rules.md) for the full boundary.

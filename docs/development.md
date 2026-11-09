@@ -79,14 +79,23 @@ folder/session tree remain future work.
 
 ## Workspace files
 
-File commands require existing workspace settings, a configured development
-root, a registered workspace ID, and an explicit session UUID. They do not
-initialize settings, infer a root, or treat a journal's workspace metadata as a
-grant. `read` and `list` require the read preference. `create` and `mkdir`
-require the write preference. Execute remains disabled. The command is a trusted
-operator interface; chat advertises no file tools. Capability output reports
-`workspace_file_broker: true`, `exclusive_file_creation: true`,
-`existing_file_replacement: false`, and `workspace_file_tools: false`.
+Scoped file commands (`read`, `list`, `create`, and `mkdir`) require existing
+workspace settings, a configured development root, a registered workspace ID,
+and an explicit session UUID. They do not initialize settings, infer a root, or
+treat a journal's workspace metadata as a grant. `read` and `list` require the
+read preference. `create` and `mkdir` require the write preference. Execute
+remains disabled. The `audit` and `acknowledge` recovery commands require only
+existing workspace settings. They do not require a configured root, workspace
+registration, or session selection. Chat advertises no file tools.
+
+Capability JSON separates implementation from availability. On Linux and
+Windows, `workspace_file_broker_implemented` is `true`, while
+`workspace_file_broker` and `exclusive_file_creation` are `null` (unknown). On
+other platforms, all three values are `false`. The CLI does not probe the ambient
+filesystem for capability reporting. A command checks settings, scope, policy,
+and native requirements when it runs. These values do not promise that an
+operation can proceed. `existing_file_replacement` and `workspace_file_tools`
+remain `false`.
 
 ```text
 orangecode --data-dir C:\orangecode-data file read WORKSPACE_ID --session SESSION_UUID src\main.rs --max-bytes 65536
@@ -95,6 +104,8 @@ orangecode --data-dir C:\orangecode-data file create WORKSPACE_ID --session SESS
 orangecode --data-dir C:\orangecode-data file mkdir WORKSPACE_ID --session SESSION_UUID notes
 orangecode --data-dir C:\orangecode-data file audit --limit 20
 orangecode --data-dir C:\orangecode-data file acknowledge OPERATION_UUID
+orangecode --data-dir C:\orangecode-data file rotate --archive-dir C:\private-audit-exports
+orangecode --data-dir C:\orangecode-data file audit --archive ARCHIVE_PATH --limit 20
 ```
 
 Omit the list path to list the selected workspace root. The empty path is not
@@ -106,6 +117,16 @@ metadata, not file contents. If a create result is uncertain, inspect the path
 and audit record, then acknowledge the operation. Acknowledgement records
 inspection only. It does not retry, repair, or delete the entry. See the
 [workspace file-access contract](file-access.md) for bounds and native failures.
+
+The archive directory must already exist, be private, be on the same filesystem,
+and be outside both the development root and application-data directory.
+`file rotate` and archived audit inspection need existing settings, but no
+workspace/session selection. Rotation refuses unresolved operations and returns
+a lossless path, SHA-256, and event count. It preserves the original bytes and
+does not delete or replay archives. The next file operation starts a fresh log.
+A `file_rotation_uncertain` error requires inspection of the active path and the
+reported candidate before retry. Export retention is managed by the operator.
+See [archive and recovery details](file-access.md#explicit-operation-journal-archive).
 
 ## Local chat
 
@@ -246,9 +267,11 @@ qualification, and power-loss durability are still required. The broker is not
 whole-user or process containment.
 
 Session workspace IDs in session journals are descriptive metadata. They grant
-no access. Each file command supplies the workspace ID and session UUID to the
-loaded control store; the broker checks the current binding, policy revision,
-registration, and native directory identity. The control journal persists
+no access. Each scoped file operation supplies the workspace ID and session
+UUID to the loaded control store; the broker checks the current binding, policy
+revision, registration, and native directory identity. Audit and acknowledgement
+commands use existing settings to inspect or resolve file-operation recovery;
+they do not use a workspace or session binding. The control journal persists
 workspace registrations, settings, revisions, and policy audit events. File
 operations use a separate journal, so they do not change the `control-v1.jsonl`
 or session JSONL schemas. A broader project registry and the folder/session tree remain

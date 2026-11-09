@@ -94,6 +94,17 @@ impl NativeWorkspace {
 
     /// Read one regular file with one hard link and a strict byte limit.
     pub(super) fn read(&self, path: &RelativePath, max_bytes: usize) -> io::Result<Vec<u8>> {
+        self.read_with_checkpoint(path, max_bytes, || Ok(()))
+    }
+
+    // A per-call checkpoint lets tests synchronize a path replacement after
+    // validation. Production uses a no-op; the pinned object stays owned here.
+    fn read_with_checkpoint(
+        &self,
+        path: &RelativePath,
+        max_bytes: usize,
+        after_validation: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<Vec<u8>> {
         if path.is_empty() || max_bytes == 0 || max_bytes > super::MAX_FILE_BYTES {
             return Err(invalid_input("invalid bounded file read"));
         }
@@ -114,6 +125,8 @@ impl NativeWorkspace {
         {
             return Err(invalid_data("file exceeds the read limit"));
         }
+
+        after_validation()?;
 
         // This is a generated descriptor path, not caller-controlled input.
         // It reopens the exact inode held by `object`, after type and link-count
@@ -243,7 +256,7 @@ impl NativeWorkspace {
             .parent_and_name(&workspace, path)
             .map_err(not_created)?;
         if let Err(error) = mkdirat(&parent, &name, directory_mode()) {
-            return Err(create_attempt_error(error.into()));
+            return Err(mkdir_attempt_error(error));
         }
 
         let created = open_confined(
@@ -403,7 +416,16 @@ fn reopen_pinned_file(object: &File) -> io::Result<File> {
 }
 
 fn classify_entry(directory: &File, name: &OsStr) -> io::Result<EntryKind> {
-    let metadata = statat(directory, name, AtFlags::SYMLINK_NOFOLLOW)?;
+    classify_entry_metadata(statat(directory, name, AtFlags::SYMLINK_NOFOLLOW))
+}
+
+fn classify_entry_metadata(metadata: Result<rustix::fs::Stat, Errno>) -> io::Result<EntryKind> {
+    let metadata = match metadata {
+        Ok(metadata) => metadata,
+        // Enumeration is an observation: a name can disappear before statat.
+        Err(Errno::NOENT) => return Ok(EntryKind::Blocked),
+        Err(error) => return Err(error.into()),
+    };
     let kind = FileType::from_raw_mode(metadata.st_mode);
     Ok(match kind {
         FileType::Directory => EntryKind::Directory,
@@ -504,6 +526,19 @@ fn create_attempt_error(error: io::Error) -> CreateError {
     }
 }
 
+// These mkdir failures prove refusal. Other syscall failures remain uncertain;
+// all failures after a successful mkdir still use may_have_created directly.
+fn mkdir_attempt_error(error: Errno) -> CreateError {
+    if matches!(
+        error,
+        Errno::EXIST | Errno::ACCESS | Errno::PERM | Errno::ROFS
+    ) {
+        not_created(error.into())
+    } else {
+        may_have_created(error.into())
+    }
+}
+
 fn may_have_created(error: io::Error) -> CreateError {
     CreateError {
         error,
@@ -515,6 +550,9 @@ fn may_have_created(error: io::Error) -> CreateError {
 mod tests {
     use super::*;
     use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::mpsc;
+    use std::time::Duration;
 
     fn relative(path: &str) -> RelativePath {
         RelativePath::new(Path::new(path)).expect("valid relative path")
@@ -586,6 +624,123 @@ mod tests {
         let disk = fs::read(temporary.path().join("root/workspace/file.txt"))
             .expect("read created disk file");
         assert_eq!(disk, b"hello");
+    }
+
+    #[test]
+    fn a_listed_entry_removed_before_classification_is_blocked() {
+        let (temporary, _workspace) = workspace();
+        let path = temporary.path().join("root/workspace/removed");
+        fs::write(&path, b"temporary entry").expect("write entry to enumerate");
+        let directory = File::open(path.parent().expect("entry parent"))
+            .expect("open workspace directory for enumeration");
+        let mut iterator = Dir::read_from(&directory).expect("enumerate workspace");
+        let observed_name = loop {
+            let entry = iterator
+                .read()
+                .expect("the new entry must be enumerated")
+                .expect("read directory entry");
+            if entry.file_name().to_bytes() == b"removed" {
+                break entry.file_name().to_owned();
+            }
+        };
+
+        fs::remove_file(path).expect("remove enumerated entry before classification");
+
+        assert_eq!(
+            classify_entry(&directory, OsStr::from_bytes(observed_name.to_bytes()))
+                .expect("a stale name must not fail the listing"),
+            EntryKind::Blocked
+        );
+    }
+
+    #[test]
+    fn listing_classification_preserves_errors_other_than_missing_entries() {
+        for errno in [Errno::ACCESS, Errno::PERM, Errno::IO, Errno::NOTDIR] {
+            let error = classify_entry_metadata(Err(errno))
+                .expect_err("non-ENOENT metadata errors must fail the listing");
+            assert_eq!(error.raw_os_error(), Some(errno.raw_os_error()));
+        }
+    }
+
+    #[test]
+    fn directory_creation_classifies_only_known_refusals_as_not_created() {
+        for errno in [Errno::EXIST, Errno::ACCESS, Errno::PERM, Errno::ROFS] {
+            let error = mkdir_attempt_error(errno);
+            assert!(
+                !error.may_have_created,
+                "{errno} must be a definite refusal"
+            );
+            assert_eq!(error.error.raw_os_error(), Some(errno.raw_os_error()));
+        }
+        for errno in [Errno::IO, Errno::INTR, Errno::NOSPC, Errno::NOENT] {
+            let error = mkdir_attempt_error(errno);
+            assert!(error.may_have_created, "{errno} must remain uncertain");
+            assert_eq!(error.error.raw_os_error(), Some(errno.raw_os_error()));
+        }
+    }
+
+    #[test]
+    fn directory_creation_permission_denial_is_a_definite_refusal() {
+        let (temporary, workspace) = workspace();
+        let parent = temporary.path().join("root/workspace/read-only");
+        fs::create_dir(&parent).expect("create a parent owned by the test user");
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o500))
+            .expect("remove the parent's write permission");
+
+        let result = workspace.create_dir(&relative("read-only/child"));
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o700))
+            .expect("restore write permission for cleanup");
+        let error = result.expect_err("creation in the non-writable parent must fail");
+
+        assert_eq!(
+            error.error.raw_os_error(),
+            Some(Errno::ACCESS.raw_os_error())
+        );
+        assert!(!error.may_have_created);
+        assert!(!parent.join("child").exists());
+    }
+
+    #[test]
+    fn replacing_a_validated_read_path_never_returns_replacement_bytes() {
+        let (temporary, workspace) = workspace();
+        let selected = temporary.path().join("root/workspace");
+        let path = selected.join("target");
+        let original = b"original bytes";
+        let replacement = b"replaced bytes";
+        fs::write(&path, original).expect("write original file");
+        let (validated_tx, validated_rx) = mpsc::channel();
+        let (replaced_tx, replaced_rx) = mpsc::channel();
+        let timeout = Duration::from_secs(10);
+
+        std::thread::scope(|scope| {
+            let reader = scope.spawn(move || {
+                workspace.read_with_checkpoint(&relative("target"), 100, || {
+                    validated_tx
+                        .send(())
+                        .expect("report pinned-file validation");
+                    replaced_rx
+                        .recv_timeout(timeout)
+                        .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error))
+                })
+            });
+            validated_rx
+                .recv_timeout(timeout)
+                .expect("reader must pause after pinned-file validation");
+            fs::rename(&path, selected.join("retained-original"))
+                .expect("move the original name while its descriptor is held");
+            fs::write(&path, replacement).expect("replace the target with distinct ordinary bytes");
+            replaced_tx.send(()).expect("release the pinned read");
+            let result = reader.join().expect("reader must complete");
+
+            match result {
+                Ok(bytes) => assert_eq!(bytes, original),
+                Err(error) => assert_eq!(error.kind(), io::ErrorKind::WouldBlock),
+            }
+            assert_eq!(
+                fs::read(path).expect("read replacement fixture"),
+                replacement
+            );
+        });
     }
 
     #[test]

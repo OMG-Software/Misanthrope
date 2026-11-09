@@ -198,8 +198,17 @@ fn run(cli: Cli) -> Result<(), CliError> {
             "permission_policy": true,
             "permission_audit": true,
             "policy_decision": "configuration_only",
-            "workspace_file_broker": true,
-            "exclusive_file_creation": true,
+            "workspace_file_broker_implemented": cfg!(any(target_os = "linux", target_os = "windows")),
+            "workspace_file_broker": if cfg!(any(target_os = "linux", target_os = "windows")) {
+                serde_json::Value::Null
+            } else {
+                serde_json::Value::Bool(false)
+            },
+            "exclusive_file_creation": if cfg!(any(target_os = "linux", target_os = "windows")) {
+                serde_json::Value::Null
+            } else {
+                serde_json::Value::Bool(false)
+            },
             "existing_file_replacement": false,
             "workspace_file_tools": false,
             "process_execution": false,

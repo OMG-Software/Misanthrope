@@ -92,12 +92,20 @@ zero-based sequence, UTC timestamp, global revision, and tagged `action`:
 | `root_set` | Selected directory identity; increment revision |
 | `workspace_registered` | New ID, directory identity, default preferences; increment revision |
 | `permissions_changed` | Existing ID and complete preference set; increment revision |
-| `policy_checked` | Binding/request scope, operation and decision reason; preserve revision |
+| `policy_checked` | Explicit diagnostic binding/request check and decision; preserve revision |
+
+Operational file checks do not append `policy_checked`. They use current
+settings and their separate [operation journal](file-access.md). This prevents
+file traffic or a full operation log from consuming settings capacity.
+Workspace registration and binding reject relative scopes beyond the broker's
+name/depth bounds, with a workspace-specific error.
 
 Limits are 8 MiB per journal, 4,096 events, 64 KiB per encoded event including
 the newline, and 256 registered workspaces. Audit output returns 1 to 100 recent
 events. Native paths have at most 32,768 units. Audit rows contain identifiers
-and policy metadata, not prompts or credentials. Treat paths as private data.
+and policy metadata, never prompts or dedicated credential fields. Native paths
+can themselves contain secrets. Treat journal records and audit output as
+private data.
 
 Opening validates the complete bounded log. Empty files, incomplete tails,
 duplicate JSON keys or event IDs, unknown fields/schema/events, invalid

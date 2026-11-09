@@ -27,6 +27,9 @@ const MAX_BYTES: usize = 8 * 1024 * 1024;
 const MAX_EVENT_BYTES: usize = 64 * 1024;
 const MAX_EVENTS: usize = 4096;
 const MAX_WORKSPACES: usize = 256;
+// Permission events have fixed IDs, timestamps, and four boolean preferences.
+// Leave a conservative budget for that bounded record before admitting file I/O.
+const PERMISSION_EVENT_RESERVE_BYTES: usize = 2048;
 
 /// A settings, validation, locking, or durability failure.
 #[derive(Debug, Error)]
@@ -55,6 +58,9 @@ pub enum ControlError {
     /// Application storage must not be visible within a development root.
     #[error("development root and application data directories must not overlap")]
     StorageOverlap,
+    /// The workspace name beneath the root cannot be used by the bounded broker.
+    #[error("workspace path beneath the development root is unsupported by the file broker: {0}")]
+    WorkspacePath(#[source] io::Error),
     /// A bounded settings or journal capacity has been reached.
     #[error("control journal capacity reached")]
     LimitReached,
@@ -147,7 +153,8 @@ enum Action {
     },
 }
 
-/// One persisted audit event. It contains metadata, never credentials or prompts.
+/// One persisted settings/audit event, never prompts or dedicated credential fields.
+/// Native path metadata can itself contain secrets and must remain private.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuditEntry {
@@ -189,6 +196,7 @@ impl ControlStore {
             .workspace(workspace_id)
             .ok_or(ControlError::UnknownWorkspace)?;
         self.check_directory_scope(&workspace.directory)?;
+        self.check_broker_scope_path(&workspace.directory)?;
         let root = self
             .snapshot
             .development_root
@@ -348,6 +356,7 @@ impl ControlStore {
         self.check_revision(expected_revision)?;
         let directory = DirectoryRecord::capture(path)?;
         self.check_directory_scope(&directory)?;
+        self.check_broker_scope_path(&directory)?;
         for workspace in &self.snapshot.workspaces {
             if workspace.directory.same_directory(&directory) {
                 if !workspace.directory.is_current()? {
@@ -420,6 +429,7 @@ impl ControlStore {
         }
         let workspace = self.workspace(id).ok_or(ControlError::UnknownWorkspace)?;
         self.check_directory_scope(&workspace.directory)?;
+        self.check_broker_scope_path(&workspace.directory)?;
         Ok(SessionBinding::new(
             self.snapshot.store_id,
             session_id,
@@ -431,6 +441,33 @@ impl ControlStore {
     /// Audit a configuration-only result before returning it. Execution is always denied.
     pub fn evaluate(
         &mut self,
+        binding: &SessionBinding,
+        request: &PolicyRequest,
+    ) -> Result<PolicyDecision, ControlError> {
+        let decision = self.check_file_policy(binding, request)?;
+        self.append(
+            Action::PolicyChecked {
+                binding_store_id: binding.store_id(),
+                binding_session_id: binding.session_id(),
+                request_session_id: request.session_id,
+                binding_workspace_id: binding.workspace_id(),
+                target_workspace_id: request.workspace_id,
+                binding_revision: binding.revision(),
+                operation: request.operation,
+                reason: decision.reason(),
+            },
+            self.revision(),
+        )?;
+        Ok(decision)
+    }
+
+    /// Check current preferences without consuming settings-journal capacity.
+    ///
+    /// Only the broker uses this operational check. It still needs native scope
+    /// verification and a separate durable operation intent before target I/O.
+    /// The public diagnostic `evaluate` command continues to append its audit.
+    pub(crate) fn check_file_policy(
+        &self,
         binding: &SessionBinding,
         request: &PolicyRequest,
     ) -> Result<PolicyDecision, ControlError> {
@@ -450,20 +487,62 @@ impl ControlStore {
             binding,
             request,
         );
-        self.append(
-            Action::PolicyChecked {
-                binding_store_id: binding.store_id(),
-                binding_session_id: binding.session_id(),
-                request_session_id: request.session_id,
-                binding_workspace_id: binding.workspace_id(),
-                target_workspace_id: request.workspace_id,
-                binding_revision: binding.revision(),
-                operation: request.operation,
-                reason: decision.reason(),
-            },
-            self.revision(),
-        )?;
+        // A full settings log must not leave usable file authority that the
+        // operator cannot revoke. Keep a conservative bounded permission-event
+        // budget available before admitting target I/O; actual changes still
+        // pass the ordinary exact append preflight.
+        if decision.configured_allowed()
+            && (self.entries.len() >= MAX_EVENTS
+                || self
+                    .bytes
+                    .checked_add(PERMISSION_EVENT_RESERVE_BYTES)
+                    .is_none_or(|size| size > MAX_BYTES))
+        {
+            return Err(ControlError::LimitReached);
+        }
         Ok(decision)
+    }
+
+    /// Validate an explicitly selected archive directory outside development data.
+    /// The caller holds this control writer until archival and directory sync end.
+    pub(crate) fn file_archive_directory(
+        &self,
+        path: &Path,
+    ) -> Result<std::path::PathBuf, ControlError> {
+        self.file_audit_context()?;
+        let directory = DirectoryRecord::capture(path)?;
+        if self.data_directory.contains(&directory)? || directory.contains(&self.data_directory)? {
+            return Err(ControlError::StorageOverlap);
+        }
+        if let Some(root) = &self.snapshot.development_root {
+            if !root.is_current()? {
+                return Err(ControlError::DirectoryChanged);
+            }
+            if root.contains(&directory)? || directory.contains(root)? {
+                return Err(ControlError::StorageOverlap);
+            }
+        }
+        directory.live_path().map_err(ControlError::Io)
+    }
+
+    /// Reject a scope the broker cannot traverse before it is registered or bound.
+    fn check_broker_scope_path(&self, directory: &DirectoryRecord) -> Result<(), ControlError> {
+        let root = self
+            .snapshot
+            .development_root
+            .as_ref()
+            .ok_or(ControlError::NoRoot)?;
+        let root_path = root.live_path()?;
+        let workspace_path = directory.live_path()?;
+        let relative = workspace_path.strip_prefix(&root_path).map_err(|_| {
+            ControlError::WorkspacePath(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "workspace name cannot be derived beneath root",
+            ))
+        })?;
+        orangecode_platform::broker::RelativePath::new(relative)
+            .map(|_| ())
+            .map_err(ControlError::WorkspacePath)
     }
 
     /// Require a current storage record before interpreting negative ancestry checks.
@@ -696,6 +775,46 @@ mod tests {
             .read_to_end(&mut bytes)
             .expect("read owned handle");
         bytes
+    }
+
+    /// Exhausted settings cannot leave operational authority that cannot be revoked.
+    #[test]
+    fn operational_checks_refuse_when_settings_have_no_permission_change_capacity() {
+        let directory = tempfile::tempdir().expect("private temporary directory");
+        let data = directory.path().join("data");
+        let root = directory.path().join("projects");
+        fs::create_dir(&root).expect("development root");
+        let mut store = ControlStore::open(&data).expect("control store");
+        store.set_development_root(&root, 0).expect("root");
+        let workspace = store.register_workspace(&root, 1).expect("workspace");
+        let session_id = Uuid::new_v4();
+        let binding = store
+            .bind_session(session_id, workspace.id())
+            .expect("binding");
+        let request = PolicyRequest {
+            session_id,
+            workspace_id: workspace.id(),
+            operation: Operation::Read,
+        };
+        assert!(
+            store
+                .check_file_policy(&binding, &request)
+                .expect("healthy policy")
+                .configured_allowed()
+        );
+        let bytes = store.bytes;
+        store.bytes = MAX_BYTES - 1;
+        assert!(matches!(
+            store.check_file_policy(&binding, &request),
+            Err(ControlError::LimitReached)
+        ));
+        store.bytes = bytes;
+        let initial = store.entries[0].clone();
+        store.entries.resize(MAX_EVENTS, initial);
+        assert!(matches!(
+            store.check_file_policy(&binding, &request),
+            Err(ControlError::LimitReached)
+        ));
     }
 
     /// A failed write must leave acknowledged state unchanged and disable the writer.

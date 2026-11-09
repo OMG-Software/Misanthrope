@@ -197,3 +197,18 @@ execution. Do not treat a clean report from an aborted tool as a pass.
 - [Cargo test targets and doc tests](https://doc.rust-lang.org/cargo/commands/cargo-test.html)
 - [Cargo features](https://doc.rust-lang.org/cargo/reference/features.html)
 - [Clippy in CI](https://doc.rust-lang.org/clippy/continuous_integration/)
+
+## File-broker review regressions
+
+Run the Linux pinned-read path-swap regression with its channel checkpoint;
+static pre-operation replacement tests do not exercise that interval.
+The Linux removed-entry and real permission-refusal tests must also execute.
+The permission fixture expects an unprivileged user whose directory mode checks
+are enforced; privilege bypass is a failure, not a silent skip.
+
+The review regression target checks that successful and capacity-refused file
+requests leave settings bytes unchanged and that permission revocation still
+succeeds. Archive tests cover raw-byte preservation, full logs, unresolved-state
+refusal, destination collisions, directory-sync faults, read-only inspection,
+and continuation with a fresh active log. The CLI workflow checks recovery
+commands after a development-root change.

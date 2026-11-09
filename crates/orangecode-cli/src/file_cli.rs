@@ -56,6 +56,15 @@ pub(crate) enum FileCommand {
     Audit {
         #[arg(long, default_value_t = 20)]
         limit: usize,
+        /// Inspect an existing archived log rather than the active journal.
+        #[arg(long)]
+        archive: Option<PathBuf>,
+    },
+    /// Archive a completed log without replacing, pruning, or replaying records.
+    Rotate {
+        /// Existing private directory outside development data, on the same filesystem.
+        #[arg(long)]
+        archive_dir: PathBuf,
     },
     /// Record inspection of an uncertain operation, without retrying or repairing it.
     Acknowledge { operation_id: Uuid },
@@ -119,9 +128,18 @@ pub(crate) fn run(command: FileCommand, data_root: &Path) -> Result<(), CliError
                     .map_err(file_error)?,
             )
         }
-        FileCommand::Audit { limit } => print_json(
+        FileCommand::Audit { limit, archive } => {
+            let mut broker = FileBroker::new(&mut control);
+            let view = match archive {
+                Some(path) => broker.audit_archive(&path, limit),
+                None => broker.audit(limit),
+            }
+            .map_err(file_error)?;
+            print_json(&view)
+        }
+        FileCommand::Rotate { archive_dir } => print_json(
             &FileBroker::new(&mut control)
-                .audit(limit)
+                .rotate_audit(&archive_dir)
                 .map_err(file_error)?,
         ),
         FileCommand::Acknowledge { operation_id } => {
@@ -147,9 +165,12 @@ fn file_error(error: FileError) -> CliError {
     let code = match &error {
         FileError::Denied(_) => "file_denied",
         FileError::Conflict => "file_conflict",
-        FileError::Invalid(_) | FileError::Encoding(_) => "file_request",
+        FileError::Invalid(_) | FileError::InvalidPath(_) | FileError::Encoding(_) => {
+            "file_request"
+        }
         FileError::Pending { .. } => "file_pending",
         FileError::Uncertain { .. } => "file_uncertain",
+        FileError::RotationUncertain { .. } => "file_rotation_uncertain",
         FileError::Audit(_) => "file_audit",
         FileError::Control(_) => "control",
         FileError::Native(error) if error.kind() == std::io::ErrorKind::Unsupported => {

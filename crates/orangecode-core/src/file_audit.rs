@@ -6,10 +6,11 @@
 use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use orangecode_platform::broker::RelativePath;
 use serde::{Deserialize, Deserializer, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, UtcOffset};
@@ -132,6 +133,13 @@ pub(crate) enum FileAuditError {
     /// A write or sync failed; this handle cannot be mutated again.
     #[error("file-operation audit writer is poisoned")]
     Poisoned,
+    /// A move or directory sync has an uncertain outcome. Inspect both paths.
+    #[error("file-operation audit rotation is uncertain; inspect {destination}: {source}", destination = destination.display())]
+    RotationUncertain {
+        destination: PathBuf,
+        #[source]
+        source: io::Error,
+    },
 }
 
 impl From<StorageError> for FileAuditError {
@@ -165,6 +173,17 @@ struct ReplayState {
     last_revision: Option<u64>,
 }
 
+/// The exact journal moved by one explicit, trusted archive request.
+#[derive(Debug)]
+pub(crate) struct ArchivedAudit {
+    /// The unique destination path. This is metadata, not path authority.
+    pub(crate) path: PathBuf,
+    /// Lowercase SHA-256 of the exact archived bytes, including line endings.
+    pub(crate) sha256: String,
+    /// The number of validated v1 events, including the Created event.
+    pub(crate) event_count: usize,
+}
+
 /// A locked, append-only audit log for native file-operation intent and outcome.
 ///
 /// The lock lasts until this value is dropped. Start records are synced before
@@ -178,6 +197,7 @@ pub(crate) struct FileAudit {
     state: ReplayState,
     bytes: usize,
     poisoned: bool,
+    read_only: bool,
     #[cfg(test)]
     fail_next_write: bool,
     #[cfg(test)]
@@ -207,6 +227,97 @@ impl FileAudit {
             }
             Err(error) => Err(error.into()),
         }
+    }
+
+    /// Open one existing archive for strict inspection without creating or appending.
+    ///
+    /// The caller authorizes the private path and holds the `ControlStore` lock.
+    /// This uses the existing validated exclusive file lock, which requires a
+    /// writable file handle. Mutation methods reject this inspection instance.
+    pub(crate) fn open_archive(path: &Path, store_id: Uuid) -> Result<Self, FileAuditError> {
+        if !valid_uuid(store_id) {
+            return Err(FileAuditError::Invalid("invalid control store identifier"));
+        }
+        let mut audit = Self::open_existing_path(path, store_id)?;
+        audit.read_only = true;
+        Ok(audit)
+    }
+
+    /// Move a completed active log to one unique, operator-managed archive.
+    ///
+    /// The caller holds the `ControlStore` lock and authorizes the existing,
+    /// private archive directory outside the development root. This operation
+    /// never creates an active log, prunes archives, or retries a move. A later
+    /// ordinary open initializes a new active v1 log. Rotation errors require
+    /// inspection when they carry `RotationUncertain`; they do not imply rollback.
+    /// Trusted private paths and cooperative locks do not isolate a hostile
+    /// process running as the same user or prevent all parent-path races.
+    pub(crate) fn archive(
+        data_root: &Path,
+        store_id: Uuid,
+        archive_directory: &Path,
+    ) -> Result<ArchivedAudit, FileAuditError> {
+        Self::archive_with(
+            data_root,
+            store_id,
+            archive_directory,
+            orangecode_platform::journal::rename_noreplace,
+            storage::sync_parent_directory,
+        )
+    }
+
+    /// Keep failure injection local to this call, without shared test state.
+    fn archive_with(
+        data_root: &Path,
+        store_id: Uuid,
+        archive_directory: &Path,
+        move_journal: impl FnOnce(&Path, &Path) -> io::Result<()>,
+        sync_directory: impl Fn(&Path) -> Result<(), StorageError>,
+    ) -> Result<ArchivedAudit, FileAuditError> {
+        if !valid_uuid(store_id) {
+            return Err(FileAuditError::Invalid("invalid control store identifier"));
+        }
+        let source = data_root.join(FILE_NAME);
+        let (mut audit, bytes) = Self::replay_existing_path(&source, store_id)?;
+        audit.ensure_healthy()?;
+        if let Some(operation_id) = audit.pending() {
+            return Err(FileAuditError::PendingOperation(operation_id));
+        }
+        audit.file.flush()?;
+        audit.file.sync_all()?;
+
+        let archived = ArchivedAudit {
+            path: archive_directory.join(format!("file-operations-{}.jsonl", Uuid::new_v4())),
+            sha256: Sha256::digest(&bytes)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
+            event_count: audit.entries.len(),
+        };
+        // Windows journal handles deny delete sharing. The owning control-store
+        // lock remains held by the caller after this per-file handle is dropped.
+        drop(audit);
+        if let Err(source) = move_journal(&source, &archived.path) {
+            return Err(match source.kind() {
+                io::ErrorKind::AlreadyExists | io::ErrorKind::Unsupported => {
+                    FileAuditError::Io(source)
+                }
+                _ => FileAuditError::RotationUncertain {
+                    destination: archived.path,
+                    source,
+                },
+            });
+        }
+        for directory in [archive_directory, data_root] {
+            sync_directory(directory).map_err(|source| FileAuditError::RotationUncertain {
+                destination: archived.path.clone(),
+                source: match source {
+                    StorageError::Io(error) => error,
+                    error => io::Error::other(error),
+                },
+            })?;
+        }
+        Ok(archived)
     }
 
     /// Return the unresolved operation, if any.
@@ -297,15 +408,27 @@ impl FileAudit {
 
     /// Open and replay an existing log without creating or replacing anything.
     fn open_existing(data_root: &Path, expected_store_id: Uuid) -> Result<Self, FileAuditError> {
-        let path = data_root.join(FILE_NAME);
-        match fs::symlink_metadata(&path) {
+        Self::open_existing_path(&data_root.join(FILE_NAME), expected_store_id)
+    }
+
+    /// Replay only an existing, validated path. Never create a missing archive.
+    fn open_existing_path(path: &Path, expected_store_id: Uuid) -> Result<Self, FileAuditError> {
+        Self::replay_existing_path(path, expected_store_id).map(|(audit, _bytes)| audit)
+    }
+
+    /// Keep the bounded raw bytes with the exact events validated from them.
+    fn replay_existing_path(
+        path: &Path,
+        expected_store_id: Uuid,
+    ) -> Result<(Self, Vec<u8>), FileAuditError> {
+        match fs::symlink_metadata(path) {
             Ok(metadata) if !metadata.is_file() => {
                 return Err(FileAuditError::Invalid("audit path is not a regular file"));
             }
             Ok(_) => {}
             Err(error) => return Err(FileAuditError::Io(error)),
         }
-        let mut file = storage::open_locked_file(&path, false)?;
+        let mut file = storage::open_locked_file(path, false)?;
         let mut bytes = Vec::new();
         Read::by_ref(&mut file)
             .take(u64::try_from(MAX_BYTES + 1).map_err(|_| FileAuditError::LimitReached)?)
@@ -342,7 +465,7 @@ impl FileAudit {
             pending.state = PendingState::NeedsRecovery;
         }
         audit.bytes = bytes.len();
-        Ok(audit)
+        Ok((audit, bytes))
     }
 
     /// Create an empty in-memory state around a newly locked file.
@@ -355,6 +478,7 @@ impl FileAudit {
             state: ReplayState::default(),
             bytes: 0,
             poisoned: false,
+            read_only: false,
             #[cfg(test)]
             fail_next_write: false,
             #[cfg(test)]
@@ -608,7 +732,9 @@ impl FileAudit {
 
     /// Reject mutations after an uncertain write or sync result.
     fn ensure_healthy(&self) -> Result<(), FileAuditError> {
-        if self.poisoned {
+        if self.read_only {
+            Err(FileAuditError::Invalid("archived audit is read-only"))
+        } else if self.poisoned {
             Err(FileAuditError::Poisoned)
         } else {
             Ok(())
@@ -669,6 +795,419 @@ mod tests {
 
     fn valid_target() -> NativePath {
         native_target(Path::new("notes.txt"))
+    }
+
+    #[test]
+    fn archive_preserves_exact_completed_bytes_and_new_active_log_can_record_work() {
+        let directory = tempfile::tempdir().expect("private data directory");
+        let archives = tempfile::tempdir().expect("private archive directory");
+        let store_id = Uuid::new_v4();
+        let (session_id, workspace_id) = scope();
+        let mut audit = FileAudit::open(directory.path(), store_id).expect("active log");
+        let operation_id = audit
+            .start(
+                session_id,
+                workspace_id,
+                1,
+                FileOperation::Read,
+                valid_target(),
+            )
+            .expect("start completed operation");
+        audit
+            .finish(operation_id, FileOutcome::Succeeded)
+            .expect("finish operation");
+        drop(audit);
+        let source = directory.path().join(FILE_NAME);
+        // Valid whitespace and CRLF must be preserved, not reserialized away.
+        let original = fs::read(&source).expect("active bytes");
+        let bytes = original
+            .split_inclusive(|byte| *byte == b'\n')
+            .flat_map(|line| {
+                let mut encoded = line[..line.len() - 1].to_vec();
+                encoded.extend_from_slice(b" \r\n");
+                encoded
+            })
+            .collect::<Vec<_>>();
+        fs::write(&source, &bytes).expect("valid raw-byte fixture");
+
+        let archived = FileAudit::archive(directory.path(), store_id, archives.path())
+            .expect("explicit archive");
+
+        assert_eq!(archived.event_count, 3);
+        let expected_hash: String = Sha256::digest(&bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(archived.sha256, expected_hash);
+        assert_eq!(fs::read(&archived.path).expect("archived bytes"), bytes);
+        assert_eq!(
+            fs::metadata(&source).expect_err("source removed").kind(),
+            io::ErrorKind::NotFound
+        );
+        assert_eq!(
+            fs::read_dir(archives.path())
+                .expect("archive directory")
+                .count(),
+            1
+        );
+        let mut inspected =
+            FileAudit::open_archive(&archived.path, store_id).expect("inspect archive");
+        assert_eq!(inspected.entries(10).expect("archived entries").len(), 3);
+        assert!(matches!(
+            inspected.start(
+                session_id,
+                workspace_id,
+                2,
+                FileOperation::Read,
+                valid_target()
+            ),
+            Err(FileAuditError::Invalid("archived audit is read-only"))
+        ));
+        drop(inspected);
+        assert_eq!(
+            fs::read(&archived.path).expect("inspection preserves bytes"),
+            bytes
+        );
+        let mut fresh = FileAudit::open(directory.path(), store_id).expect("new active log");
+        assert_eq!(fresh.entries(10).expect("fresh entries").len(), 1);
+        assert!(matches!(fresh.entries[0].action, FileAuditAction::Created));
+        let new_operation = fresh
+            .start(
+                session_id,
+                workspace_id,
+                2,
+                FileOperation::Read,
+                valid_target(),
+            )
+            .expect("new work after explicit rotation");
+        fresh
+            .finish(new_operation, FileOutcome::Succeeded)
+            .expect("new outcome");
+    }
+
+    #[test]
+    fn archive_refuses_unfinished_and_uncertain_operations_without_changing_bytes() {
+        for uncertain in [false, true] {
+            let directory = tempfile::tempdir().expect("private data directory");
+            let archives = tempfile::tempdir().expect("private archive directory");
+            let store_id = Uuid::new_v4();
+            let (session_id, workspace_id) = scope();
+            let mut audit = FileAudit::open(directory.path(), store_id).expect("active log");
+            let id = audit
+                .start(
+                    session_id,
+                    workspace_id,
+                    1,
+                    FileOperation::CreateFile,
+                    valid_target(),
+                )
+                .expect("unfinished intent");
+            if uncertain {
+                audit
+                    .finish(id, FileOutcome::Uncertain)
+                    .expect("uncertain result");
+            }
+            drop(audit);
+            let source = directory.path().join(FILE_NAME);
+            let before = fs::read(&source).expect("original active bytes");
+
+            assert!(matches!(
+                FileAudit::archive(directory.path(), store_id, archives.path()),
+                Err(FileAuditError::PendingOperation(pending)) if pending == id
+            ));
+
+            assert_eq!(fs::read(&source).expect("source unchanged"), before);
+            assert_eq!(
+                fs::read_dir(archives.path())
+                    .expect("archive directory")
+                    .count(),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn archive_and_inspection_never_initialize_missing_logs() {
+        let directory = tempfile::tempdir().expect("private data directory");
+        let archives = tempfile::tempdir().expect("private archive directory");
+        let store_id = Uuid::new_v4();
+        let missing = archives.path().join("missing.jsonl");
+
+        assert!(
+            matches!(FileAudit::open_archive(&missing, store_id), Err(FileAuditError::Io(error))
+            if error.kind() == io::ErrorKind::NotFound)
+        );
+        assert!(
+            matches!(FileAudit::archive(directory.path(), store_id, archives.path()),
+            Err(FileAuditError::Io(error)) if error.kind() == io::ErrorKind::NotFound)
+        );
+
+        assert_eq!(
+            fs::read_dir(directory.path())
+                .expect("data directory")
+                .count(),
+            0
+        );
+        assert_eq!(
+            fs::read_dir(archives.path())
+                .expect("archive directory")
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn archive_collision_preserves_both_logs_without_retry() {
+        let directory = tempfile::tempdir().expect("private data directory");
+        let archives = tempfile::tempdir().expect("private archive directory");
+        let store_id = Uuid::new_v4();
+        drop(FileAudit::open(directory.path(), store_id).expect("active log"));
+        let source = directory.path().join(FILE_NAME);
+        let original = fs::read(&source).expect("active bytes");
+        let mut destination = PathBuf::new();
+        let mut attempts = 0;
+
+        let error = FileAudit::archive_with(
+            directory.path(),
+            store_id,
+            archives.path(),
+            |source, target| {
+                attempts += 1;
+                destination = target.to_path_buf();
+                fs::write(target, b"existing archive")?;
+                orangecode_platform::journal::rename_noreplace(source, target)
+            },
+            |_| Err(StorageError::Invalid("collision must not sync directories")),
+        )
+        .expect_err("destination collision");
+
+        assert!(
+            matches!(error, FileAuditError::Io(error) if error.kind() == io::ErrorKind::AlreadyExists)
+        );
+        assert_eq!(attempts, 1);
+        assert_eq!(fs::read(source).expect("active retained"), original);
+        assert_eq!(
+            fs::read(destination).expect("existing archive retained"),
+            b"existing archive"
+        );
+    }
+
+    #[test]
+    fn archive_syncs_both_parent_directories_after_the_move() {
+        let directory = tempfile::tempdir().expect("private data directory");
+        let archives = tempfile::tempdir().expect("private archive directory");
+        let store_id = Uuid::new_v4();
+        drop(FileAudit::open(directory.path(), store_id).expect("active log"));
+        let source = directory.path().join(FILE_NAME);
+        let synced = std::cell::RefCell::new(Vec::new());
+
+        let archived = FileAudit::archive_with(
+            directory.path(),
+            store_id,
+            archives.path(),
+            orangecode_platform::journal::rename_noreplace,
+            |path| {
+                assert_eq!(
+                    fs::metadata(&source)
+                        .expect_err("move precedes directory sync")
+                        .kind(),
+                    io::ErrorKind::NotFound
+                );
+                synced.borrow_mut().push(path.to_path_buf());
+                storage::sync_parent_directory(path)
+            },
+        )
+        .expect("archive and parent syncs");
+
+        assert!(archived.path.is_file());
+        assert_eq!(synced.into_inner(), [archives.path(), directory.path()]);
+    }
+
+    #[test]
+    fn archive_reports_exact_candidate_after_move_or_directory_sync_uncertainty() {
+        for failed_stage in 0..=2 {
+            let directory = tempfile::tempdir().expect("private data directory");
+            let archives = tempfile::tempdir().expect("private archive directory");
+            let store_id = Uuid::new_v4();
+            drop(FileAudit::open(directory.path(), store_id).expect("active log"));
+            let source = directory.path().join(FILE_NAME);
+            let original = fs::read(&source).expect("active bytes");
+            let mut attempts = 0;
+            let sync_calls = std::cell::Cell::new(0);
+
+            let error = FileAudit::archive_with(
+                directory.path(),
+                store_id,
+                archives.path(),
+                |source, destination| {
+                    attempts += 1;
+                    orangecode_platform::journal::rename_noreplace(source, destination)?;
+                    if failed_stage == 0 {
+                        Err(io::Error::other("injected ambiguous native result"))
+                    } else {
+                        Ok(())
+                    }
+                },
+                |_| {
+                    sync_calls.set(sync_calls.get() + 1);
+                    if sync_calls.get() == failed_stage {
+                        Err(StorageError::Io(io::Error::other(
+                            "injected directory sync failure",
+                        )))
+                    } else {
+                        Ok(())
+                    }
+                },
+            )
+            .expect_err("uncertain rotation");
+
+            let FileAuditError::RotationUncertain {
+                destination,
+                source: cause,
+            } = error
+            else {
+                panic!("expected rotation uncertainty");
+            };
+            assert_eq!(cause.kind(), io::ErrorKind::Other);
+            assert_eq!(attempts, 1);
+            assert_eq!(sync_calls.get(), failed_stage);
+            assert_eq!(
+                fs::read(&destination).expect("exact candidate retained"),
+                original
+            );
+            assert_eq!(
+                fs::metadata(&source)
+                    .expect_err("active is not recreated")
+                    .kind(),
+                io::ErrorKind::NotFound
+            );
+            let inspected =
+                FileAudit::open_archive(&destination, store_id).expect("strict archive inspection");
+            assert_eq!(
+                inspected
+                    .entries(10)
+                    .expect("no events replayed as actions")
+                    .len(),
+                1
+            );
+            assert_eq!(inspected.pending(), None);
+            assert_eq!(
+                fs::read_dir(archives.path())
+                    .expect("archive directory")
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn archive_accepts_a_full_valid_event_log_and_restores_new_operation_capacity() {
+        let directory = tempfile::tempdir().expect("private data directory");
+        let archives = tempfile::tempdir().expect("private archive directory");
+        let store_id = Uuid::new_v4();
+        let (session_id, workspace_id) = scope();
+        let mut audit = FileAudit::open(directory.path(), store_id).expect("active log");
+        let mut encoded = encode_entry(&audit.entries[0]).expect("created fixture");
+        let mut add = |action| {
+            let entry = audit.make_entry(action).expect("fixture event");
+            encoded.extend_from_slice(&encode_entry(&entry).expect("encoded fixture event"));
+            audit.replay_entry(entry).expect("valid fixture event");
+        };
+        // Created plus one three-event acknowledged uncertainty makes the even
+        // event cap reachable. Complete all remaining operations in pairs.
+        let first = Uuid::new_v4();
+        add(FileAuditAction::OperationStarted {
+            operation_id: first,
+            session_id,
+            workspace_id,
+            revision: 1,
+            operation: FileOperation::Read,
+            target: valid_target(),
+        });
+        add(FileAuditAction::OperationFinished {
+            operation_id: first,
+            outcome: FileOutcome::Uncertain,
+        });
+        add(FileAuditAction::OperationAcknowledged {
+            operation_id: first,
+        });
+        for _ in 0..((MAX_EVENTS - 4) / 2) {
+            let id = Uuid::new_v4();
+            add(FileAuditAction::OperationStarted {
+                operation_id: id,
+                session_id,
+                workspace_id,
+                revision: 1,
+                operation: FileOperation::Read,
+                target: valid_target(),
+            });
+            add(FileAuditAction::OperationFinished {
+                operation_id: id,
+                outcome: FileOutcome::Succeeded,
+            });
+        }
+        assert_eq!(audit.entries.len(), MAX_EVENTS);
+        drop(audit);
+        let source = directory.path().join(FILE_NAME);
+        fs::write(&source, &encoded).expect("full valid fixture");
+        let mut full = FileAudit::open(directory.path(), store_id).expect("strict full replay");
+        assert!(matches!(
+            full.start(
+                session_id,
+                workspace_id,
+                1,
+                FileOperation::Read,
+                valid_target()
+            ),
+            Err(FileAuditError::LimitReached)
+        ));
+        drop(full);
+
+        let archived = FileAudit::archive(directory.path(), store_id, archives.path())
+            .expect("archive full log");
+
+        assert_eq!(archived.event_count, MAX_EVENTS);
+        assert_eq!(
+            fs::read(archived.path).expect("full archive bytes"),
+            encoded
+        );
+        let mut fresh = FileAudit::open(directory.path(), store_id).expect("new active log");
+        let id = fresh
+            .start(
+                session_id,
+                workspace_id,
+                1,
+                FileOperation::Read,
+                valid_target(),
+            )
+            .expect("new operation after capacity rotation");
+        fresh
+            .finish(id, FileOutcome::Succeeded)
+            .expect("new terminal event");
+    }
+
+    #[test]
+    fn archive_refuses_malformed_existing_bytes_without_reset() {
+        let directory = tempfile::tempdir().expect("private data directory");
+        let archives = tempfile::tempdir().expect("private archive directory");
+        let source = directory.path().join(FILE_NAME);
+        fs::write(&source, b"{\"partial\":").expect("malformed active log");
+
+        assert!(matches!(
+            FileAudit::archive(directory.path(), Uuid::new_v4(), archives.path()),
+            Err(FileAuditError::Invalid(_))
+        ));
+
+        assert_eq!(
+            fs::read(&source).expect("malformed bytes retained"),
+            b"{\"partial\":"
+        );
+        assert_eq!(
+            fs::read_dir(archives.path())
+                .expect("archive directory")
+                .count(),
+            0
+        );
     }
 
     /// Count the CR byte once when accepting an event exactly at the encoded cap.
