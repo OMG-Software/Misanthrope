@@ -37,7 +37,8 @@ Changes are recorded here before a release version is assigned.
   failure, explicit uncertainty acknowledgement, and no action replay.
 - Trusted file CLI commands, native traversal/link/mount and collision tests,
   audit failure/recovery coverage, and an ADR for native file-access boundaries.
-  Model tool dispatch and command execution remain disabled.
+  Model tool dispatch and command execution remain disabled. Windows directory
+  flag compatibility is an explicit release qualification requirement.
 
 - Rust 0.2.0 workspace settings core: explicit development root, persistent
   directory-backed workspace IDs, permission preferences, revision checks, and

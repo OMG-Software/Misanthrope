@@ -63,6 +63,15 @@ type, and link count. Directory enumeration also uses the retained handle.
 Unsupported native flags or metadata fail closed. No ambient child-path reopen
 or path-based directory enumeration is a fallback.
 
+Windows directory flag compatibility is an explicit release gate. The current
+opens and creates combine `FILE_DIRECTORY_FILE` with `FILE_OPEN_REPARSE_POINT`.
+[Microsoft's NtCreateFile reference](https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntcreatefile)
+omits the latter from its compatible-directory flag list. Passing native tests
+shows acceptance on that host; it does not resolve this public-contract gap.
+Establish a supported configuration and verify the target Windows version,
+filesystem, and filter matrix before release. Do not remove no-reparse controls
+or add a weaker fallback to make an incompatible system proceed.
+
 Reads accept regular files with one hard link. Links, reparse points, devices,
 and other special files cannot supply file data. Listed names and kinds are
 observations only; every later access is reopened and checked. Listings can

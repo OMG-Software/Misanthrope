@@ -55,7 +55,9 @@ Audit capacity is finite. Linux needs the required openat2 controls and procfs;
 Windows needs the qualified handle-relative APIs. Neither path prevents a
 concurrently hostile same-user process from moving filesystem objects or
 altering authority. Native process confinement and replacement/recovery
-qualification remain separate release gates.
+qualification remain separate release gates. The Windows directory-option
+contract gap in the file-access guide must also be resolved before release;
+acceptance on the CI host does not establish a complete supported API contract.
 
 ## References
 

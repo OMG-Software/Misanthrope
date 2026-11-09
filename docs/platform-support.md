@@ -44,6 +44,9 @@ containment.
   Windows uses native handle-relative opens and reparse-point checks in narrow
   platform wrappers. See [workspace file access](file-access.md) for exact
   operation limits and failures.
+- Resolve the Windows directory-option contract gap described in the
+  [file-access guide](file-access.md) before qualifying a Windows backend.
+  A successful native test run does not settle an omission in the API contract.
 - Workspace registration also records a configuration-time directory identity.
   Linux uses the live handle's device and inode values. It also requires a
   creation time from the filesystem (`statx` birth time, `btime`); if the kernel
