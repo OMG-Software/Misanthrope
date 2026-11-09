@@ -1,4 +1,4 @@
-//! Bounded, single-writer JSONL persistence for a Misanthrope session.
+//! Bounded, single-writer JSONL persistence for a OrangeCode session.
 //!
 //! Journals are untrusted input when opened. This module validates the complete
 //! file before returning a writable handle. It does not execute or resume work.
@@ -221,7 +221,7 @@ impl SessionJournal {
             .join(format!("{:02}", now.day()));
         storage::create_private_directories(&dir).map_err(map_storage_error)?;
         let filename = format!(
-            "misanthrope-{:02}-{:02}-{:02}-{:03}Z-{session_id}.jsonl",
+            "orangecode-{:02}-{:02}-{:02}-{:03}Z-{session_id}.jsonl",
             now.hour(),
             now.minute(),
             now.second(),
@@ -283,7 +283,7 @@ impl SessionJournal {
             .and_then(|name| name.to_str())
             .ok_or(SessionError::InvalidJournal("filename is not valid UTF-8"))?;
         let id_text = filename
-            .strip_prefix("misanthrope-")
+            .strip_prefix("orangecode-")
             .and_then(|name| name.strip_suffix(".jsonl"))
             .and_then(|name| name.rsplit_once("Z-"))
             .map(|(_, id)| id)

@@ -1,10 +1,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use misanthrope_core::control::ControlStore;
-use misanthrope_core::files::{FileBroker, FileError, FileTarget};
-use misanthrope_core::policy::{DecisionReason, PermissionSet, SessionBinding, WorkspaceId};
-use misanthrope_core::session::NativePath;
+use orangecode_core::control::ControlStore;
+use orangecode_core::files::{FileBroker, FileError, FileTarget};
+use orangecode_core::policy::{DecisionReason, PermissionSet, SessionBinding, WorkspaceId};
+use orangecode_core::session::NativePath;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -526,7 +526,7 @@ fn replaced_workspace_is_denied_before_replacement_data_is_read() {
     assert!(matches!(
         error,
         FileError::Denied(DecisionReason::WorkspaceUnavailable)
-            | FileError::Control(misanthrope_core::control::ControlError::DirectoryChanged)
+            | FileError::Control(orangecode_core::control::ControlError::DirectoryChanged)
     ));
     assert_eq!(
         fs::read(fixture.workspace.join("sentinel.txt")).expect("read replacement fixture"),
@@ -706,7 +706,7 @@ fn fifo_read_fails_within_a_process_deadline() {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    const CHILD_MARKER: &str = "MISANTHROPE_FIFO_BROKER_CHILD";
+    const CHILD_MARKER: &str = "ORANGECODE_FIFO_BROKER_CHILD";
     const DEADLINE: Duration = Duration::from_secs(5);
     const POLL: Duration = Duration::from_millis(10);
 

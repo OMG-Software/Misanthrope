@@ -1,8 +1,8 @@
-# Misanthrope
+# OrangeCode
 
 **A Rust coding-assistant prototype for Windows and Linux.**
 
-Misanthrope aims to connect language models to controlled development tools.
+OrangeCode aims to connect language models to controlled development tools.
 The current code is an early Rust core and command-line prototype. A bounded
 native workspace file broker is available through trusted CLI commands. Model
 tool dispatch, a desktop interface, Git workflows, and an execution sandbox
@@ -29,8 +29,8 @@ Security takes priority when an optimization would weaken these boundaries.
 
 ## Current prototype
 
-The workspace contains three Rust crates: `misanthrope-core`, `misanthrope-cli`,
-and `misanthrope-platform`. The CLI command is `misanthrope`. It provides:
+The workspace contains three Rust crates: `orangecode-core`, `orangecode-cli`,
+and `orangecode-platform`. The CLI command is `orangecode`. It provides:
 
 - `prompt`: print the compiled, read-only base prompt, version, and SHA-256 digest.
 - `capabilities`: report what this prototype implements and rejects.
@@ -72,8 +72,8 @@ To build and run the prototype with the pinned Rust toolchain:
 
 ```sh
 cargo build --workspace --locked
-cargo run --locked -p misanthrope-cli -- capabilities
-cargo run --locked -p misanthrope-cli -- prompt
+cargo run --locked -p orangecode-cli -- capabilities
+cargo run --locked -p orangecode-cli -- prompt
 ```
 
 To send a test request, start LM Studio and load a model yourself. Replace
@@ -81,7 +81,7 @@ YOUR_MODEL_ID with that model's ID and CONTEXT_TOKENS with its validated numeric
 context capacity before running this command:
 
 ```sh
-cargo run --locked -p misanthrope-cli -- chat --workspace . --model "YOUR_MODEL_ID" --context-tokens CONTEXT_TOKENS "Say hello in one sentence."
+cargo run --locked -p orangecode-cli -- chat --workspace . --model "YOUR_MODEL_ID" --context-tokens CONTEXT_TOKENS "Say hello in one sentence."
 ```
 
 The endpoint defaults to `http://127.0.0.1:1234/v1`. The required context value
@@ -181,7 +181,7 @@ keys will stay out of frontend state, repository files, and task environments.
 
 ## Development tools
 
-Misanthrope must work with projects in multiple languages. It will support
+OrangeCode must work with projects in multiple languages. It will support
 user-selected installed tools and managed toolchain environments through a
 generic sandboxed runner. Tool profiles will include the required executable,
 runtime, library, and SDK resources, plus scoped writable build outputs, caches,
@@ -193,7 +193,7 @@ Toolchain access does not grant access to unrelated host data. See
 
 ## Permission and sandbox design
 
-Misanthrope will own its permission policy and sandbox lifecycle. The design will
+OrangeCode will own its permission policy and sandbox lifecycle. The design will
 use operating-system isolation to enforce restrictions on files, networking,
 processes, and host services.
 
@@ -246,7 +246,7 @@ work.
 ## Contributing
 
 The project is in its early prototype stage. Use
-[GitHub Issues](https://github.com/OMG-Software/Misanthrope/issues) to discuss
+[GitHub Issues](https://github.com/OMG-Software/OrangeCode/issues) to discuss
 requirements, design proposals, and gaps in the plan.
 
 See the [development guide](docs/development.md) for the current prototype
@@ -261,4 +261,4 @@ configured scope, credential setup, and current limitations.
 
 ## License
 
-Misanthrope is licensed under the [Apache License 2.0](LICENSE).
+OrangeCode is licensed under the [Apache License 2.0](LICENSE).

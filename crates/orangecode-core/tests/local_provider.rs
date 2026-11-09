@@ -1,5 +1,5 @@
-use misanthrope_core::prompt::{BASE_PROMPT, ModelMessage, ModelRole};
-use misanthrope_core::provider::{
+use orangecode_core::prompt::{BASE_PROMPT, ModelMessage, ModelRole};
+use orangecode_core::provider::{
     LocalModelClient, LocalModelConfig, ModelReply, ProviderError, Usage,
 };
 use std::io::{Read, Write};

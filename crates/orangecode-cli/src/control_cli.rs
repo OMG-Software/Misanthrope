@@ -2,8 +2,8 @@
 #![forbid(unsafe_code)]
 
 use clap::{Args, Subcommand, ValueEnum};
-use misanthrope_core::control::{ControlError, ControlStore};
-use misanthrope_core::policy::{Operation, PermissionSet, PolicyRequest, WorkspaceId};
+use orangecode_core::control::{ControlError, ControlStore};
+use orangecode_core::policy::{Operation, PermissionSet, PolicyRequest, WorkspaceId};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;

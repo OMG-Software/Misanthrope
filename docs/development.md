@@ -1,6 +1,6 @@
 # Build and run the core prototype
 
-Misanthrope 0.3.0 is a developer CLI prototype with workspace permission
+OrangeCode 0.3.0 is a developer CLI prototype with workspace permission
 settings and bounded native file operations through trusted operator commands.
 It can send a text conversation to an explicitly selected local LM Studio model
 and save that conversation. It can read/list files and exclusively create new
@@ -18,30 +18,49 @@ working C linker. Run these commands from the repository root:
 ```text
 rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy
 cargo build --workspace --locked
-cargo run --locked -p misanthrope-cli -- capabilities
-cargo run --locked -p misanthrope-cli -- prompt
+cargo run --locked -p orangecode-cli -- capabilities
+cargo run --locked -p orangecode-cli -- prompt
 ```
 
 The repository pins Rust 1.99.1, edition 2024, for all three crates. This is also
 the declared minimum version; no older compiler is supported. Cargo.lock fixes
-the resolved dependency graph. The executable is named misanthrope.
+the resolved dependency graph. The executable is named orangecode.
+
+## Application namespace and existing prototype data
+
+The command is `orangecode`, the model-token variable is `ORANGECODE_LM_TOKEN`,
+and new session filenames start with `orangecode-`. Default private storage uses
+the OrangeCode application identity; Linux normalizes its directory name to
+`orangecode`. The application does not search for or move previous data.
+
+To keep existing workspace settings, select their original private directory
+explicitly with `--data-dir`. Do not relocate the control journal: its recorded
+directory path and native identity must still match. Configure a new store
+through the trusted workspace commands if the old directory must move.
+
+To reuse a session with a different filename prefix, first close all writers
+and keep a private backup. Change only the filename prefix to `orangecode-`;
+retain the timestamp, UUID, `.jsonl` extension, and all journal bytes. Then use
+`session inspect` with its explicit path and the intended `--data-dir` before
+continuing. The JSONL schemas are unchanged. Inspection does not grant workspace
+access or replay actions. See [ADR-0014](adr/0014-use-the-renamed-application-namespace-without-automatic-migration.md).
 
 ## Workspace settings
 
 Use a private application data directory outside your development root. These
 examples use Windows paths; on Linux use separate paths such as
-`/home/me/.local/share/misanthrope` and `/home/me/dev`. Create the root and
+`/home/me/.local/share/orangecode` and `/home/me/dev`. Create the root and
 project directories first. Each command returns JSON. Use the current revision
 from its output for the next mutation; replace WORKSPACE_ID and SESSION_UUID
 with returned workspace ID and a UUIDv4 session selection.
 
 ```text
-misanthrope --data-dir C:\misanthrope-data workspace status
-misanthrope --data-dir C:\misanthrope-data workspace set-root C:\dev --revision 0
-misanthrope --data-dir C:\misanthrope-data workspace register C:\dev\project --revision 1
-misanthrope --data-dir C:\misanthrope-data workspace permissions WORKSPACE_ID --revision 2 --write false
-misanthrope --data-dir C:\misanthrope-data workspace check WORKSPACE_ID --session SESSION_UUID --operation read
-misanthrope --data-dir C:\misanthrope-data workspace audit --limit 20
+orangecode --data-dir C:\orangecode-data workspace status
+orangecode --data-dir C:\orangecode-data workspace set-root C:\dev --revision 0
+orangecode --data-dir C:\orangecode-data workspace register C:\dev\project --revision 1
+orangecode --data-dir C:\orangecode-data workspace permissions WORKSPACE_ID --revision 2 --write false
+orangecode --data-dir C:\orangecode-data workspace check WORKSPACE_ID --session SESSION_UUID --operation read
+orangecode --data-dir C:\orangecode-data workspace audit --limit 20
 ```
 
 `status` initializes an absent store at revision zero. `check` and `audit`
@@ -70,12 +89,12 @@ operator interface; chat advertises no file tools. Capability output reports
 `existing_file_replacement: false`, and `workspace_file_tools: false`.
 
 ```text
-misanthrope --data-dir C:\misanthrope-data file read WORKSPACE_ID --session SESSION_UUID src\main.rs --max-bytes 65536
-misanthrope --data-dir C:\misanthrope-data file list WORKSPACE_ID --session SESSION_UUID src --limit 100
-misanthrope --data-dir C:\misanthrope-data file create WORKSPACE_ID --session SESSION_UUID notes.txt --content "Review this file"
-misanthrope --data-dir C:\misanthrope-data file mkdir WORKSPACE_ID --session SESSION_UUID notes
-misanthrope --data-dir C:\misanthrope-data file audit --limit 20
-misanthrope --data-dir C:\misanthrope-data file acknowledge OPERATION_UUID
+orangecode --data-dir C:\orangecode-data file read WORKSPACE_ID --session SESSION_UUID src\main.rs --max-bytes 65536
+orangecode --data-dir C:\orangecode-data file list WORKSPACE_ID --session SESSION_UUID src --limit 100
+orangecode --data-dir C:\orangecode-data file create WORKSPACE_ID --session SESSION_UUID notes.txt --content "Review this file"
+orangecode --data-dir C:\orangecode-data file mkdir WORKSPACE_ID --session SESSION_UUID notes
+orangecode --data-dir C:\orangecode-data file audit --limit 20
+orangecode --data-dir C:\orangecode-data file acknowledge OPERATION_UUID
 ```
 
 Omit the list path to list the selected workspace root. The empty path is not
@@ -96,7 +115,7 @@ differ from its loaded capacity. The following example uses the user's loaded
 google/gemma-4-e4b profile with a verified capacity of 131,072 tokens:
 
 ```text
-cargo run --locked -p misanthrope-cli -- chat --workspace . --model google/gemma-4-e4b --context-tokens 131072 --max-output-tokens 512 "Reply with READY."
+cargo run --locked -p orangecode-cli -- chat --workspace . --model google/gemma-4-e4b --context-tokens 131072 --max-output-tokens 512 "Reply with READY."
 ```
 
 The default endpoint is http://127.0.0.1:1234/v1. Override it with --endpoint
@@ -118,7 +137,7 @@ provider fallback. A slow first inference can time out. Its remote outcome can
 be unknown, and a retry is a new explicit user action.
 
 Optional server authentication can be supplied to the trusted CLI process with
-MISANTHROPE_LM_TOKEN. The CLI retains the token in memory only and sends it as a
+ORANGECODE_LM_TOKEN. The CLI retains the token in memory only and sends it as a
 sensitive Authorization header. It does not save it or pass it to a child task.
 Environment-based input is a temporary prototype interface, not protected
 credential storage or a claim of memory erasure. OS-backed credentials and the
@@ -133,16 +152,16 @@ directory outside project folders, under an account-protected location. Do not
 paste credentials into messages or preferences: these inputs are saved as text.
 
 ```text
-misanthrope session new --workspace . --title "Prototype test"
-misanthrope session inspect <journal-path>
-misanthrope chat --journal <journal-path> --model google/gemma-4-e4b --context-tokens 131072 "Continue the conversation."
-misanthrope session archive <journal-path>
-misanthrope session restore <journal-path>
+orangecode session new --workspace . --title "Prototype test"
+orangecode session inspect <journal-path>
+orangecode chat --journal <journal-path> --model google/gemma-4-e4b --context-tokens 131072 "Continue the conversation."
+orangecode session archive <journal-path>
+orangecode session restore <journal-path>
 ```
 
 Use the full journal path returned in the JSON output. The commands above use an
 installed executable; during development, prefix each with cargo run --locked
--p misanthrope-cli -- instead of misanthrope. --instructions applies to the
+-p orangecode-cli -- instead of orangecode. --instructions applies to the
 current invocation and is recorded in its manifest. Resume does not silently
 reuse earlier custom instructions or model settings. Supply them again when
 needed. The current compiled base always replaces historical base snapshots.
@@ -160,7 +179,7 @@ Archiving an active turn fails. If the CLI stopped during a turn, inspect the
 journal, then explicitly mark that turn failed before resuming or archiving:
 
 ```text
-misanthrope session interrupt <journal-path>
+orangecode session interrupt <journal-path>
 ```
 
 Interrupt acquires the exclusive journal lock. It cannot interrupt another
@@ -202,9 +221,9 @@ usage events, streaming chunks, and large-output artifacts remain planned.
 
 | Crate | Responsibility |
 | --- | --- |
-| misanthrope-core | Compiled prompt, bounded model adapter, session/control/file-operation journals, workspace policy and broker orchestration |
-| misanthrope-cli | Trusted operator input, one-turn orchestration, bounded file commands, JSON output |
-| misanthrope-platform | Native journal validation, directory identity, and handle-relative workspace file operations |
+| orangecode-core | Compiled prompt, bounded model adapter, session/control/file-operation journals, workspace policy and broker orchestration |
+| orangecode-cli | Trusted operator input, one-turn orchestration, bounded file commands, JSON output |
+| orangecode-platform | Native journal validation, directory identity, and handle-relative workspace file operations |
 
 Core and CLI forbid unsafe code. The platform crate denies unsafe code except
 inside its reviewed Windows handle wrappers for directory identity and native
@@ -261,7 +280,7 @@ not a full audit of transitive dependencies, unsafe code, build scripts, or
 procedural macros. No Git dependencies or downloaded execution backends are used.
 Use maintained libraries for HTTP, cryptography, and OS bindings instead of
 custom implementations. Build dependencies execute with the developer's build
-permissions, not with future Misanthrope task restrictions.
+permissions, not with future OrangeCode task restrictions.
 
 ## Verification
 

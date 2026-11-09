@@ -1,4 +1,4 @@
-//! Developer CLI for the first Misanthrope core prototype.
+//! Developer CLI for the first OrangeCode core prototype.
 #![forbid(unsafe_code)]
 
 mod control_cli;
@@ -6,12 +6,12 @@ mod file_cli;
 
 use clap::{Args, Parser, Subcommand};
 use directories::ProjectDirs;
-use misanthrope_core::control::ControlStore;
-use misanthrope_core::prompt::{
+use orangecode_core::control::ControlStore;
+use orangecode_core::prompt::{
     self, BASE_PROMPT, BASE_PROMPT_VERSION, ConversationMessage, ConversationRole,
 };
-use misanthrope_core::provider::{LocalModelClient, LocalModelConfig};
-use misanthrope_core::session::{
+use orangecode_core::provider::{LocalModelClient, LocalModelConfig};
+use orangecode_core::session::{
     MessageRole, NativePath, RequestManifest, SessionError, SessionJournal,
 };
 use serde::Serialize;
@@ -23,9 +23,9 @@ use std::process::ExitCode;
 
 #[derive(Parser)]
 #[command(
-    name = "misanthrope",
+    name = "orangecode",
     version,
-    about = "Misanthrope local core prototype"
+    about = "OrangeCode local core prototype"
 )]
 struct Cli {
     /// Trusted application storage override. Keep this outside project folders.
@@ -434,7 +434,7 @@ fn data_root(override_path: Option<PathBuf>) -> Result<PathBuf, CliError> {
     if let Some(path) = override_path {
         return Ok(path);
     }
-    ProjectDirs::from("org", "OMG-Software", "Misanthrope")
+    ProjectDirs::from("org", "OMG-Software", "OrangeCode")
         .map(|directories| directories.data_local_dir().to_owned())
         .ok_or_else(|| CliError::new("configuration", "No per-user application data directory"))
 }
@@ -475,7 +475,7 @@ fn resolve_journal(path: Option<PathBuf>, native: Option<String>) -> Result<Path
 /// Read only the trusted CLI's credential input, without including it in errors.
 /// Session creation and chat use this same source for known-token redaction.
 fn read_lm_token() -> Result<Option<String>, CliError> {
-    match env::var("MISANTHROPE_LM_TOKEN") {
+    match env::var("ORANGECODE_LM_TOKEN") {
         Ok(value) if !value.is_empty() => Ok(Some(value)),
         Ok(_) | Err(env::VarError::NotPresent) => Ok(None),
         Err(env::VarError::NotUnicode(_)) => Err(CliError::new(
@@ -511,10 +511,10 @@ fn print_json(value: &impl Serialize) -> Result<(), CliError> {
         .map_err(|_| CliError::new("output", "Could not finish JSON output"))
 }
 
-fn session_error(error: misanthrope_core::session::SessionError) -> CliError {
+fn session_error(error: orangecode_core::session::SessionError) -> CliError {
     CliError::new("session", error.to_string())
 }
 
-fn provider_error(error: misanthrope_core::provider::ProviderError) -> CliError {
+fn provider_error(error: orangecode_core::provider::ProviderError) -> CliError {
     CliError::new("provider", error.to_string())
 }

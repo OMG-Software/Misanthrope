@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/misanthrope-core", "crates/misanthrope-cli", "crates/misanthrope-platform"]
+members = ["crates/orangecode-core", "crates/orangecode-cli", "crates/orangecode-platform"]
 
 [workspace.package]
 version = "0.3.0"
@@ -8,7 +8,7 @@ edition = "2024"
 rust-version = "1.99.1"
 license = "Apache-2.0"
 
-repository = "https://github.com/OMG-Software/Misanthrope"
+repository = "https://github.com/OMG-Software/OrangeCode"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

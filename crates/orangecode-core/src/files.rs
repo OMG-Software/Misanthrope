@@ -6,7 +6,7 @@
 use std::io;
 use std::path::PathBuf;
 
-use misanthrope_platform::broker::{self, RelativePath, Workspace};
+use orangecode_platform::broker::{self, RelativePath, Workspace};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -139,7 +139,7 @@ pub struct FileAuditView {
 
 /// Synchronous broker holding the control writer while it checks and performs I/O.
 ///
-/// This serializes Misanthrope settings changes with each bounded operation.
+/// This serializes OrangeCode settings changes with each bounded operation.
 /// It does not contain a separately running process or hostile same-user code.
 pub struct FileBroker<'a> {
     control: &'a mut ControlStore,

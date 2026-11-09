@@ -1,4 +1,4 @@
-//! Core contracts for the Misanthrope coding-assistant prototype.
+//! Core contracts for the OrangeCode coding-assistant prototype.
 #![forbid(unsafe_code)]
 
 pub mod control;

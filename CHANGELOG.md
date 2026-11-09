@@ -30,6 +30,12 @@ Changes are recorded here before a release version is assigned.
 
 ### Added
 
+- OrangeCode application namespace across Rust crates, CLI, token environment
+  variable, default data directory, session filenames, repository links, and
+  Sonar project configuration. Existing private data is not moved automatically.
+- Compiled prompt version 0.1.3 with the renamed identity and an updated digest
+  regression check; explicit prototype data-transition instructions.
+
 - Rust 0.3.0 native workspace file broker with bounded reads/listings, exclusive
   new-file/directory creation, current binding checks, and handle-relative
   Linux/Windows enforcement. Existing entries cannot be replaced or deleted.

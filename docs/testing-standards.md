@@ -5,8 +5,8 @@ Use these standards with the [coding rules](coding-rules.md) and
 
 ## Current state
 
-The pinned Cargo workspace has three crates: `misanthrope-core`,
-`misanthrope-cli`, and `misanthrope-platform`. It includes deterministic core,
+The pinned Cargo workspace has three crates: `orangecode-core`,
+`orangecode-cli`, and `orangecode-platform`. It includes deterministic core,
 CLI, and platform tests. The core includes configuration-only workspace records,
 permission preferences, and a local settings/audit journal. Directory identity
 checks require a native file ID and directory creation time. On Linux, capture

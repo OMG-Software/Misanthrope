@@ -35,7 +35,7 @@ The diagnostic `execution_allowed` field remains false; it is not an executor
 permit. The actual broker performs the additional native checks on each call.
 
 The control writer remains locked throughout a synchronous bounded operation.
-Other Misanthrope settings writers cannot change its policy midway. This does
+Other OrangeCode settings writers cannot change its policy midway. This does
 not isolate the application from hostile code already running as the same
 user, mutable filesystem implementations, or a host process moving an opened
 directory outside its earlier ancestry. A confined process runner remains a

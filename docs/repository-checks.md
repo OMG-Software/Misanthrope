@@ -70,7 +70,7 @@ languages deliberately when the implementation needs them.
 
 ## SonarQube Cloud
 
-Project: [Misanthrope](https://sonarcloud.io/project/overview?id=OMG-Software_Misanthrope)
+Project: [OrangeCode](https://sonarcloud.io/project/overview?id=OMG-Software_OrangeCode)
 in the `omg-software` organization.
 
 `.github/workflows/sonar.yml` uses CI-based analysis and
@@ -85,7 +85,7 @@ To set up a personal analysis token:
 
 1. Sign in to SonarQube Cloud using the GitHub account with analysis permission.
 2. Open My account > Access Tokens > Personal Tokens.
-3. Generate a token named misanthrope-github-actions with an explicit expiry.
+3. Generate a token named orangecode-github-actions with an explicit expiry.
 4. Copy it directly to GitHub Settings > Secrets and variables > Actions >
    New repository secret, with the name SONAR_TOKEN.
 

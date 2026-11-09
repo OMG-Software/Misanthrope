@@ -1,5 +1,5 @@
-use misanthrope_core::prompt::{BASE_PROMPT, BASE_PROMPT_VERSION, base_prompt_sha256};
-use misanthrope_core::session::{MessageRole, SessionJournal};
+use orangecode_core::prompt::{BASE_PROMPT, BASE_PROMPT_VERSION, base_prompt_sha256};
+use orangecode_core::session::{MessageRole, SessionJournal};
 use serde_json::{Value, json};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -179,8 +179,8 @@ fn completion_response(content: &str) -> Value {
 }
 
 fn cli() -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_misanthrope"));
-    command.env_remove("MISANTHROPE_LM_TOKEN");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_orangecode"));
+    command.env_remove("ORANGECODE_LM_TOKEN");
     command
 }
 
@@ -188,7 +188,7 @@ fn run_cli(args: &[&str]) -> Output {
     cli()
         .args(args)
         .output()
-        .expect("run Misanthrope CLI binary")
+        .expect("run OrangeCode CLI binary")
 }
 
 fn assert_success(output: &Output) {
@@ -233,7 +233,7 @@ fn run_chat(
             message,
         ])
         .output()
-        .expect("run Misanthrope chat command")
+        .expect("run OrangeCode chat command")
 }
 
 fn run_resumed_chat(journal: &Path, endpoint: &str, message: &str) -> Output {
@@ -254,7 +254,7 @@ fn run_resumed_chat(journal: &Path, endpoint: &str, message: &str) -> Output {
             message,
         ])
         .output()
-        .expect("run resumed Misanthrope chat command")
+        .expect("run resumed OrangeCode chat command")
 }
 
 fn read_events(journal: &Path) -> Vec<Value> {
@@ -754,7 +754,7 @@ fn configured_credential_is_redacted_from_reply_journal_and_resumed_context() {
     let token = "fixture-lm-credential-123456";
     let server = MockServer::start(completion_response(&format!("Echoed {token}.")));
     let output = cli()
-        .env("MISANTHROPE_LM_TOKEN", token)
+        .env("ORANGECODE_LM_TOKEN", token)
         .arg("--data-dir")
         .arg(temporary.path().join("data"))
         .args(["chat", "--workspace"])
@@ -832,7 +832,7 @@ fn configured_credential_is_removed_from_new_inputs_before_request_and_retention
     let token = "fixture-ingress-credential-987654";
     let server = MockServer::start(completion_response("safe reply"));
     let output = cli()
-        .env("MISANTHROPE_LM_TOKEN", token)
+        .env("ORANGECODE_LM_TOKEN", token)
         .arg("--data-dir")
         .arg(temporary.path().join("data"))
         .args(["chat", "--workspace"])
@@ -869,7 +869,7 @@ fn session_new_redacts_the_configured_credential_in_its_title() {
     let temporary = TempDir::new().expect("private test directory");
     let token = "fixture-session-title-credential-246810";
     let output = cli()
-        .env("MISANTHROPE_LM_TOKEN", token)
+        .env("ORANGECODE_LM_TOKEN", token)
         .arg("--data-dir")
         .arg(temporary.path().join("data"))
         .args(["session", "new", "--workspace"])
@@ -912,7 +912,7 @@ fn configured_credential_in_older_history_is_redacted_before_resuming() {
     drop(journal);
     let server = MockServer::start(completion_response("safe new answer"));
     let output = cli()
-        .env("MISANTHROPE_LM_TOKEN", token)
+        .env("ORANGECODE_LM_TOKEN", token)
         .args(["chat", "--journal"])
         .arg(&path)
         .args([

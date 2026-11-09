@@ -7,7 +7,7 @@ use thiserror::Error;
 pub const BASE_PROMPT: &str = include_str!("../../../prompts/system.md");
 
 /// The version of [`BASE_PROMPT`].
-pub const BASE_PROMPT_VERSION: &str = "0.1.2";
+pub const BASE_PROMPT_VERSION: &str = "0.1.3";
 
 const MAX_CUSTOM_INSTRUCTIONS_BYTES: usize = 16 * 1024;
 const MAX_HISTORY_MESSAGE_BYTES: usize = 16 * 1024;
@@ -177,10 +177,10 @@ mod tests {
 
         assert_eq!(messages[0].role, ModelRole::System);
         assert_eq!(messages[0].content.as_bytes(), BASE_PROMPT.as_bytes());
-        assert_eq!(BASE_PROMPT_VERSION, "0.1.2");
+        assert_eq!(BASE_PROMPT_VERSION, "0.1.3");
         assert_eq!(
             base_prompt_sha256(),
-            "d438d6875f44ddc9c7921a25c9596de1b9da855b17f9d52f9a9cad505c69d3de"
+            "1ee6bf419a5498464b9602889783db4cc540f466dac3c190b7a815ca4ab40024"
         );
     }
 

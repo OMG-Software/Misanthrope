@@ -28,3 +28,4 @@ meaningful alternative does not need an ADR.
 | [0011: Reserve terminal journal capacity](0011-reserve-terminal-journal-capacity.md) | Accepted | 2026-11-08 |
 | [0012: Separate workspace settings from execution authority](0012-separate-workspace-settings-from-execution-authority.md) | Accepted | 2026-11-08 |
 | [0013: Enforce file access with native handles and exclusive creation](0013-enforce-file-access-with-native-handles-and-exclusive-creation.md) | Accepted | 2026-11-08 |
+| [0014: Use the renamed application namespace without automatic migration](0014-use-the-renamed-application-namespace-without-automatic-migration.md) | Accepted | 2026-11-09 |

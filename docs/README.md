@@ -1,6 +1,6 @@
 # Project documentation
 
-Misanthrope has a Rust CLI prototype for local chat, JSONL sessions, and a
+OrangeCode has a Rust CLI prototype for local chat, JSONL sessions, and a
 bounded native workspace file broker. The broker is available only through
 trusted operator commands. Model tool dispatch and the execution sandbox are
 not implemented. The guides distinguish implemented behaviour from the

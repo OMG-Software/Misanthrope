@@ -38,7 +38,7 @@ fn process_deadline_kills_and_reaps_a_hung_child() {
     let executable = std::env::current_exe().expect("current test executable");
     let mut command = Command::new(executable);
     command
-        .env_remove("MISANTHROPE_LM_TOKEN")
+        .env_remove("ORANGECODE_LM_TOKEN")
         .env(HANG_FIXTURE_ENV, "1")
         .args(["process_timeout_fixture", "--nocapture"]);
 
@@ -352,7 +352,7 @@ fn fifo_paths_fail_promptly_and_release_the_control_store() {
     fs::create_dir(&development_root).expect("create development root");
     let fifo = development_root.join("workspace-fifo");
     let mut mkfifo = Command::new("mkfifo");
-    mkfifo.arg(&fifo).env_remove("MISANTHROPE_LM_TOKEN");
+    mkfifo.arg(&fifo).env_remove("ORANGECODE_LM_TOKEN");
     let created = run_with_deadline(mkfifo, CLI_DEADLINE).expect("run mkfifo fixture command");
     assert!(!created.timed_out, "mkfifo fixture command must finish");
     assert_success(&created.output);

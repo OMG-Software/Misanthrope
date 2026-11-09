@@ -42,8 +42,8 @@ pub(crate) struct DirectoryRecord {
 
 impl DirectoryRecord {
     /// Compare the identity of the directory actually opened by the native broker.
-    pub(crate) fn native_identity(&self) -> misanthrope_platform::DirectoryIdentity {
-        misanthrope_platform::DirectoryIdentity {
+    pub(crate) fn native_identity(&self) -> orangecode_platform::DirectoryIdentity {
+        orangecode_platform::DirectoryIdentity {
             volume: self.volume,
             file_id: self.file_id,
         }
@@ -82,7 +82,7 @@ impl DirectoryRecord {
         let file = open_directory(&canonical_path)?;
         let metadata = file.metadata()?;
         validate_directory_metadata(&metadata)?;
-        let identity = misanthrope_platform::directory_identity(&file)?;
+        let identity = orangecode_platform::directory_identity(&file)?;
         let (creation_pre_epoch, creation_seconds, creation_nanos) =
             encode_system_time(created(&metadata)?);
         let path = NativePath::from_path(&canonical_path)
@@ -174,7 +174,7 @@ impl DirectoryRecord {
             let file = open_directory(&ancestor)?;
             let metadata = file.metadata()?;
             validate_directory_metadata(&metadata)?;
-            let identity = misanthrope_platform::directory_identity(&file)?;
+            let identity = orangecode_platform::directory_identity(&file)?;
             if (identity.volume, identity.file_id) == self_identity {
                 return Ok(true);
             }

@@ -219,7 +219,7 @@ fn validate_opened_file(file: &File) -> Result<(), StorageError> {
     if !opened.is_file() {
         return Err(StorageError::Invalid("file handle is not a regular file"));
     }
-    match misanthrope_platform::validate_journal_handle(file) {
+    match orangecode_platform::validate_journal_handle(file) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::InvalidInput => {
             return Err(StorageError::Invalid(

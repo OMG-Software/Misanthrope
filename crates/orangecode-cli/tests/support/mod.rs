@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 /// Maximum time allowed for a normal CLI fixture process.
 pub(crate) const CLI_DEADLINE: Duration = Duration::from_secs(10);
 /// Environment variable that enables the timeout fixture in the test binary.
-pub(crate) const HANG_FIXTURE_ENV: &str = "MISANTHROPE_CONTROL_WORKFLOW_HANG_FIXTURE";
+pub(crate) const HANG_FIXTURE_ENV: &str = "ORANGECODE_CONTROL_WORKFLOW_HANG_FIXTURE";
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const MAX_CAPTURE_BYTES: u64 = 1024 * 1024;
 
@@ -112,14 +112,14 @@ fn read_capture(file: &mut File) -> io::Result<Vec<u8>> {
 
 /// Run the CLI with isolated token state and the workflow deadline.
 pub(crate) fn run_cli(data_root: &Path, args: &[&str]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_misanthrope"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_orangecode"));
     command
-        .env_remove("MISANTHROPE_LM_TOKEN")
+        .env_remove("ORANGECODE_LM_TOKEN")
         .env_remove(HANG_FIXTURE_ENV)
         .arg("--data-dir")
         .arg(data_root)
         .args(args);
-    let result = run_with_deadline(command, CLI_DEADLINE).expect("run Misanthrope CLI");
+    let result = run_with_deadline(command, CLI_DEADLINE).expect("run OrangeCode CLI");
     assert!(
         !result.timed_out,
         "CLI exceeded its 10-second deadline: stdout={} stderr={}",

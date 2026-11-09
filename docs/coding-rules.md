@@ -1,6 +1,6 @@
 # Coding rules
 
-These requirements apply to Misanthrope production code, tests, generated code,
+These requirements apply to OrangeCode production code, tests, generated code,
 and project tooling. Workflow requirements also cover documentation.
 **Must** means required. **Prefer** defines the default; explain a departure
 where the choice can be reviewed.
@@ -184,7 +184,7 @@ that planned security controls or release requirements are complete.
 
 ## Toolchain, dependencies, and formatting
 
-- This section selects the toolchain for building Misanthrope itself.
+- This section selects the toolchain for building OrangeCode itself.
   User-project compilers, interpreters, and development tools have separate
   scoped profiles defined in the development-tool contract.
 - The workspace uses Rust edition 2024 and pins Rust 1.99.1 in
@@ -228,8 +228,8 @@ that planned security controls or release requirements are complete.
 ## Enforcement and verification limits
 
 The [repository-checks guide](repository-checks.md) defines review and analysis.
-The Cargo workspace contains `misanthrope-core`, `misanthrope-cli`, and
-`misanthrope-platform`; `.github/workflows/rust.yml` runs formatting, Clippy,
+The Cargo workspace contains `orangecode-core`, `orangecode-cli`, and
+`orangecode-platform`; `.github/workflows/rust.yml` runs formatting, Clippy,
 tests, and doc tests on Ubuntu 24.04 and Windows Server 2025. The frontend and
 execution sandbox are not implemented. Rustfmt checks formatting; Clippy and
 the compiler check selected properties; tests check exercised cases. None

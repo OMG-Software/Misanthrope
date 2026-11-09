@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use misanthrope_core::session::{MessageRole, RequestManifest, SessionError, SessionJournal};
+use orangecode_core::session::{MessageRole, RequestManifest, SessionError, SessionJournal};
 use tempfile::TempDir;
 use uuid::Uuid;
 
@@ -47,7 +47,7 @@ fn creation_writes_a_versioned_jsonl_file_under_utc_date_tree() {
     assert_eq!(parts[2].as_os_str().to_string_lossy().len(), 2);
     assert_eq!(parts[3].as_os_str().to_string_lossy().len(), 2);
     let name = parts[4].as_os_str().to_string_lossy();
-    assert!(name.starts_with("misanthrope-"));
+    assert!(name.starts_with("orangecode-"));
     assert!(name.ends_with(".jsonl"));
     assert_eq!(journal.snapshot().event_count, 1);
     let path = journal.path().to_path_buf();

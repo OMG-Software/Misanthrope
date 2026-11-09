@@ -3,9 +3,9 @@
 use std::path::{Path, PathBuf};
 
 use clap::{Args, Subcommand};
-use misanthrope_core::control::ControlStore;
-use misanthrope_core::files::{FileBroker, FileError, FileTarget};
-use misanthrope_core::policy::WorkspaceId;
+use orangecode_core::control::ControlStore;
+use orangecode_core::files::{FileBroker, FileError, FileTarget};
+use orangecode_core::policy::WorkspaceId;
 use serde_json::json;
 use uuid::Uuid;
 

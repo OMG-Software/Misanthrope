@@ -1,8 +1,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use misanthrope_core::control::{ControlError, ControlStore, WorkspaceRegistration};
-use misanthrope_core::policy::{DecisionReason, Operation, PermissionSet, PolicyRequest};
+use orangecode_core::control::{ControlError, ControlStore, WorkspaceRegistration};
+use orangecode_core::policy::{DecisionReason, Operation, PermissionSet, PolicyRequest};
 use tempfile::TempDir;
 use uuid::Uuid;
 
