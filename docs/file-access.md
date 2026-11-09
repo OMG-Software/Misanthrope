@@ -185,8 +185,8 @@ ID, historical grant, or recovery acknowledgement cannot supply authority.
 Open and retain the target's parent and current regular file through native
 handles. Refuse missing targets, links, reparse points, multiple hard links,
 special files, mount crossings, invalid paths, and unavailable metadata. Retain
-the native file identity as well as the expected digest and size. An identity
-change after capture is a conflict even when its bytes match. The current
+the native file identity as well as the expected digest and size. A different
+identity at the final check is a conflict even when its bytes match. The current
 preview does not expose an identity token, so this does not detect a same-bytes
 entry replacement made before apply opens the target. Parent traversal must
 meet the existing rooted-open contract.
@@ -203,8 +203,10 @@ Identical current and proposed bytes need no replacement or checkpoint.
 These checks are **not atomic compare-and-swap**. An independent editor can
 change a file or directory entry after the final check. It can also write
 during capture, so a read is not a filesystem snapshot. Repeated equal hashes
-and advisory locks do not prove an exclusive edit. A checkpoint preserves the
-bytes captured by OrangeCode; it cannot promise to preserve every concurrent
+and advisory locks do not prove an exclusive edit. A write from A to B and back
+to A before the final check can go undetected when the checked identity and
+metadata also match. A checkpoint preserves the bytes captured by OrangeCode;
+it cannot promise to preserve every concurrent
 edit or the exact bytes displaced by the rename. The first interface must
 explain this limit and require the operator to stop other writers before
 applying. That requirement is an operating assumption, not enforced isolation.
@@ -233,9 +235,10 @@ objects, and unavailable controls. Native parent/entry checks must protect both
 creation and reopening. Existing journal helpers alone do not establish that
 protection.
 
-The store has at most 64 operation entries and 64 MiB of total managed file
-bytes, including manifests and the replacement ledger. Each manifest is at
-most 64 KiB. Reserve the worst-case original, proposed, and staging payloads
+Replacement storage has at most 64 operation entries and 64 MiB of managed file
+bytes, including manifests, the replacement ledger, and the initialization
+journal described below. Each manifest is at most 64 KiB. Reserve the worst-case
+original, proposed, and staging payloads
 (1 MiB each), manifest, and terminal ledger space before preparation. Count
 incomplete entries and staging data inside this store against the limits.
 Bound enumeration and refuse an unknown layout; do not recursively scan an
@@ -258,6 +261,38 @@ contain secrets. They are private recovery data, never ordinary model context,
 tool output, or conversation events.
 
 ### Replacement sequence and audit compatibility
+
+An upgraded installation initially has neither the replacement store nor its
+initialization journal. That unused state must allow existing read/list/create
+operations without provisioning replacement storage. Ordinary file admission
+must not create a replacement ledger just because it is absent.
+
+The first trusted apply may provision storage under the control writer lock,
+after authorization, private-storage, same-filesystem, and capacity checks.
+Use a separate `<data-dir>/replacement-init-v1.jsonl` anchor, outside the
+replacement directory.
+It is a strict, private, single-link journal of at most 4 KiB and two records,
+bound to the control-store UUID and a new replacement-store UUID. Its two states
+are `initializing` and `ready`, in that order. It is part of the aggregate
+replacement quota and must receive the same native storage protection.
+
+Persist and sync the exclusive `initializing` record and its parent entry
+before creating the store. Exclusively create the store and its header-only ledger;
+sync their header, files, and parent entries. Append and sync `ready` only after
+that initialization succeeds. No replacement intent or workspace mutation is
+allowed before `ready` is durable. Reopen strictly validates both records and
+their store/ledger identities. Provisioning must reserve its full bounded space
+before starting and must not consume settings-journal capacity.
+
+Once the anchor exists, a missing ledger/store is not first use and must never
+be recreated automatically. An incomplete initialization, a store without its
+anchor, corrupt records, or inconsistent identities require existing-only
+inspection and fail closed for new file operations. Settings changes remain
+available. There is no automatic initialization repair or reset. A `ready`
+anchor with missing storage reports missing evidence, not an empty store.
+Deleting both the anchor and all store evidence cannot be detected by this
+layout; it provides no protection against a same-user actor erasing all private
+state. Downgrade and manual reset are not supported recovery procedures.
 
 Use a separate versioned replacement ledger in the private store. Do not add
 replacement variants to strict `file-operations-v1.jsonl` or rewrite control-v1
@@ -294,10 +329,11 @@ it does not consume either checkpoint payload. Sync both changed parent
 directories where required. A failed or interrupted publication must preserve
 enough recorded names and identities to inspect both locations.
 
-New file-operation admission must inspect unresolved state in both the existing
-operation log and the replacement ledger. A missing, corrupt, foreign, or
-unsupported required artifact must fail closed. Inspection, acknowledgement,
-and settings changes must remain possible at the ordinary admission caps.
+Once replacement storage is initialized, new file-operation admission must
+inspect unresolved state in both the existing operation log and the replacement
+ledger. A missing, corrupt, foreign, or unsupported required artifact must fail
+closed. Inspection, acknowledgement, and settings changes must remain possible
+at the ordinary admission caps.
 Never recreate a missing referenced checkpoint as an empty file. Older binaries
 do not inspect the new ledger and cannot enforce this admission rule. Downgrade
 is unsupported while replacement state exists; no old-binary recovery guarantee

@@ -40,6 +40,13 @@ unchanged. Bound entries, total storage, payloads, manifests, and ledger
 records. Reserve terminal capacity. Retain all evidence without automatic
 eviction or cleanup; refuse new replacements at the cap.
 
+Distinguish unused installations from missing initialized storage with a
+separate bounded initialization journal outside the checkpoint directory.
+Ordinary reads do not provision replacement state. Persist an initializing
+anchor before exclusive store creation and mark it ready only after its ledger
+and directory entries are synced. Partial or inconsistent provisioning requires
+inspection; a missing initialized ledger is never automatically recreated.
+
 Use reviewed native handle-relative publication only. Linux `renameat2` and
 Windows retained-handle rename are directions for implementation review, not
 qualified OrangeCode backends. Checkpoint persistence, security-metadata
