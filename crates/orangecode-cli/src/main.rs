@@ -327,6 +327,8 @@ fn chat_turn(
             role: match message.role {
                 MessageRole::User => ConversationRole::User,
                 MessageRole::Assistant => ConversationRole::Assistant,
+                // Stored tool text is already source-labelled untrusted content.
+                MessageRole::Tool => ConversationRole::User,
             },
             content: redact_known_secret(&message.text, token),
         })
@@ -346,6 +348,8 @@ fn chat_turn(
         base_url: args.endpoint,
         context_tokens: args.context_tokens,
         max_output_tokens: args.max_output_tokens,
+        tool_schema_version: None,
+        tools: None,
     };
     journal
         .preflight_request(&args.message, &manifest)

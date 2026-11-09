@@ -6,6 +6,11 @@ Changes are recorded here before a release version is assigned.
 
 ### Fixed
 
+- Harden the core turn/tool runtime: reserve assembled-prompt capacity and
+  enforce the selected tool-message limit before recording results, retain
+  interim assistant text in follow-up history, preserve original policy
+  binding errors, and cover failed-turn call-identifier reuse in replay.
+
 - Keep operational file checks out of the settings journal so file traffic and
   audit-cap refusals cannot exhaust capacity needed for permission changes.
 - Add explicit, no-replace operation-journal exports and read-only archive
@@ -40,6 +45,18 @@ Changes are recorded here before a release version is assigned.
 - Add review regression tests and clarify smoke-check, coverage, and CLI examples.
 
 ### Added
+
+- Rust 0.4.0 session-owned turn/tool runtime for library callers and tests:
+  strict read/list tool admission, a fresh workspace binding per operation,
+  control-store release before model I/O, round/call/byte/deadline limits,
+  cooperative cancellation, model-addressable Unicode listing names,
+  source-labelled untrusted tool messages, and durable tool intents/results.
+  No CLI command or real provider adapter dispatches these tools.
+- JSONL session schema version 2 with `tool.requested`, `tool.completed`, tool
+  messages, and exact tool schema/name manifest fields. Replay verifies that
+  each tool message matches its recorded size and SHA-256. Version 1 journals
+  remain readable and writable with their text-only subset. New sessions use
+  version 2; mixed versions and version-1 tool events are rejected.
 
 - User-provided pull-request-review skill source package, preserved instructions,
   provenance/digest catalog, and documentation links. Runtime skill loading and

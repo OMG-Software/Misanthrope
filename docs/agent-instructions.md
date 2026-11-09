@@ -12,7 +12,7 @@ when an optimization would weaken containment, authorization, or confidentiality
 Prompt injection defence requires runtime controls as well as model guidance.
 No prompt can guarantee that a model will ignore malicious instructions.
 
-## Implemented prototype (v0.1.0)
+## Implemented prototype (v0.4.0)
 
 The compiled base is prompt version 0.1.3. The Rust core embeds
 [`prompts/system.md`](../prompts/system.md), computes the SHA-256 digest from
@@ -29,6 +29,12 @@ in the session journal. It records the compiled prompt, version and digest,
 custom instruction text, model, base URL, and configured context/output budgets
 in the request manifest. It does not record custom-instruction scope revisions,
 skill/tool/memory selections, or an account profile.
+
+The core turn/tool runtime records the exact tool schema version and tool names
+in a schema-version-2 request manifest. Its read/list results are appended as
+source-labelled user-level tool messages and are never system messages. The CLI
+does not expose this runtime: `chat` sends no tool definitions and rejects any
+provider tool call.
 
 Prompt assembly limits custom instruction text and each history message to 16
 KiB, history to 128 messages, and the assembled UTF-8 text to 256 KiB. The
@@ -160,10 +166,12 @@ instruction snapshots with the session journal under its retention policy so
 the user can inspect what was sent. A digest alone cannot reconstruct old text.
 Show when retention or removal has made an older body unavailable.
 Use the versioned JSONL [session journal](session-storage.md) for these records.
-The prototype records only the compiled prompt text/version/digest, one
+The current prototype records the compiled prompt text/version/digest, one
 per-invocation custom instruction string, the selected model and base URL, and
-caller-supplied context/output budgets. It has no saved preference revision
-system or records for skills, tools, memories, or account profiles.
+caller-supplied context/output budgets. Schema version 2 runtime turns also
+record the tool schema version and exact tool names, plus separate tool intent
+and result events. The prototype has no saved preference revision system or
+records for skills, memories, tool-round counts, or account profiles.
 
 Edits apply to the next request. Clearly label a request already in flight. If an
 edit requires immediate effect, cancel and observe completion before restarting;

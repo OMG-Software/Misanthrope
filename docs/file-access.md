@@ -4,14 +4,17 @@
 
 The 0.3.0 broker provides bounded file reads, directory listings, exclusive
 new-file creation, and exclusive single-directory creation. Trusted CLI input
-exercises these APIs. Chat still advertises no tools and rejects model tool
-calls. The process runner, terminal, Git, MCP, and graphical panels are separate
-increments. This broker is not process containment or a release qualification.
+exercises these APIs. The 0.4.0 core turn runtime can also dispatch read and
+list through a caller-supplied model interface, but no CLI command exposes it;
+chat still advertises no tools and rejects model tool calls. The process runner,
+terminal, Git, MCP, and graphical panels are separate increments. This broker is
+not process containment or a release qualification.
 
 The CLI session UUID selects an operator trace scope. These manual commands do
-not dispatch work from saved conversations. A future conversation runtime must
-check archive/lifecycle state before issuing model tool requests; it must not
-infer a live binding from journal metadata.
+not dispatch work from saved conversations. The core turn runtime checks
+archive and active-turn state before starting and obtains a fresh binding before
+each call; it does not infer a live binding from journal metadata. A future CLI
+or provider integration must preserve those checks.
 
 Existing-file replacement, deletion, recursive directory creation, and action
 replay are not supported. A create operation refuses every existing entry.
@@ -29,7 +32,11 @@ creation requires write permission. A serialized ID, journal header, summary,
 or diagnostic policy decision cannot restore authority.
 
 The core then opens native root/workspace directory handles and compares their
-volume, file ID, and creation time with current registrations. Relative paths
+volume, file ID, and creation time with current registrations. The turn runtime
+opens the control store and obtains a fresh process-local binding immediately
+before each call, then releases the settings lock before the next model
+request. It does not retain a binding across model rounds or reconstruct one
+from journal metadata. Relative paths
 are opened through these handles. String-prefix checks derive no authority.
 The diagnostic `execution_allowed` field remains false; it is not an executor
 permit. The actual broker performs the additional native checks on each call.
@@ -100,6 +107,12 @@ Reads check size and enforce the byte limit during reading. Creation uses
 exclusive create semantics, so a collision never truncates an existing file.
 Parent directories must already exist. New Unix files request mode 0600 and
 new directories mode 0700. Windows inherits the workspace ACL.
+
+Tool-runtime limits are separate from the broker limits: four model rounds,
+eight calls per round, sixteen calls per turn, 16 KiB per source-labelled tool
+message, 256 KiB aggregate tool text, and a 30-second cooperative deadline by
+default. See the [session contract](session-storage.md) and
+[development guide](development.md).
 
 A new file is visible while bytes are written. Interrupted writes can leave a
 partial new entry. Post-create failure is an uncertain mutation, not a clean

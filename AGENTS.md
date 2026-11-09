@@ -8,7 +8,8 @@ preferences, a bounded native file broker exposed through trusted CLI commands,
 and native identity checks. Follow [workspace settings](docs/workspace-permissions.md)
 and [workspace file access](docs/file-access.md) for their contracts. Enabled
 preferences never authorize execution. The prototype is not a desktop app and
-does not provide model-dispatched file tools, process execution, or an execution sandbox.
+does not expose model-dispatched file tools through the CLI or a real provider
+adapter, process execution, or an execution sandbox.
 The bundled web interface and most planned features are not implemented.
 Repository review and analysis are defined in
 [docs/repository-checks.md](docs/repository-checks.md).

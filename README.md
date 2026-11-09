@@ -4,17 +4,21 @@
 
 OrangeCode aims to connect language models to controlled development tools.
 The current code is an early Rust core and command-line prototype. A bounded
-native workspace file broker is available through trusted CLI commands. Model
-tool dispatch, a desktop interface, Git workflows, and an execution sandbox
-remain planned.
+native workspace file broker is available through trusted CLI commands. A core
+turn/tool runtime and schema-v2 session format exist for library callers and
+tests, but the CLI and every real provider adapter still dispatch no model
+tools. CLI/provider tool dispatch, a desktop interface, Git workflows, and an
+execution sandbox remain planned.
 
 > **Status: early prototype, not release-ready.** The Rust CLI can inspect the
 > compiled prompt, report implemented capabilities, manage JSONL sessions and
 > workspace permission preferences, perform bounded workspace reads/listings,
 > create new files/directories through the trusted CLI, and send one
 > non-streaming chat request to an explicitly selected local LM Studio model.
-> Chat still has no file tools. Existing files cannot be replaced or deleted,
-> commands cannot be run, and no execution sandbox is implemented.
+> Chat still has no file tools. The core has a bounded read/list turn runtime
+> exercised with a scripted model, but the CLI does not expose it. Existing
+> files cannot be replaced or deleted, commands cannot be run, and no execution
+> sandbox is implemented.
 
 ## Goals
 
@@ -53,11 +57,21 @@ refuses to chat with an archived session or one with an incomplete prior turn;
 it does not replay recorded actions. An abandoned turn must be inspected and
 marked interrupted before chat can continue.
 
+The core also implements a session-owned turn/tool runtime and JSONL schema
+version 2. That runtime accepts a caller-supplied model interface, validates
+strict read/list tool calls, creates a fresh workspace binding before every
+operation, and records tool intents, results, and source-labelled messages.
+Only bounded read and directory listing are supported. It has no CLI command,
+no real provider integration, and no write, process, Git, MCP, or network tool.
+New sessions use schema version 2; version 1 journals remain readable and
+writable with their original text-only event subset.
+
 The platform crate checks opened journal handles, captures native directory
 identity for workspace registration, and implements handle-relative file
 operations. The broker applies the current registered workspace checks, but it
 does not isolate hostile same-user processes or contain a process. Existing
-file replacement, deletion, and model-dispatched file tools remain unavailable.
+file replacement, deletion, and CLI/provider model-dispatched file tools remain
+unavailable.
 Process/network confinement, Git, MCP, and memories remain planned. See the
 [workspace settings contract](docs/workspace-permissions.md), the
 [workspace file-access guide](docs/file-access.md), and the [development
