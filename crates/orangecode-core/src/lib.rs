@@ -8,6 +8,7 @@ pub mod files;
 pub mod policy;
 pub mod prompt;
 pub mod provider;
+pub mod replacement;
 pub mod session;
 mod storage;
 pub mod turn;

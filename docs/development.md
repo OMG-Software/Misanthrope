@@ -1,6 +1,6 @@
 # Build and run the core prototype
 
-OrangeCode 0.5.0 is a developer CLI prototype with workspace permission
+OrangeCode 0.6.0 is a developer CLI prototype with workspace permission
 settings and bounded native file operations through trusted operator commands.
 It can send a text conversation to an explicitly selected local LM Studio model
 and save that conversation. It can read/list files, exclusively create new
@@ -9,6 +9,12 @@ in a registered workspace. The core also has a bounded turn/tool runtime for
 library callers and tests, but no CLI command exposes it. The CLI cannot replace
 or delete existing files, run commands, use Git, or connect to MCP servers.
 CLI/provider model tool dispatch and an execution sandbox are not implemented.
+
+The core's `replacement` module validates caller-supplied initialization and
+replacement-ledger bytes. These read-only library APIs create no storage,
+validate no native checkpoint, and change no broker admission. They are not
+CLI apply or recovery commands. See the
+[record inspection contract](file-access.md#implemented-record-inspection-phase-a2a).
 
 ## Build
 

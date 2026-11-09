@@ -22,8 +22,8 @@ Existing-file replacement, deletion, recursive directory creation, and action
 replay are not supported. A create operation refuses every existing entry.
 In particular, a hash check followed by rename is not atomic compare-and-swap
 against an independent editor. Replacement needs a separate reviewed conflict
-and recovery contract. The [proposal below](#proposed-replacement-contract) is
-documentation for that review; it enables no operation. See
+and recovery contract. The [accepted contract below](#replacement-contract)
+defines the remaining implementation gates; it enables no operation. See
 [ADR-0013](adr/0013-enforce-file-access-with-native-handles-and-exclusive-creation.md).
 
 ## Authorization
@@ -158,12 +158,72 @@ define conflict and checkpoint behaviour, and handle uncertain outcomes without
 automatic retry. Existing-file replacement remains unsupported. See
 [ADR-0017](adr/0017-preview-edits-before-enabling-replacement.md).
 
-## Proposed replacement contract
+## Replacement contract
 
-This section is the **Phase A1 proposal**, not implemented behaviour. Review
-and accept [ADR-0018](adr/0018-define-checkpointed-replacement-before-enabling-overwrites.md)
-before enabling replacement in Phase A2. There is no apply, checkpoint, or
-replacement-recovery command today. Existing capability output stays unchanged.
+This contract was accepted through PR #10 and
+[ADR-0018](adr/0018-define-checkpointed-replacement-before-enabling-overwrites.md).
+Phase A2a implements only read-only validation of caller-supplied record bytes,
+described below. Native checkpoint storage, apply, and replacement-recovery
+commands remain unimplemented. Capability output keeps replacement disabled.
+
+### Implemented record inspection (Phase A2a)
+
+The v0.6.0 core `replacement` module provides `inspect_initialization` and
+`inspect_ledger`. Both accept byte slices and expected store IDs. They return
+recorded evidence only. They open no file, initialize no directory, append no
+event, check no live policy, and execute no action. The CLI and broker do not
+call them yet. Current file admission is unchanged. They cannot distinguish
+missing storage from an unused installation because they do not observe disk.
+An empty byte slice or incomplete final record is invalid input, rather than
+an unused state.
+
+Every record uses schema version 1 and has `control_store_id`,
+`replacement_store_id`, `event_id`, `sequence`, `timestamp`, and `action`.
+IDs must be non-nil RFC 4122 version-4 UUIDs. Sequence starts at zero and is
+contiguous. Timestamps must be RFC 3339 UTC. Event IDs cannot repeat. Each action
+has a `type` and a typed `payload` when needed. Unknown fields/variants and
+duplicate keys at any depth are rejected. Complete LF or CRLF records are
+required; encoded delimiters count toward the bounds.
+
+Initialization input is at most 4 KiB and two records: `initializing`, followed
+optionally by `ready`, with unchanged identities. The first record alone returns
+an incomplete initialization snapshot. A `ready` record is a recorded claim,
+not evidence that files or directory entries are durable.
+
+Ledger input has the 8 MiB, 4,096-record, and 64 KiB-per-record bounds below.
+It retains at most 64 operation intents, including failed and acknowledged
+intents that might have no artifact directory yet. This conservative count
+does not infer freed capacity from absent files. The first record is `created`.
+The remaining action sequence is:
+
+| Action type | Payload and replay rule |
+| --- | --- |
+| `replacement_started` | A unique operation ID, valid session/workspace IDs, nondecreasing policy `revision`, `target`, `expected`, `proposed`, and `artifacts`. No other operation may be unresolved. |
+| `checkpoint_prepared` | Matching `operation_id` and exact `manifest` descriptor. Requires the intent phase. |
+| `stage_prepared` | Matching `operation_id`, native `identity`, and `content` descriptor equal to the intent's proposed bytes/digest. Requires checkpoint preparation. |
+| `commit_intended` | Matching `operation_id`. Requires stage preparation. |
+| `replacement_finished` | Matching `operation_id`, `outcome`, and bounded non-success `code`. Success requires commit intent. Clean failure/conflict is accepted only before commit intent. Uncertainty remains unresolved. |
+| `replacement_acknowledged` | Matching unresolved `operation_id`. Clears only the recorded blocker; retains progress and outcome and never creates a success result. |
+
+Artifact descriptors have `bytes` and lowercase hexadecimal `sha256`. File
+payload claims are at most 1 MiB; a manifest claim is nonempty and at most
+64 KiB. Stage identity has `volume` and a 16-byte `file_id`, using the existing
+native identity representation. Those fields do not prove an opened object.
+The fixed artifact-name plan is `original`, `proposed`, `manifest.json`, and
+`stage` beneath the operation UUID entry. Other names are rejected.
+
+Targets use this OS's native path encoding and the existing broker's relative
+path syntax and bounds. Raw Unix bytes and unpaired Windows UTF-16 units remain
+lossless. Foreign-OS path encodings are refused; cross-platform code does not
+mean cross-OS archive conversion. Non-success codes use 1–128 lowercase ASCII
+letters, digits, or underscores. Their syntax is not a confidentiality check.
+
+Replay never reads a referenced manifest or payload, compares actual file bytes,
+verifies private ACLs, or enforces aggregate disk quota. End-of-input preserves
+every unfinished or uncertain operation. After commit intent, this first format
+accepts only success, uncertainty, or acknowledgement; a later backend-specific
+clean-failure case needs a reviewed format extension. See
+[ADR-0019](adr/0019-validate-replacement-records-before-native-storage.md).
 
 ### Admission and conflict checks
 
