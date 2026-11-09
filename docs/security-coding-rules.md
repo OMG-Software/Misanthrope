@@ -73,6 +73,12 @@ authorization. See
   original content and version before replacing a file or applying a patch.
 - Make recovery preserve unrelated changes. A checkpoint must not restore over
   later user work without detecting it.
+- A read-only edit preview compares bytes read through the broker with trusted
+  operator-selected proposed content. It is untrusted evidence, not a write
+  grant. Its digest is a snapshot, not a conflict-free replacement token. The
+  preview must not write, checkpoint, or imply that replacement is enabled.
+  Open a trusted proposed source without following a final link and reject
+  reparse, device, or non-regular handles before reading it.
 
 The v0.3.0 native file broker currently exposes bounded read, list,
 exclusive-create, and single-directory creation through trusted CLI commands.

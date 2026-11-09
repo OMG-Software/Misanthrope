@@ -17,8 +17,10 @@ only through trusted CLI commands. Broker operations add live handle checks and
 use a separate file-operation journal. The v0.4.0 core adds a session-owned
 turn/tool runtime and schema-version-2 journals. That runtime is exercised with
 a scripted model and the real control store, broker, and temporary workspace; no
-CLI route or real provider adapter dispatches tools. These features do not
-provide a process runner or an execution sandbox. See [workspace permissions](workspace-permissions.md)
+CLI route or real provider adapter dispatches tools. The v0.5.0 CLI adds a
+read-only edit preview that compares a broker-read file with trusted proposed
+content and never writes or checkpoints. These features do not provide a
+process runner or an execution sandbox. See [workspace permissions](workspace-permissions.md)
 and the [workspace file-access contract](file-access.md) for their scope and
 current limits. [Repository review and analysis](repository-checks.md) have
 separate workflows.
@@ -34,7 +36,10 @@ the exact number of durable `policy_checked` events in the tested workflow.
 They exercise configuration commands and confirm that policy checks remain
 configuration-only. File broker tests cover bounded reads, listings, exclusive
 creation, scope denials, path/link checks, collisions, audit privacy, and
-uncertain-create recovery. Turn-runtime tests cover allowed read/list through a
+uncertain-create recovery. Edit-preview unit and CLI tests cover exact hunk
+rendering, unchanged content, CRLF and final-newline preservation, line-count
+and diff bounds, binary and oversized refusal, proposed-source link rejection,
+permission denial, and absence of workspace mutation. Turn-runtime tests cover allowed read/list through a
 fresh live binding, policy denial at the broker, revocation during model I/O,
 unknown and malformed calls, duplicate identifiers, per-round, aggregate,
 prompt-capacity, and selected per-message limits, cancellation, deadline expiry,
@@ -101,7 +106,7 @@ As the relevant components are implemented, include:
 | --- | --- |
 | Permissions | Allowed/denied requests, stale grants, scope mismatch, revocation; workspace registration and directory replacement |
 | Workspace identity | Native paths, stable directory IDs after child writes, ancestor/sibling checks, missing creation-time metadata failure |
-| Files | Bounded read/list/create/mkdir, policy scope, traversal, native paths, symlinks/junctions, hard links, special files, collisions, uncertain creation, audit privacy, and path-swap races |
+| Files | Bounded read/list/create/mkdir, policy scope, traversal, native paths, symlinks/junctions, hard links, special files, collisions, uncertain creation, audit privacy, path-swap races, and read-only edit-preview bounds/no-mutation |
 | Processes | Descendant escape attempts, limits, cleanup, startup failure |
 | Networking | Disabled egress, host-local access, redirects, provider routing |
 | Providers | Partial/malformed streams, duplicate calls, interruption, retries |

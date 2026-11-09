@@ -19,6 +19,7 @@ remaining product contracts.
 | Document | Purpose |
 | --- | --- |
 | [Project overview](../README.md) | Product scope, proposed architecture, and roadmap |
+| [Implementation plan](../IMPLEMENTATION_PLAN.md) | Resumable baseline, phase order, acceptance criteria, and resume commands |
 | [Build and run](development.md) | Current CLI, build commands, crate boundaries, limits, and dependencies |
 | [Coding rules](coding-rules.md) | Rust design, ownership, errors, concurrency, and workflow |
 | [Security coding rules](security-coding-rules.md) | Permission, sandbox, credential, Git, and UI boundaries |
@@ -26,7 +27,7 @@ remaining product contracts.
 | [Platform support](platform-support.md) | Windows/Linux targets and the evidence needed for support |
 | [Provider authentication](provider-authentication.md) | Required subscription/API profiles, provider evidence, and readiness gates |
 | [Workspace settings](workspace-permissions.md) | Implemented workspace IDs, configuration-only permissions, revisions, audit, and remaining gates |
-| [Workspace file access](file-access.md) | Current bounded native file broker, trusted CLI interface, journal, platform limits, and recovery |
+| [Workspace file access](file-access.md) | Bounded native file broker, read-only edit previews, trusted CLI interface, journal, platform limits, and recovery |
 | [Development tools](development-tools.md) | Installed/managed toolchains, runtime grants, outputs, caches, and qualification |
 | [Agent instructions](agent-instructions.md) | Product priorities, visible SYSTEM prompt, user additions, and request manifests |
 | [System prompt draft](../prompts/system.md) | Versioned initial base instructions for the coding assistant |
@@ -80,6 +81,7 @@ separate documentation tests on Windows and Linux. The development guide owns
 the current commands and limits. There is no frontend or execution backend yet.
 The limited file broker and the core read/list turn runtime do not provide
 general model tools or process containment. No CLI route dispatches model
-tools.
+tools. A read-only CLI preview compares a workspace file with trusted proposed
+content without writing to the workspace or creating a checkpoint.
 Dependency security audits, native containment qualification, and release checks
 still need their own implementation and evidence.

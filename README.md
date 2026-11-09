@@ -13,8 +13,9 @@ execution sandbox remain planned.
 > **Status: early prototype, not release-ready.** The Rust CLI can inspect the
 > compiled prompt, report implemented capabilities, manage JSONL sessions and
 > workspace permission preferences, perform bounded workspace reads/listings,
-> create new files/directories through the trusted CLI, and send one
-> non-streaming chat request to an explicitly selected local LM Studio model.
+> create new files/directories through the trusted CLI, preview bounded diffs
+> against trusted proposed content, and send one non-streaming chat request to
+> an explicitly selected local LM Studio model.
 > Chat still has no file tools. The core has a bounded read/list turn runtime
 > exercised with a scripted model, but the CLI does not expose it. Existing
 > files cannot be replaced or deleted, commands cannot be run, and no execution
@@ -41,9 +42,10 @@ and `orangecode-platform`. The CLI command is `orangecode`. It provides:
 - `workspace`: configure the development root, register stable workspace IDs,
   change read/write/execute/task-network preferences, and inspect audited policy
   checks. These checks describe configuration only; execution stays disabled.
-- `file`: use bounded native reads, listings, exclusive new-file creation, and
-  single-directory creation through explicit workspace/session CLI selections.
-  These trusted operator commands do not provide model tool definitions.
+- `file`: use bounded native reads, listings, exclusive new-file creation,
+  single-directory creation, and read-only diff previews through explicit
+  workspace/session CLI selections. These trusted operator commands do not
+  provide model tool definitions, and `file diff` never writes to the workspace.
 - `session`: create, inspect, archive, restore, and explicitly interrupt an
   abandoned turn in a JSONL journal.
 - `chat`: send one user turn to an already-running LM Studio server at a literal
@@ -71,7 +73,8 @@ identity for workspace registration, and implements handle-relative file
 operations. The broker applies the current registered workspace checks, but it
 does not isolate hostile same-user processes or contain a process. Existing
 file replacement, deletion, and CLI/provider model-dispatched file tools remain
-unavailable.
+unavailable. A read-only `file diff` preview is available; it is not a
+replacement operation and creates no checkpoint.
 Process/network confinement, Git, MCP, and memories remain planned. See the
 [workspace settings contract](docs/workspace-permissions.md), the
 [workspace file-access guide](docs/file-access.md), and the [development

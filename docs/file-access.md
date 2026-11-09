@@ -6,7 +6,9 @@ The 0.3.0 broker provides bounded file reads, directory listings, exclusive
 new-file creation, and exclusive single-directory creation. Trusted CLI input
 exercises these APIs. The 0.4.0 core turn runtime can also dispatch read and
 list through a caller-supplied model interface, but no CLI command exposes it;
-chat still advertises no tools and rejects model tool calls. The process runner,
+chat still advertises no tools and rejects model tool calls. The 0.5.0 CLI adds
+a read-only `file diff` preview that reads through the broker and never writes,
+checkpoints, or replaces a workspace entry. The process runner,
 terminal, Git, MCP, and graphical panels are separate increments. This broker is
 not process containment or a release qualification.
 
@@ -121,6 +123,38 @@ actor may have changed it. Inspect the path and operation journal before any
 explicit retry. File flushes and journal syncs are used, but cross-platform
 power-loss durability, particularly Windows directory entries, remains
 unqualified.
+
+## Read-only edit previews
+
+The v0.5.0 `file diff` command generates a reviewable replacement preview
+without changing the workspace. It requires the same live session binding and
+read preference as a broker read, reads the current regular single-link file
+through the broker (creating the normal read operation record), and reads the
+complete proposed content from a trusted operator-selected local regular file.
+The proposed source is opened read-only without following a final link; Windows
+reparse points, devices, and non-regular handles are rejected. The preview also
+rejects non-UTF-8 content and either side above 1 MiB. When a diff is needed it
+rejects more than 65,536 lines per side; identical content may exceed that line
+count if it fits the byte bound.
+
+The result contains the lossless target, exact current and proposed SHA-256
+digests and byte counts, a changed flag, and a bounded single-hunk diff with
+current and proposed line ranges. The hunk is built around the common line
+prefix and suffix; it is not a minimal diff. The diff is limited to 64 KiB and carries a truncated flag. A missing
+final newline is marked with the standard `\ No newline at end of file` line.
+Previewing does not replace, delete, checkpoint, or otherwise mutate any
+workspace entry, and it creates no proposal or checkpoint record. It is not a
+write grant or a replacement contract.
+
+The current-side size limit is enforced by the broker and reports the broker's
+`file_io` error category. The proposed-side limit reports `edit_limit`.
+
+The preview records the bytes read at that moment. An independent editor can
+change the target after the read; the digests are a snapshot, not a lock. A
+future replacement operation must recheck the target identity and content,
+define conflict and checkpoint behaviour, and handle uncertain outcomes without
+automatic retry. Existing-file replacement remains unsupported. See
+[ADR-0017](adr/0017-preview-edits-before-enabling-replacement.md).
 
 ## Private operation journal and recovery
 

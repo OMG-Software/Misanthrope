@@ -185,6 +185,11 @@ contract below is complete.
 
 ## File-operation journal
 
+A read-only `file diff` preview performs the normal broker read and therefore
+adds a normal read intent/outcome pair to the file-operation journal. Its
+trusted proposed content is not recorded there. See the
+[file-access contract](file-access.md) for preview bounds and no-mutation rules.
+
 The workspace file broker records operation intent and outcome in a separate
 `file-operations-v1.jsonl` file under the private application data directory.
 It does not change the session JSONL event schema or the `control-v1.jsonl`
