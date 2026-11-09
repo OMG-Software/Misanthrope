@@ -27,6 +27,8 @@ fn manifest() -> RequestManifest {
         base_url: "http://127.0.0.1:1234/v1".into(),
         context_tokens: 32_000,
         max_output_tokens: 2_000,
+        tool_schema_version: None,
+        tools: None,
     }
 }
 
@@ -58,7 +60,7 @@ fn creation_writes_a_versioned_jsonl_file_under_utc_date_tree() {
     assert_eq!(bytes.last(), Some(&b'\n'));
     let first: serde_json::Value =
         serde_json::from_slice(&bytes[..bytes.len() - 1]).expect("event JSON");
-    assert_eq!(first["schema_version"], 1);
+    assert_eq!(first["schema_version"], 2);
     assert_eq!(first["type"], "session.started");
     assert_eq!(first["seq"], 0);
     assert_eq!(first["payload"]["title"], "Overview");
@@ -234,10 +236,11 @@ fn malformed_schema_events_and_injected_roles_are_rejected_without_repair() {
             "message.recorded",
             "system",
         ),
-        valid_message(2, Uuid::new_v4().to_string(), 1, "message.recorded", "user"),
-        valid_message(1, Uuid::new_v4().to_string(), 1, "future.event", "user"),
-        valid_message(1, initial_event_id, 1, "message.recorded", "user"),
-        valid_message(1, Uuid::new_v4().to_string(), 2, "message.recorded", "user"),
+        valid_message(1, Uuid::new_v4().to_string(), 1, "message.recorded", "user"),
+        valid_message(3, Uuid::new_v4().to_string(), 1, "message.recorded", "user"),
+        valid_message(2, Uuid::new_v4().to_string(), 1, "future.event", "user"),
+        valid_message(2, initial_event_id, 1, "message.recorded", "user"),
+        valid_message(2, Uuid::new_v4().to_string(), 2, "message.recorded", "user"),
     ];
 
     for line in candidates {
@@ -334,8 +337,12 @@ fn legacy_full_journal(byte_limit: bool) -> (TempDir, std::path::PathBuf) {
     let journal = create(&root, &workspace);
     let path = journal.path().to_path_buf();
     drop(journal);
-    let mut bytes = fs::read(&path).expect("initial record");
-    let first: serde_json::Value = serde_json::from_slice(&bytes).expect("first record");
+    let mut first: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).expect("initial record")).expect("first record");
+    // Model a schema-v1 journal from before the turn/tool schema increment.
+    first["schema_version"] = serde_json::json!(1);
+    let mut bytes = serde_json::to_vec(&first).expect("v1 first record");
+    bytes.push(b'\n');
     let session_id = first["session_id"].clone();
     let request_id = Uuid::new_v4();
     let mut seq = 1_u64;

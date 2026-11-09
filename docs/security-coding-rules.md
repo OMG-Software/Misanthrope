@@ -3,8 +3,9 @@
 These rules define requirements for each implemented boundary. The CLI prototype
 has bounded prompt/provider/journal checks and rejects model-requested tools.
 It has trusted workspace settings and a bounded native file broker for manual
-commands. It has no execution sandbox, model-dispatched file tools, or permission
-UI. Configuration diagnostics always deny execution and do not replace per-target
+commands. The core also has a bounded turn/tool runtime for read and list
+through a caller-supplied model interface, but no CLI route or real provider
+adapter dispatches tools. It has no execution sandbox or permission UI. Configuration diagnostics always deny execution and do not replace per-target
 authorization. See
 [workspace settings](workspace-permissions.md) and [current limits](development.md). Apply these rules with the
 [coding rules](coding-rules.md) and [testing standards](testing-standards.md).
@@ -75,6 +76,11 @@ authorization. See
 
 The v0.3.0 native file broker currently exposes bounded read, list,
 exclusive-create, and single-directory creation through trusted CLI commands.
+The v0.4.0 core turn runtime exposes only read and list to its caller-supplied
+model interface. It validates strict tool schemas and limits, opens the control
+store for each call, obtains a fresh binding, releases the settings lock before
+the next model request, and records tool intents and results as untrusted
+evidence.
 Its checks do not isolate hostile same-user processes or provide process
 containment. Model file tools remain disabled; capability output keeps
 `workspace_file_tools` false. Do not treat journal metadata or enabled
@@ -118,6 +124,8 @@ for current native operations, failure states, and explicit recovery.
   confidentiality.
 - Assemble and validate a complete structured tool call before dispatch.
   Validate names, arguments, limits, session scope, and provider call identity.
+  A provider adapter must parse provider JSON strictly; the core runtime then
+  revalidates names, argument shape, paths, and bounds before any broker call.
 - Deduplicate calls within the correct request/session scope. After an ambiguous
   result, reconcile the operation instead of automatically executing it again.
 - Parse malformed, oversized, interrupted, and unsupported provider responses as
@@ -191,6 +199,9 @@ for current native operations, failure states, and explicit recovery.
   transaction and migration integrity during failure and restart.
 - Store tool lifecycle and authorization records outside the task's writable
   view. An interrupted operation must remain visibly incomplete until reconciled.
+  Schema-version-2 session tool intents and results are inspection evidence;
+  a recorded intent is not permission to replay, and a failed turn may leave an
+  intent without a result.
 - Follow [session storage](session-storage.md) for core-owned JSONL journals,
   single-writer durability, bounded parsing, recovery, and archive transitions.
   Keep journals/indexes/artifacts outside task access and redact known secrets

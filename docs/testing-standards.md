@@ -14,8 +14,11 @@ fails when the filesystem does not provide birth-time metadata. Windows reads a
 128-bit file ID from an open handle. Identity records alone are configuration
 metadata. The v0.3.0 core also authorizes a bounded native file broker, exposed
 only through trusted CLI commands. Broker operations add live handle checks and
-use a separate file-operation journal. They do not provide model tool dispatch,
-a process runner, or an execution sandbox. See [workspace permissions](workspace-permissions.md)
+use a separate file-operation journal. The v0.4.0 core adds a session-owned
+turn/tool runtime and schema-version-2 journals. That runtime is exercised with
+a scripted model and the real control store, broker, and temporary workspace; no
+CLI route or real provider adapter dispatches tools. These features do not
+provide a process runner or an execution sandbox. See [workspace permissions](workspace-permissions.md)
 and the [workspace file-access contract](file-access.md) for their scope and
 current limits. [Repository review and analysis](repository-checks.md) have
 separate workflows.
@@ -31,7 +34,13 @@ the exact number of durable `policy_checked` events in the tested workflow.
 They exercise configuration commands and confirm that policy checks remain
 configuration-only. File broker tests cover bounded reads, listings, exclusive
 creation, scope denials, path/link checks, collisions, audit privacy, and
-uncertain-create recovery. Public integration tests exercise these operations
+uncertain-create recovery. Turn-runtime tests cover allowed read/list through a
+fresh live binding, policy denial at the broker, revocation during model I/O,
+unknown and malformed calls, duplicate identifiers, per-round and aggregate
+limits, cancellation, deadline expiry, archived and active-turn refusal,
+workspace metadata mismatch, model-addressable listing names, source-labelled
+hostile content, non-UTF-8 withholding, and schema-v1/v2 replay including tool
+output-identity checks. Public integration tests exercise these operations
 through the broker API; core unit tests inject the uncertain outcome. These
 tests do not qualify release filesystem support or runtime containment.
 
@@ -100,7 +109,8 @@ As the relevant components are implemented, include:
 | Git | Hostile config/hooks/helpers, metadata paths, changed push approvals |
 | Persistence | Partial operations, migration failure, recovery without replay |
 | Frontend | Untrusted rendering, IPC authorization, no secret disclosure |
-| Sessions | Concurrent edits/worktrees, JSONL naming/schema/durability, index rebuild, archive/restore, safe resume |
+| Sessions | Concurrent edits/worktrees, JSONL naming/schema/durability, index rebuild, archive/restore, safe resume, v1/v2 boundaries |
+| Turn/tool lifecycle | Fresh bindings, strict schemas, unknown/malformed/duplicate calls, round/call/byte limits, cancellation, deadline, source labels, denial at the broker, no replay |
 | MCP | Version/transport compatibility, authorization, untrusted content, local confinement, OAuth/redirects, cancellation |
 | LM Studio | Model discovery, token/no-token profiles, streamed tools, context limits, unavailable models, no hosted-tool bypass |
 | Instructions | Compiled base/UI/request match, runtime replacement denial, role-injection attempts, preference/task precedence, revisions, safe rendering |
@@ -116,7 +126,8 @@ and model were tested. A mock pass is not a live-provider compatibility result.
 The current LM Studio adapter tests use a local HTTP fixture. They do not call a
 live model. The adapter supports one non-streaming Chat Completions request,
 rejects tool requests, requires the compiled base prompt, and accepts only a
-literal loopback HTTP endpoint. Model discovery, streaming, cancellation, and
+literal loopback HTTP endpoint. The turn-runtime tests use a scripted model
+interface; they do not establish real provider tool-call compatibility. Model discovery, streaming, cancellation, and
 live model compatibility remain future qualification work. The CLI can inspect
 and archive sessions, but it does not execute recorded tool actions or resume
 an incomplete turn.

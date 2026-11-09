@@ -1,12 +1,14 @@
 # Build and run the core prototype
 
-OrangeCode 0.3.0 is a developer CLI prototype with workspace permission
+OrangeCode 0.4.0 is a developer CLI prototype with workspace permission
 settings and bounded native file operations through trusted operator commands.
 It can send a text conversation to an explicitly selected local LM Studio model
 and save that conversation. It can read/list files and exclusively create new
-files/directories in a registered workspace. It cannot replace or delete
-existing files, run commands, use Git, or connect to MCP servers. Model tool
-dispatch and an execution sandbox are not implemented.
+files/directories in a registered workspace. The core also has a bounded
+turn/tool runtime for library callers and tests, but no CLI command exposes it.
+The CLI cannot replace or delete existing files, run commands, use Git, or
+connect to MCP servers. CLI/provider model tool dispatch and an execution
+sandbox are not implemented.
 
 ## Build
 
@@ -128,6 +130,34 @@ A `file_rotation_uncertain` error requires inspection of the active path and the
 reported candidate before retry. Export retention is managed by the operator.
 See [archive and recovery details](file-access.md#explicit-operation-journal-archive).
 
+## Core turn/tool lifecycle
+
+`orangecode_core::turn` provides a session-owned runtime for one bounded
+model/tool turn. It is not a CLI command and `chat` still advertises no tools.
+A caller supplies a model implementation, an open schema-version-2 session, the
+trusted application-data directory, and the workspace ID. The runtime:
+
+- parses strict OpenAI-style function calls for `workspace_read_file` and
+  `workspace_list_directory`;
+- rejects unknown tools, malformed or duplicate arguments, absolute or parent
+  paths, and duplicate call identifiers before dispatch;
+- opens the control store for each broker call, obtains a fresh session binding,
+  and releases the settings lock before the next model request;
+- enforces hard maxima of four rounds, eight calls per round, sixteen calls per
+  turn, 16 KiB per source-labelled tool message, and 256 KiB aggregate tool
+  text, with a 30-second cooperative deadline by default;
+- records `tool.requested`, `tool.completed`, and schema-version-2 tool messages,
+  and records the exact tool schema version and names in the request manifest;
+- treats every tool result as source-labelled untrusted user-level content and
+  never promotes it to the system role.
+
+The runtime supports no writes, process execution, Git, MCP, or network access.
+Its model interface is a test seam, not a provider adapter. A future adapter
+must parse provider JSON strictly, map its tool-call response without trusting
+provider metadata, and keep the subscription/API profile split. See the
+[session contract](session-storage.md) for the event sequence and the
+[file-access contract](file-access.md) for broker checks.
+
 ## Local chat
 
 Start LM Studio separately and load the model you intend to use. Check the
@@ -220,6 +250,13 @@ planned. See the complete [session contract](session-storage.md).
 | Encoded provider response | 1 MiB |
 | Encoded journal event, including LF | 64 KiB |
 | Journal | 8 MiB and 10,000 events |
+| Tool call arguments in a session event | 4 KiB |
+| Read file size per call | 15 KiB maximum, 8 KiB default |
+| Source-labelled tool message | 16 KiB |
+| Tool rounds per turn | 4 |
+| Tool calls per round / per turn | 8 / 16 |
+| Aggregate tool text per turn | 256 KiB |
+| Cooperative turn deadline | 30 seconds |
 
 These are ordinary quotas. Active turns reserve one terminal event and 1 KiB
 for it. CLI requests preflight their encoded manifest and user event, and reserve
@@ -242,8 +279,8 @@ usage events, streaming chunks, and large-output artifacts remain planned.
 
 | Crate | Responsibility |
 | --- | --- |
-| orangecode-core | Compiled prompt, bounded model adapter, session/control/file-operation journals, workspace policy and broker orchestration |
-| orangecode-cli | Trusted operator input, one-turn orchestration, bounded file commands, JSON output |
+| orangecode-core | Compiled prompt, bounded model adapter, session/control/file-operation journals, workspace policy, broker orchestration, and bounded turn/tool lifecycle |
+| orangecode-cli | Trusted operator input, one-turn text chat orchestration, bounded file commands, JSON output |
 | orangecode-platform | Native journal validation, directory identity, and handle-relative workspace file operations |
 
 Core and CLI forbid unsafe code. The platform crate denies unsafe code except
@@ -315,5 +352,6 @@ are explicit, bounded checks of a particular server/model/auth profile.
 
 Do not infer whole-user/process containment, Git safety, credential storage,
 release filesystem support, or full coding-agent support from these tests. The
-broker supports bounded file operations only through trusted CLI input; model
-dispatch and process containment remain separate implementation boundaries.
+broker supports bounded file operations through trusted CLI input and the core
+turn runtime. CLI/provider model dispatch and process containment remain
+separate implementation boundaries.

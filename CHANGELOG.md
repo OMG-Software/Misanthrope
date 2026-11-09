@@ -41,6 +41,18 @@ Changes are recorded here before a release version is assigned.
 
 ### Added
 
+- Rust 0.4.0 session-owned turn/tool runtime for library callers and tests:
+  strict read/list tool admission, a fresh workspace binding per operation,
+  control-store release before model I/O, round/call/byte/deadline limits,
+  cooperative cancellation, model-addressable Unicode listing names,
+  source-labelled untrusted tool messages, and durable tool intents/results.
+  No CLI command or real provider adapter dispatches these tools.
+- JSONL session schema version 2 with `tool.requested`, `tool.completed`, tool
+  messages, and exact tool schema/name manifest fields. Replay verifies that
+  each tool message matches its recorded size and SHA-256. Version 1 journals
+  remain readable and writable with their text-only subset. New sessions use
+  version 2; mixed versions and version-1 tool events are rejected.
+
 - User-provided pull-request-review skill source package, preserved instructions,
   provenance/digest catalog, and documentation links. Runtime skill loading and
   enablement remain planned.

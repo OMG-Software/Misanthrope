@@ -3,13 +3,14 @@
 //! Journals are untrusted input when opened. This module validates the complete
 //! file before returning a writable handle. It does not execute or resume work.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, UtcOffset};
@@ -17,13 +18,21 @@ use uuid::Uuid;
 
 use crate::storage::{self, StorageError};
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION_V1: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 const MAX_TITLE_BYTES: usize = 256;
-const MAX_MESSAGE_BYTES: usize = 16 * 1024;
+pub(crate) const MAX_MESSAGE_BYTES: usize = 16 * 1024;
 const MAX_EVENT_BYTES: usize = 64 * 1024;
 const MAX_JOURNAL_BYTES: usize = 8 * 1024 * 1024;
 const MAX_EVENTS: usize = 10_000;
 const MAX_FAILURE_CODE_BYTES: usize = 128;
+const MAX_TOOL_CALL_ID_BYTES: usize = 128;
+const MAX_TOOL_NAME_BYTES: usize = 64;
+const MAX_TOOL_ARGUMENTS_BYTES: usize = 4 * 1024;
+const MAX_TOOL_ERROR_CODE_BYTES: usize = 128;
+const MAX_TOOL_OUTPUT_DIGEST_BYTES: usize = 64;
+const MAX_TOOL_NAMES: usize = 8;
+const MAX_TOOL_SCHEMA_VERSION_BYTES: usize = 32;
 // A terminal envelope plus the most-escaped allowed failure code fits in 1 KiB.
 const TERMINAL_RESERVE_BYTES: usize = 1024;
 
@@ -64,6 +73,8 @@ pub enum MessageRole {
     User,
     /// A message returned by the assistant.
     Assistant,
+    /// A core-observed tool result. Schema version 2 only.
+    Tool,
 }
 
 /// Lossless native path metadata. It is descriptive data, not an access grant.
@@ -136,6 +147,8 @@ pub struct RecordedMessage {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionSnapshot {
+    /// The journal schema version that every event must share.
+    pub schema_version: u32,
     /// The UUID shared by all events in this journal.
     pub session_id: Uuid,
     /// Stable identifier for the workspace association recorded at creation.
@@ -144,7 +157,7 @@ pub struct SessionSnapshot {
     pub archived: bool,
     /// The currently active turn, if any. Opening never resumes it.
     pub active_turn: Option<Uuid>,
-    /// User and assistant messages in append order.
+    /// User, assistant, and schema-v2 tool messages in append order.
     pub messages: Vec<RecordedMessage>,
     /// Current session title.
     pub title: String,
@@ -152,6 +165,25 @@ pub struct SessionSnapshot {
     pub workspace: NativePath,
     /// Number of validated events, including the initial event.
     pub event_count: u64,
+}
+
+/// Turn-local tool-call bookkeeping used to reject malformed append sequences.
+#[derive(Debug, Default)]
+struct ToolState {
+    pending: HashSet<String>,
+    completed: HashSet<String>,
+    messaged: HashSet<String>,
+    outputs: HashMap<String, (u64, String)>,
+}
+
+impl ToolState {
+    /// Forget all call identifiers when a turn ends or a new one starts.
+    fn clear(&mut self) {
+        self.pending.clear();
+        self.completed.clear();
+        self.messaged.clear();
+        self.outputs.clear();
+    }
 }
 
 /// An exclusively locked session journal.
@@ -163,6 +195,8 @@ pub struct SessionJournal {
     path: PathBuf,
     file: File,
     snapshot: SessionSnapshot,
+    schema_version: u32,
+    tool_state: ToolState,
     bytes: u64,
     next_seq: u64,
     poisoned: bool,
@@ -255,6 +289,7 @@ impl SessionJournal {
             path,
             file,
             snapshot: SessionSnapshot {
+                schema_version: SCHEMA_VERSION,
                 session_id,
                 workspace_id: started.workspace_id,
                 archived: false,
@@ -264,6 +299,8 @@ impl SessionJournal {
                 workspace: started.workspace,
                 event_count: 1,
             },
+            schema_version: SCHEMA_VERSION,
+            tool_state: ToolState::default(),
             bytes: u64::try_from(bytes.len()).map_err(|_| SessionError::LimitReached)?,
             next_seq: 1,
             poisoned: false,
@@ -300,13 +337,16 @@ impl SessionJournal {
         }
         let mut file = storage::open_locked_file(path, false).map_err(map_storage_error)?;
         let contents = read_bounded(&mut file)?;
-        let snapshot = replay(&contents, filename_id)?;
+        let (snapshot, tool_state) = replay(&contents, filename_id)?;
         let bytes = u64::try_from(contents.len()).map_err(|_| SessionError::LimitReached)?;
         let next_seq = snapshot.event_count;
+        let schema_version = snapshot.schema_version;
         Ok(Self {
             path: path.to_path_buf(),
             file,
             snapshot,
+            schema_version,
+            tool_state,
             bytes,
             next_seq,
             poisoned: false,
@@ -318,6 +358,11 @@ impl SessionJournal {
     /// Return the stable path of this journal.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Return the journal schema version validated on open.
+    pub const fn schema_version(&self) -> u32 {
+        self.schema_version
     }
 
     /// Return the last fully validated durable snapshot.
@@ -344,7 +389,7 @@ impl SessionJournal {
         if text.len() > MAX_MESSAGE_BYTES {
             return Err(SessionError::InvalidValue("message exceeds 16 KiB"));
         }
-        validate_manifest(manifest)?;
+        validate_manifest(manifest, self.schema_version)?;
         let request_id = Uuid::nil();
         let mut seq = self.next_seq;
         let mut size = self.bytes;
@@ -352,7 +397,7 @@ impl SessionJournal {
         let timestamp = "2026-11-08T00:00:00.999999999Z";
         let mut measure = |kind, payload: Value| -> Result<(), SessionError> {
             let encoded = encode_event(&EventRecord {
-                schema_version: SCHEMA_VERSION,
+                schema_version: self.schema_version,
                 session_id: self.snapshot.session_id,
                 event_id: Uuid::nil(),
                 seq,
@@ -403,11 +448,17 @@ impl SessionJournal {
         let source = match role {
             MessageRole::User => MessageSource::UserCli,
             MessageRole::Assistant => MessageSource::Provider,
+            MessageRole::Tool => {
+                return Err(SessionError::InvalidValue(
+                    "use record_tool_message for tool messages",
+                ));
+            }
         };
         let payload = MessagePayload {
             role,
             source,
             text: text.to_owned(),
+            call_id: None,
         };
         let bytes = self.append("message.recorded", &payload)?;
         self.snapshot.messages.push(RecordedMessage {
@@ -416,6 +467,140 @@ impl SessionJournal {
         });
         self.commit_accounting(bytes)?;
         Ok(())
+    }
+
+    /// Record a model-requested tool call before dispatch. Schema version 2 only.
+    ///
+    /// The call identifier, tool name, and arguments are untrusted model data.
+    /// Recording an intent never grants permission and replay never dispatches it.
+    pub fn record_tool_request(
+        &mut self,
+        request_id: Uuid,
+        call_id: &str,
+        tool: &str,
+        arguments: &str,
+    ) -> Result<(), SessionError> {
+        self.ensure_mutable()?;
+        self.require_schema_v2()?;
+        if self.snapshot.active_turn != Some(request_id) {
+            return Err(SessionError::WrongTurn);
+        }
+        validate_tool_call_id(call_id)?;
+        validate_tool_name(tool)?;
+        validate_tool_arguments(arguments)?;
+        if self.tool_state.pending.contains(call_id) || self.tool_state.completed.contains(call_id)
+        {
+            return Err(SessionError::InvalidValue("duplicate tool call identifier"));
+        }
+        let payload = ToolRequestedPayload {
+            request_id,
+            call_id: call_id.to_owned(),
+            tool: tool.to_owned(),
+            arguments: arguments.to_owned(),
+        };
+        let bytes = self.append("tool.requested", &payload)?;
+        self.tool_state.pending.insert(call_id.to_owned());
+        self.commit_accounting(bytes)
+    }
+
+    /// Record the core-observed outcome of a requested tool call. Schema version 2 only.
+    pub fn record_tool_result(
+        &mut self,
+        request_id: Uuid,
+        call_id: &str,
+        outcome: ToolOutcome,
+        code: Option<&str>,
+        output_bytes: u64,
+        output_sha256: &str,
+    ) -> Result<(), SessionError> {
+        self.ensure_mutable()?;
+        self.require_schema_v2()?;
+        if self.snapshot.active_turn != Some(request_id) {
+            return Err(SessionError::WrongTurn);
+        }
+        validate_tool_call_id(call_id)?;
+        if !self.tool_state.pending.contains(call_id) {
+            return Err(SessionError::InvalidValue(
+                "tool result has no matching pending request",
+            ));
+        }
+        validate_tool_outcome(outcome, code)?;
+        validate_tool_output(output_bytes, output_sha256)?;
+        let payload = ToolCompletedPayload {
+            request_id,
+            call_id: call_id.to_owned(),
+            outcome,
+            code: code.map(str::to_owned),
+            output_bytes,
+            output_sha256: output_sha256.to_owned(),
+        };
+        let bytes = self.append("tool.completed", &payload)?;
+        self.tool_state.pending.remove(call_id);
+        self.tool_state.completed.insert(call_id.to_owned());
+        self.tool_state
+            .outputs
+            .insert(call_id.to_owned(), (output_bytes, output_sha256.to_owned()));
+        self.commit_accounting(bytes)
+    }
+
+    /// Append the exact source-labelled tool text shown to the model. Schema version 2 only.
+    pub fn record_tool_message(&mut self, call_id: &str, text: &str) -> Result<(), SessionError> {
+        self.ensure_mutable()?;
+        self.require_schema_v2()?;
+        if self.snapshot.active_turn.is_none() {
+            return Err(SessionError::InvalidValue(
+                "tool messages require an active turn",
+            ));
+        }
+        if text.len() > MAX_MESSAGE_BYTES {
+            return Err(SessionError::InvalidValue("tool message exceeds 16 KiB"));
+        }
+        validate_tool_call_id(call_id)?;
+        if !self.tool_state.completed.contains(call_id)
+            || self.tool_state.messaged.contains(call_id)
+        {
+            return Err(SessionError::InvalidValue(
+                "tool message has no completed, unmessaged call",
+            ));
+        }
+        let expected = self
+            .tool_state
+            .outputs
+            .get(call_id)
+            .ok_or(SessionError::InvalidValue(
+                "tool message has no recorded output identity",
+            ))?;
+        let text_bytes = u64::try_from(text.len()).map_err(|_| SessionError::LimitReached)?;
+        if expected.0 != text_bytes || expected.1 != sha256_hex(text.as_bytes()) {
+            return Err(SessionError::InvalidValue(
+                "tool message does not match its recorded output identity",
+            ));
+        }
+        let payload = MessagePayload {
+            role: MessageRole::Tool,
+            source: MessageSource::CoreTool,
+            text: text.to_owned(),
+            call_id: Some(call_id.to_owned()),
+        };
+        let bytes = self.append("message.recorded", &payload)?;
+        self.tool_state.outputs.remove(call_id);
+        self.tool_state.messaged.insert(call_id.to_owned());
+        self.snapshot.messages.push(RecordedMessage {
+            role: MessageRole::Tool,
+            text: text.to_owned(),
+        });
+        self.commit_accounting(bytes)
+    }
+
+    /// Refuse tool-event operations on a legacy schema-v1 journal.
+    fn require_schema_v2(&self) -> Result<(), SessionError> {
+        if self.schema_version < SCHEMA_VERSION {
+            Err(SessionError::InvalidValue(
+                "tool events require session schema version 2",
+            ))
+        } else {
+            Ok(())
+        }
     }
 
     /// Record the exact visible request manifest for the active turn.
@@ -431,7 +616,7 @@ impl SessionJournal {
         if self.snapshot.active_turn != Some(request_id) {
             return Err(SessionError::WrongTurn);
         }
-        validate_manifest(&manifest)?;
+        validate_manifest(&manifest, self.schema_version)?;
         let payload = ManifestPayload {
             request_id,
             manifest,
@@ -451,6 +636,7 @@ impl SessionJournal {
         if self.snapshot.active_turn.is_some() {
             return Err(SessionError::ActiveTurn);
         }
+        self.tool_state.clear();
         let request_id = Uuid::new_v4();
         let bytes = self.append("turn.started", &TurnPayload { request_id })?;
         self.snapshot.active_turn = Some(request_id);
@@ -512,12 +698,22 @@ impl SessionJournal {
         if self.snapshot.active_turn != Some(request_id) {
             return Err(SessionError::WrongTurn);
         }
+        if event_type == "turn.completed"
+            && (!self.tool_state.pending.is_empty()
+                || self.tool_state.completed != self.tool_state.messaged
+                || !self.tool_state.outputs.is_empty())
+        {
+            return Err(SessionError::InvalidValue(
+                "completed turn has unresolved or unrecorded tool calls",
+            ));
+        }
         let payload = TurnFinishedPayload {
             request_id,
             code: code.map(str::to_owned),
         };
         let bytes = self.append(event_type, &payload)?;
         self.snapshot.active_turn = None;
+        self.tool_state.clear();
         self.commit_accounting(bytes)
     }
 
@@ -540,7 +736,7 @@ impl SessionJournal {
         self.ensure_mutable()?;
         let now = OffsetDateTime::now_utc();
         let event = EventRecord {
-            schema_version: SCHEMA_VERSION,
+            schema_version: self.schema_version,
             session_id: self.snapshot.session_id,
             event_id: Uuid::new_v4(),
             seq: self.next_seq,
@@ -668,6 +864,8 @@ struct MessagePayload {
     role: MessageRole,
     source: MessageSource,
     text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    call_id: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -675,6 +873,42 @@ struct MessagePayload {
 enum MessageSource {
     UserCli,
     Provider,
+    CoreTool,
+}
+
+/// A model-requested tool call before core dispatch. Schema version 2 only.
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ToolRequestedPayload {
+    request_id: Uuid,
+    call_id: String,
+    tool: String,
+    arguments: String,
+}
+
+/// The core-observed result of one requested tool call.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolOutcome {
+    /// The broker completed the operation and the result is available.
+    Succeeded,
+    /// The request failed without an unresolved mutation.
+    Failed,
+    /// Current policy or native checks denied the operation.
+    Denied,
+}
+
+/// Durable metadata for one core-observed tool result. Schema version 2 only.
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ToolCompletedPayload {
+    request_id: Uuid,
+    call_id: String,
+    outcome: ToolOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    code: Option<String>,
+    output_bytes: u64,
+    output_sha256: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -714,6 +948,12 @@ pub struct RequestManifest {
     pub context_tokens: u64,
     /// The configured output limit.
     pub max_output_tokens: u32,
+    /// Tool schema revision advertised to the model. Schema version 2 only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_schema_version: Option<String>,
+    /// Exact tool names advertised to the model. Schema version 2 only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -738,7 +978,7 @@ fn validate_title(title: &str) -> Result<(), SessionError> {
 }
 
 /// Bound decoded fields before JSON encoding applies the separate wire limit.
-fn validate_manifest(manifest: &RequestManifest) -> Result<(), SessionError> {
+fn validate_manifest(manifest: &RequestManifest, schema_version: u32) -> Result<(), SessionError> {
     let fields = [
         manifest.base_prompt.len(),
         manifest.prompt_version.len(),
@@ -747,15 +987,155 @@ fn validate_manifest(manifest: &RequestManifest) -> Result<(), SessionError> {
         manifest.model.len(),
         manifest.base_url.len(),
     ];
-    let total = fields
+    let mut total = fields
         .into_iter()
-        .try_fold(0_usize, |total, size| total.checked_add(size));
-    if total.is_none_or(|size| size > MAX_EVENT_BYTES) {
+        .try_fold(0_usize, |total, size| total.checked_add(size))
+        .ok_or(SessionError::InvalidValue(
+            "request manifest exceeds event size limit",
+        ))?;
+    match (&manifest.tool_schema_version, &manifest.tools) {
+        (None, None) => {}
+        (Some(version), Some(tools)) if schema_version >= SCHEMA_VERSION => {
+            if version.is_empty()
+                || version.len() > MAX_TOOL_SCHEMA_VERSION_BYTES
+                || version.chars().any(char::is_control)
+            {
+                return Err(SessionError::InvalidValue("tool schema version is invalid"));
+            }
+            if tools.is_empty() || tools.len() > MAX_TOOL_NAMES {
+                return Err(SessionError::InvalidValue("tool name list is invalid"));
+            }
+            total = total
+                .checked_add(version.len())
+                .ok_or(SessionError::InvalidValue(
+                    "request manifest exceeds event size limit",
+                ))?;
+            let mut names = HashSet::new();
+            for name in tools {
+                validate_tool_name(name)?;
+                if !names.insert(name) {
+                    return Err(SessionError::InvalidValue("duplicate tool name"));
+                }
+                total = total
+                    .checked_add(name.len())
+                    .ok_or(SessionError::InvalidValue(
+                        "request manifest exceeds event size limit",
+                    ))?;
+            }
+        }
+        _ => {
+            return Err(SessionError::InvalidValue(
+                "tool manifest fields require schema version 2 and must be both present or absent",
+            ));
+        }
+    }
+    if total > MAX_EVENT_BYTES {
         return Err(SessionError::InvalidValue(
             "request manifest exceeds event size limit",
         ));
     }
     Ok(())
+}
+
+/// Bound a provider call identifier without interpreting it as authority.
+fn validate_tool_call_id(call_id: &str) -> Result<(), SessionError> {
+    if call_id.is_empty()
+        || call_id.len() > MAX_TOOL_CALL_ID_BYTES
+        || call_id.chars().any(char::is_control)
+    {
+        Err(SessionError::InvalidValue(
+            "tool call identifier is invalid or exceeds 128 bytes",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// Accept a bounded tool-name spelling; the runtime enforces the supported set.
+fn validate_tool_name(name: &str) -> Result<(), SessionError> {
+    if name.is_empty()
+        || name.len() > MAX_TOOL_NAME_BYTES
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'))
+    {
+        return Err(SessionError::InvalidValue(
+            "tool name is invalid or exceeds 64 bytes",
+        ));
+    }
+    Ok(())
+}
+
+/// Require strict JSON object arguments within the bounded intent record.
+fn validate_tool_arguments(arguments: &str) -> Result<(), SessionError> {
+    if arguments.is_empty() || arguments.len() > MAX_TOOL_ARGUMENTS_BYTES {
+        return Err(SessionError::InvalidValue(
+            "tool arguments are empty or exceed 4 KiB",
+        ));
+    }
+    let value = storage::parse_strict_json(arguments.as_bytes())
+        .map_err(|_| SessionError::InvalidValue("tool arguments are not strict JSON"))?;
+    if !value.is_object() {
+        return Err(SessionError::InvalidValue(
+            "tool arguments must be an object",
+        ));
+    }
+    Ok(())
+}
+
+/// Require a stable outcome code and a bounded output identity.
+fn validate_tool_outcome(outcome: ToolOutcome, code: Option<&str>) -> Result<(), SessionError> {
+    match (outcome, code) {
+        (ToolOutcome::Succeeded, None) => {}
+        (ToolOutcome::Succeeded, Some(_)) => {
+            return Err(SessionError::InvalidValue(
+                "successful tool result cannot carry an error code",
+            ));
+        }
+        (ToolOutcome::Failed | ToolOutcome::Denied, Some(code)) => {
+            if code.is_empty()
+                || code.len() > MAX_TOOL_ERROR_CODE_BYTES
+                || code.chars().any(char::is_control)
+            {
+                return Err(SessionError::InvalidValue(
+                    "tool error code is invalid or exceeds 128 bytes",
+                ));
+            }
+        }
+        (ToolOutcome::Failed | ToolOutcome::Denied, None) => {
+            return Err(SessionError::InvalidValue(
+                "failed or denied tool result requires an error code",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Require a nonempty bounded rendering and a lowercase SHA-256 digest.
+fn validate_tool_output(output_bytes: u64, output_sha256: &str) -> Result<(), SessionError> {
+    if output_bytes == 0
+        || output_bytes
+            > u64::try_from(MAX_MESSAGE_BYTES).map_err(|_| SessionError::LimitReached)?
+        || output_sha256.len() != MAX_TOOL_OUTPUT_DIGEST_BYTES
+        || !output_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        return Err(SessionError::InvalidValue(
+            "tool output size or digest is invalid",
+        ));
+    }
+    Ok(())
+}
+
+/// Return a lowercase SHA-256 digest for bounded session content.
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut output = String::with_capacity(64);
+    for byte in digest {
+        output.push_str(&format!("{byte:02x}"));
+    }
+    output
 }
 
 /// Normalize event clocks to UTC; sequence numbers remain the ordering authority.
@@ -793,7 +1173,10 @@ fn read_bounded(file: &mut File) -> Result<Vec<u8>, SessionError> {
 }
 
 /// Validate every event and transition without interpreting content as work.
-fn replay(contents: &[u8], filename_id: Uuid) -> Result<SessionSnapshot, SessionError> {
+fn replay(
+    contents: &[u8],
+    filename_id: Uuid,
+) -> Result<(SessionSnapshot, ToolState), SessionError> {
     if contents.is_empty() || contents[0..contents.len().min(3)] == [0xef, 0xbb, 0xbf] {
         return Err(SessionError::InvalidJournal(
             "journal is empty or has a byte-order mark",
@@ -805,8 +1188,10 @@ fn replay(contents: &[u8], filename_id: Uuid) -> Result<SessionSnapshot, Session
         ));
     }
     let mut session_id = None;
+    let mut schema_version = None;
     let mut event_ids = HashSet::new();
     let mut snapshot: Option<SessionSnapshot> = None;
+    let mut tool_state = ToolState::default();
     let mut expected_seq = 0_u64;
     let mut total_events = 0_usize;
     let mut consumed_bytes = 0_usize;
@@ -845,9 +1230,15 @@ fn replay(contents: &[u8], filename_id: Uuid) -> Result<SessionSnapshot, Session
             ));
         }
         consumed_bytes = end;
-        if envelope.schema_version != SCHEMA_VERSION {
+        if !matches!(envelope.schema_version, SCHEMA_VERSION_V1 | SCHEMA_VERSION) {
             return Err(SessionError::InvalidJournal("unsupported schema version"));
         }
+        if schema_version.is_some_and(|prior| prior != envelope.schema_version) {
+            return Err(SessionError::InvalidJournal(
+                "journal mixes schema versions",
+            ));
+        }
+        schema_version = Some(envelope.schema_version);
         if envelope.session_id != filename_id {
             return Err(SessionError::InvalidJournal(
                 "event session UUID does not match filename",
@@ -877,6 +1268,7 @@ fn replay(contents: &[u8], filename_id: Uuid) -> Result<SessionSnapshot, Session
                 validate_title(&started.title)
                     .map_err(|_| SessionError::InvalidJournal("initial title is invalid"))?;
                 snapshot = Some(SessionSnapshot {
+                    schema_version: envelope.schema_version,
                     session_id: envelope.session_id,
                     workspace_id: started.workspace_id,
                     archived: false,
@@ -896,14 +1288,67 @@ fn replay(contents: &[u8], filename_id: Uuid) -> Result<SessionSnapshot, Session
                 if message.text.len() > MAX_MESSAGE_BYTES {
                     return Err(SessionError::InvalidJournal("message exceeds 16 KiB"));
                 }
-                if !matches!(
-                    (message.role, message.source),
+                match (message.role, message.source) {
                     (MessageRole::User, MessageSource::UserCli)
-                        | (MessageRole::Assistant, MessageSource::Provider)
-                ) {
-                    return Err(SessionError::InvalidJournal(
-                        "message role and source do not match",
-                    ));
+                    | (MessageRole::Assistant, MessageSource::Provider) => {
+                        if message.call_id.is_some() {
+                            return Err(SessionError::InvalidJournal(
+                                "non-tool message has a call identifier",
+                            ));
+                        }
+                    }
+                    (MessageRole::Tool, MessageSource::CoreTool) => {
+                        if envelope.schema_version < SCHEMA_VERSION {
+                            return Err(SessionError::InvalidJournal(
+                                "tool messages require schema version 2",
+                            ));
+                        }
+                        if target.active_turn.is_none() {
+                            return Err(SessionError::InvalidJournal(
+                                "tool message has no active turn",
+                            ));
+                        }
+                        let call_id =
+                            message
+                                .call_id
+                                .as_deref()
+                                .ok_or(SessionError::InvalidJournal(
+                                    "tool message has no call identifier",
+                                ))?;
+                        validate_tool_call_id(call_id).map_err(|_| {
+                            SessionError::InvalidJournal("tool message call identifier is invalid")
+                        })?;
+                        if !tool_state.completed.contains(call_id)
+                            || tool_state.messaged.contains(call_id)
+                        {
+                            return Err(SessionError::InvalidJournal(
+                                "tool message has no completed, unmessaged call",
+                            ));
+                        }
+                        let expected =
+                            tool_state
+                                .outputs
+                                .get(call_id)
+                                .ok_or(SessionError::InvalidJournal(
+                                    "tool message has no recorded output identity",
+                                ))?;
+                        let text_bytes = u64::try_from(message.text.len())
+                            .map_err(|_| SessionError::LimitReached)?;
+                        if expected.0 != text_bytes
+                            || expected.1 != sha256_hex(message.text.as_bytes())
+                        {
+                            return Err(SessionError::InvalidJournal(
+                                "tool message does not match its recorded output identity",
+                            ));
+                        }
+                        tool_state.outputs.remove(call_id);
+                        tool_state.messaged.insert(call_id.to_owned());
+                    }
+                    _ => {
+                        return Err(SessionError::InvalidJournal(
+                            "message role and source do not match",
+                        ));
+                    }
                 }
                 target.messages.push(RecordedMessage {
                     role: message.role,
@@ -919,7 +1364,85 @@ fn replay(contents: &[u8], filename_id: Uuid) -> Result<SessionSnapshot, Session
                     return Err(SessionError::InvalidJournal("nested active turn"));
                 }
                 let payload: TurnPayload = decode_payload(envelope.payload)?;
+                tool_state.clear();
                 target.active_turn = Some(payload.request_id);
+            }
+            "tool.requested" => {
+                if envelope.schema_version < SCHEMA_VERSION {
+                    return Err(SessionError::InvalidJournal(
+                        "tool events require schema version 2",
+                    ));
+                }
+                let target = snapshot
+                    .as_ref()
+                    .ok_or(SessionError::InvalidJournal("event before start"))?;
+                if target.archived || target.active_turn.is_none() {
+                    return Err(SessionError::InvalidJournal(
+                        "tool request has no active turn",
+                    ));
+                }
+                let payload: ToolRequestedPayload = decode_payload(envelope.payload)?;
+                if target.active_turn != Some(payload.request_id) {
+                    return Err(SessionError::InvalidJournal(
+                        "tool request does not match active turn",
+                    ));
+                }
+                validate_tool_call_id(&payload.call_id).map_err(|_| {
+                    SessionError::InvalidJournal("tool request call identifier is invalid")
+                })?;
+                validate_tool_name(&payload.tool)
+                    .map_err(|_| SessionError::InvalidJournal("tool request name is invalid"))?;
+                validate_tool_arguments(&payload.arguments).map_err(|_| {
+                    SessionError::InvalidJournal("tool request arguments are invalid")
+                })?;
+                if tool_state.pending.contains(&payload.call_id)
+                    || tool_state.completed.contains(&payload.call_id)
+                {
+                    return Err(SessionError::InvalidJournal(
+                        "duplicate tool call identifier",
+                    ));
+                }
+                tool_state.pending.insert(payload.call_id);
+            }
+            "tool.completed" => {
+                if envelope.schema_version < SCHEMA_VERSION {
+                    return Err(SessionError::InvalidJournal(
+                        "tool events require schema version 2",
+                    ));
+                }
+                let target = snapshot
+                    .as_ref()
+                    .ok_or(SessionError::InvalidJournal("event before start"))?;
+                if target.archived || target.active_turn.is_none() {
+                    return Err(SessionError::InvalidJournal(
+                        "tool result has no active turn",
+                    ));
+                }
+                let payload: ToolCompletedPayload = decode_payload(envelope.payload)?;
+                if target.active_turn != Some(payload.request_id) {
+                    return Err(SessionError::InvalidJournal(
+                        "tool result does not match active turn",
+                    ));
+                }
+                validate_tool_call_id(&payload.call_id).map_err(|_| {
+                    SessionError::InvalidJournal("tool result call identifier is invalid")
+                })?;
+                if !tool_state.pending.contains(&payload.call_id) {
+                    return Err(SessionError::InvalidJournal(
+                        "tool result has no pending request",
+                    ));
+                }
+                validate_tool_outcome(payload.outcome, payload.code.as_deref())
+                    .map_err(|_| SessionError::InvalidJournal("tool result outcome is invalid"))?;
+                validate_tool_output(payload.output_bytes, &payload.output_sha256).map_err(
+                    |_| SessionError::InvalidJournal("tool result output metadata is invalid"),
+                )?;
+                tool_state.pending.remove(&payload.call_id);
+                tool_state.completed.insert(payload.call_id.clone());
+                tool_state.outputs.insert(
+                    payload.call_id,
+                    (payload.output_bytes, payload.output_sha256),
+                );
             }
             "request.manifest" => {
                 let target = snapshot
@@ -934,7 +1457,7 @@ fn replay(contents: &[u8], filename_id: Uuid) -> Result<SessionSnapshot, Session
                         "manifest does not match active turn",
                     ));
                 }
-                validate_manifest(&payload.manifest).map_err(|_| {
+                validate_manifest(&payload.manifest, envelope.schema_version).map_err(|_| {
                     SessionError::InvalidJournal("request manifest exceeds event size limit")
                 })?;
             }
@@ -963,8 +1486,16 @@ fn replay(contents: &[u8], filename_id: Uuid) -> Result<SessionSnapshot, Session
                     return Err(SessionError::InvalidJournal(
                         "completed turn has a failure code",
                     ));
+                } else if !tool_state.pending.is_empty()
+                    || tool_state.completed != tool_state.messaged
+                    || !tool_state.outputs.is_empty()
+                {
+                    return Err(SessionError::InvalidJournal(
+                        "completed turn has unresolved or unrecorded tool calls",
+                    ));
                 }
                 target.active_turn = None;
+                tool_state.clear();
             }
             "session.archived" => {
                 let target = snapshot
@@ -975,6 +1506,7 @@ fn replay(contents: &[u8], filename_id: Uuid) -> Result<SessionSnapshot, Session
                     return Err(SessionError::InvalidJournal("active session was archived"));
                 }
                 target.archived = true;
+                tool_state.clear();
             }
             "session.restored" => {
                 let target = snapshot
@@ -1001,9 +1533,10 @@ fn replay(contents: &[u8], filename_id: Uuid) -> Result<SessionSnapshot, Session
                 u64::try_from(total_events).map_err(|_| SessionError::LimitReached)?;
         }
     }
-    snapshot.ok_or(SessionError::InvalidJournal(
+    let snapshot = snapshot.ok_or(SessionError::InvalidJournal(
         "missing session.started event",
-    ))
+    ))?;
+    Ok((snapshot, tool_state))
 }
 
 /// Reject transcript changes while replay says the session is archived.

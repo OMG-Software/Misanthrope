@@ -34,7 +34,7 @@ remaining product contracts.
 | [Skills](skills.md) | Settings, package validation, enablement, loading, and controlled scripts |
 | [Bundled skill sources](../skills/README.md) | Source-only packages and provenance; runtime loading remains planned |
 | [MCP support](mcp.md) | Server connections, transports, credentials, capabilities, and tool authorization |
-| [Session storage](session-storage.md) | JSONL layout/schema, durable journals, archive/restore, and safe resume |
+| [Session storage](session-storage.md) | JSONL layout/schema, tool events, durable journals, archive/restore, and safe resume |
 | [Memories](memories.md) | User-selected project/global scope, management, retrieval, and lifecycle |
 | [Repository checks](repository-checks.md) | CodeRabbit, CodeQL, Sonar, credentials, and main protection |
 | [ADR register](adr/index.md) | Lasting decisions, alternatives, and consequences |
@@ -78,7 +78,8 @@ Repository review and analysis are configured in the repository-checks guide.
 The Rust workflow adds formatting, strict Clippy, unit/integration tests, and
 separate documentation tests on Windows and Linux. The development guide owns
 the current commands and limits. There is no frontend or execution backend yet.
-The limited file broker does not provide general model tools or process
-containment.
+The limited file broker and the core read/list turn runtime do not provide
+general model tools or process containment. No CLI route dispatches model
+tools.
 Dependency security audits, native containment qualification, and release checks
 still need their own implementation and evidence.

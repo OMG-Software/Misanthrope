@@ -7,7 +7,7 @@ separate journal records metadata for bounded file-broker operations. The
 prototype does not provide a session UI, search index, task execution, or
 recovery UI.
 
-## Implemented prototype (v0.3.0)
+## Implemented prototype (v0.4.0)
 
 The Rust core creates and opens one UTF-8 JSONL journal per session. The CLI
 uses the operating system's per-user local application data location by default;
@@ -40,8 +40,14 @@ Windows creation and reopening omit delete sharing, so a journal cannot be
 renamed or replaced while its writer holds the file handle. This is separate
 from the exclusive writer lock and the existing link checks.
 
-The v1 prototype has this exact event subset. Every event also has the common
-envelope described below. Payload objects reject unknown fields.
+The current prototype writes schema version 2. Every event also has the common
+envelope described below, and payload objects reject unknown fields. A journal
+must use one schema version throughout; mixed versions are rejected. New
+sessions use version 2, so a binary that only accepts version 1 cannot open a
+new session. Version 1 journals remain readable and writable with their original
+text-only subset.
+
+The version-1 subset is:
 
 | Event type | Payload in v1 | State rule |
 | --- | --- | --- |
@@ -54,12 +60,67 @@ envelope described below. Payload objects reject unknown fields.
 | `session.archived` | Empty object `{}` | Requires no active turn. Repeating the API operation is idempotent. |
 | `session.restored` | Empty object `{}` | Repeating the API operation is idempotent. Restore starts no work. |
 
+Version 2 keeps every version-1 event and adds tool events plus optional
+manifest metadata. A version-1 journal cannot contain any of these additions.
+
+| Event type | Payload in v2 | State rule |
+| --- | --- | --- |
+| `tool.requested` | `request_id`, `call_id`, `tool`, `arguments` | Requires an active turn. The call identifier is at most 128 bytes and unique within the turn. `arguments` is a strict JSON object of at most 4 KiB. It is untrusted model input, not a grant or execution result. |
+| `tool.completed` | `request_id`, `call_id`, `outcome`, optional `code`, `output_bytes`, `output_sha256` | Requires a matching pending request. `outcome` is `succeeded`, `failed`, or `denied`; failed or denied results require a bounded code. The digest and size cover the exact source-labelled tool message. |
+| `message.recorded` role `tool` | `role`, `source` (`core_tool`), `text`, `call_id` | Requires a completed, unmessaged call. Text is the exact source-labelled untrusted content shown to the model, at most 16 KiB. A completed turn requires one tool message per completed call; a failed turn may leave an intent without a result. |
+
+The version-2 `request.manifest` payload adds optional `tool_schema_version` and
+`tools` fields. They are present together only when the request advertised
+tools. Version-1 manifests omit both fields.
+
 `workspace` is a tagged native path: `{"encoding":"unix_bytes","units":[...]}`
 stores Unix path bytes; `{"encoding":"windows_utf16","units":[...]}` stores
 Windows UTF-16 code units. It is descriptive metadata only. It is not a current
 workspace authorization. The registry supplies stable IDs for configured new
 sessions; the journal cannot restore or mint authority. Existing journals are
 not rewritten. See [workspace settings](workspace-permissions.md).
+
+### Core turn/tool lifecycle
+
+The `orangecode-core` `turn` module runs one bounded model/tool turn through a
+caller-supplied model interface. It is library and test infrastructure: no CLI
+command exposes it, `chat` advertises no tools, and every real provider adapter
+still rejects tool calls. A caller must provide an open schema-version-2
+journal, the current control-store writer, and the workspace ID from trusted
+settings. The journal's recorded workspace ID is only a coherence check.
+
+The runtime supports exactly `workspace_read_file` and
+`workspace_list_directory`. It parses strict OpenAI-style function calls,
+rejects unknown tools, malformed or duplicate arguments, absolute or parent
+paths, and duplicate call identifiers before dispatch. For each operation it
+opens the control store, obtains a fresh session binding, releases the settings
+lock before the next model request, and never reconstructs authority from the
+journal. Current defaults and hard maxima are four model rounds, eight calls
+per round, sixteen calls per turn, 16 KiB per tool message, 256 KiB of aggregate
+tool messages, and a 30-second cooperative deadline. A read call accepts at most
+15 KiB of file content and defaults to 8 KiB; larger files are refused rather
+than truncated. Cancellation and the deadline are checked between bounded
+operations; they do not preempt a broker call already in progress.
+
+`workspace_list_directory` returns a Unicode name as a JSON string. A native
+name that cannot be represented as Unicode is returned with `name: null`,
+`addressable: false`, and its lossless native units, so the model cannot mistake
+it for an addressable path.
+
+Every tool result is recorded first as `tool.requested`, then
+`tool.completed`, then a `message.recorded` entry with role `tool` and source
+`core_tool`. The tool text starts with a source label and remains user-level,
+untrusted content when the next request is assembled. Model-requested text
+cannot become a system message. Only read and list can execute; writes,
+processes, Git, MCP, and network access remain unavailable. The separate
+[file-operation journal](file-access.md) remains the broker's operation ledger.
+
+The runtime does not redact any text. The caller must redact user text and
+custom instructions before the call, and a provider integration must redact
+model text before recording. Workspace file content and native path names are
+returned and recorded without a core redaction hook; treat the
+schema-version-2 journal and its tool messages as private user data and add a
+reviewed transform before enabling real tool dispatch.
 
 The CLI supports `session new`, `inspect`, `archive`, `restore`, and
 `interrupt JOURNAL`. Interrupt marks a recorded active turn failed with the code
@@ -70,8 +131,9 @@ in this prototype. `chat --journal` does not resume an active turn; it requires
 an explicit interrupt first.
 
 Ordinary journals are limited to 8 MiB and 10,000 events. Each event is at most
-64 KiB, a message is at most 16 KiB, and a title is 1 to 256 UTF-8 bytes. Both
-decoded and encoded limits apply. Active turns reserve one terminal event and
+64 KiB, a message or tool message is at most 16 KiB, tool arguments are at most
+4 KiB, and a title is 1 to 256 UTF-8 bytes. Both decoded and encoded limits
+apply. Active turns reserve one terminal event and
 1 KiB for it. CLI chat preflights the encoded user message and manifest, plus
 capacity for the reply and termination, before recording the turn marker.
 The marker precedes the user message. Deterministic reply-size failures close
@@ -86,17 +148,20 @@ or other ordinary mutations. No event is discarded or rewritten to make room.
 See [ADR-0011](adr/0011-reserve-terminal-journal-capacity.md).
 
 The reader requires a final newline, accepts
-LF and CRLF, and rejects a BOM, duplicate JSON keys, unknown schema versions,
-unknown events, unknown fields, repeated event IDs, invalid transitions,
-sequence gaps, and a session ID that conflicts with the filename. It validates
+LF and CRLF, and rejects a BOM, duplicate JSON keys, unknown or mixed schema
+versions, unknown events, unknown fields, repeated event IDs, invalid
+transitions, sequence gaps, a session ID that conflicts with the filename,
+version-1 tool events, orphan or duplicate tool calls, and a completed turn
+with pending or unmessaged tool calls. It validates
 the complete journal before returning a writable handle. A malformed journal
 or incomplete tail is rejected without mutation. There is no recovery or
 read-only inspection UI yet.
 
-The request manifest does not include usage or `finish_reason`. The CLI returns
-those provider fields in its JSON output, but does not append them to the
-journal. The prototype has no streaming, artifact, index, compaction, migration,
-or memory events. The CLI redacts the currently configured LM Studio token from
+The request manifest does not include usage, `finish_reason`, or tool-round
+counts. The CLI returns provider usage and finish reason in its JSON output, but
+does not append them to the journal. Schema version 2 records the exact tool
+schema version and tool names advertised by the core turn runtime. The prototype
+has no streaming, artifact, index, compaction, migration, or memory events. The CLI redacts the currently configured LM Studio token from
 new conversation text, preferences, titles, and replies before retention and
 output. It redacts that same token from historical context before inference.
 There is no general secret detector or automatic cleanup of older stored text.

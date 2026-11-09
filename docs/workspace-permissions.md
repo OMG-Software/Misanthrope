@@ -66,7 +66,10 @@ migration flow would need to define that operation.
 A process-local session binding identifies the control store, session,
 workspace, and revision. It expires after 15 minutes on a monotonic clock. It
 cannot be cloned or deserialized. Every configuration change makes all earlier
-bindings stale. Evaluation rejects store, session, workspace, revision, expiry,
+bindings stale. The core turn runtime opens the control store, obtains a fresh
+binding, and releases the settings lock for every tool operation instead of
+retaining one across model rounds; it never reconstructs a binding from journal
+metadata. Evaluation rejects store, session, workspace, revision, expiry,
 availability, and flag mismatches before reporting configuration eligibility.
 Checks append audit events without changing the settings revision.
 
