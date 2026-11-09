@@ -143,6 +143,8 @@ trusted application-data directory, and the workspace ID. The runtime:
   paths, and duplicate call identifiers before dispatch;
 - opens the control store for each broker call, obtains a fresh session binding,
   and releases the settings lock before the next model request;
+- reserves assembled-prompt capacity and enforces the selected per-message limit
+  before recording any tool intent, result, or message;
 - enforces hard maxima of four rounds, eight calls per round, sixteen calls per
   turn, 16 KiB per source-labelled tool message, and 256 KiB aggregate tool
   text, with a 30-second cooperative deadline by default;

@@ -215,8 +215,11 @@ impl ToolCall {
     ///
     /// The accepted shape is an OpenAI-style function call with exactly `id`,
     /// `type`, and `function`, where `function` has exactly `name` and a
-    /// JSON-object `arguments` string. Unknown fields, duplicate JSON keys,
-    /// unsupported tools, invalid paths, and out-of-range limits are rejected.
+    /// JSON-object `arguments` string. Unknown fields, duplicate keys in the
+    /// arguments string, unsupported tools, invalid paths, and out-of-range
+    /// limits are rejected. Duplicate outer keys cannot be detected after a
+    /// caller converts the call to `Value`; adapters must reject them before
+    /// conversion.
     pub fn parse(value: &Value) -> Result<Self, ToolCallError> {
         let object = value.as_object().ok_or(ToolCallError::NotObject)?;
         if object.len() != 3
@@ -472,6 +475,9 @@ pub enum TurnLimit {
     /// The aggregate tool-output limit was reached.
     #[error("total tool output limit")]
     TotalToolBytes,
+    /// One rendered tool message exceeded the selected limit.
+    #[error("tool result message limit")]
+    ResultBytes,
 }
 
 /// A controlled turn failure. No variant claims an action succeeded.
@@ -745,12 +751,17 @@ impl<'a> TurnRuntime<'a> {
                 return Err(self.abort_for(request_id, error));
             }
 
-            if !reply.content.is_empty()
-                && let Err(error) = self
+            if !reply.content.is_empty() {
+                if let Err(error) = self
                     .journal
                     .record_message(MessageRole::Assistant, &reply.content)
-            {
-                return Err(self.abort(request_id, "persistence", error.into()));
+                {
+                    return Err(self.abort(request_id, "persistence", error.into()));
+                }
+                history.push(ConversationMessage {
+                    role: ConversationRole::Assistant,
+                    content: reply.content.clone(),
+                });
             }
 
             let mut calls = Vec::with_capacity(reply.tool_calls.len());
@@ -784,6 +795,18 @@ impl<'a> TurnRuntime<'a> {
                 if let Err(error) = self.check_checkpoints(deadline) {
                     return Err(self.abort_for(request_id, error));
                 }
+                // Reserve the largest possible tool message against the
+                // assembled-prompt budget before recording an intent or
+                // dispatching the operation.
+                history.push(ConversationMessage {
+                    role: ConversationRole::User,
+                    content: "x".repeat(self.limits.max_result_bytes),
+                });
+                let prompt_check = prompt::assemble(custom_instructions, &history);
+                history.pop();
+                if let Err(error) = prompt_check {
+                    return Err(self.abort_for(request_id, TurnError::Prompt(error)));
+                }
                 if tool_bytes
                     .checked_add(max_result_bytes)
                     .is_none_or(|projected| projected > self.limits.max_total_tool_bytes)
@@ -805,6 +828,11 @@ impl<'a> TurnRuntime<'a> {
                     workspace_id: self.workspace_id,
                 }
                 .dispatch(call, self.limits.max_result_bytes);
+                let message_limit = self.limits.max_result_bytes.min(MAX_MESSAGE_BYTES);
+                if execution.text.len() > message_limit {
+                    let error = TurnError::Limit(TurnLimit::ResultBytes);
+                    return Err(self.abort_for(request_id, error));
+                }
                 let text_bytes = match u64::try_from(execution.text.len()) {
                     Ok(bytes) => bytes,
                     Err(_) => return Err(self.abort_for(request_id, TurnError::InvalidLimits)),
@@ -998,11 +1026,11 @@ impl WorkspaceToolDispatcher<'_> {
         };
         let binding = match control.bind_session(self.session_id, self.workspace_id) {
             Ok(binding) => binding,
-            Err(_) => {
+            Err(error) => {
                 return ToolExecution::denied(
                     "policy_unavailable",
                     call,
-                    FileError::Control(ControlError::Invalid("binding unavailable")),
+                    FileError::Control(error),
                 );
             }
         };
@@ -1017,7 +1045,7 @@ impl WorkspaceToolDispatcher<'_> {
                 let limit = (*max_bytes).min(max_result_bytes);
                 match broker.read(&binding, &target, limit) {
                     Ok(read) => match std::str::from_utf8(&read.bytes) {
-                        Ok(text) => read_result(call, text),
+                        Ok(text) => read_result(call, text, max_result_bytes),
                         Err(_) => ToolExecution::recoverable("non_utf8", call),
                     },
                     Err(error) => classify_file_error(call, error),
@@ -1025,7 +1053,7 @@ impl WorkspaceToolDispatcher<'_> {
             }
             ToolArguments::ListDirectory { max_entries, .. } => {
                 match broker.list(&binding, &target, (*max_entries).min(MAX_LIST_ENTRIES)) {
-                    Ok(listing) => list_result(call, listing),
+                    Ok(listing) => list_result(call, listing, max_result_bytes),
                     Err(error) => classify_file_error(call, error),
                 }
             }
@@ -1033,8 +1061,8 @@ impl WorkspaceToolDispatcher<'_> {
     }
 }
 
-/// Render a UTF-8 read result within the tool-message bound.
-fn read_result(call: &ToolCall, text: &str) -> ToolExecution {
+/// Render a UTF-8 read result within the selected tool-message bound.
+fn read_result(call: &ToolCall, text: &str, max_result_bytes: usize) -> ToolExecution {
     let body = match serde_json::to_string(&json!({
         "tool": call.name.as_str(),
         "path": call.path(),
@@ -1044,14 +1072,15 @@ fn read_result(call: &ToolCall, text: &str) -> ToolExecution {
         Err(_) => return ToolExecution::recoverable("encode_error", call),
     };
     let message = labelled_result(call, &body);
-    if message.len() > MAX_MESSAGE_BYTES {
+    if message.len() > max_result_bytes.min(MAX_MESSAGE_BYTES) {
         return ToolExecution::recoverable("output_too_large", call);
     }
     ToolExecution::success(message)
 }
 
-/// Render a bounded listing result, stopping before the message limit.
-fn list_result(call: &ToolCall, listing: FileListing) -> ToolExecution {
+/// Render a bounded listing result, stopping before the selected message limit.
+fn list_result(call: &ToolCall, listing: FileListing, max_result_bytes: usize) -> ToolExecution {
+    let message_limit = max_result_bytes.min(MAX_MESSAGE_BYTES);
     let had_entries = !listing.entries.is_empty();
     let mut entries = Vec::new();
     let mut truncated = listing.truncated;
@@ -1076,7 +1105,7 @@ fn list_result(call: &ToolCall, listing: FileListing) -> ToolExecution {
             Ok(body) => body,
             Err(_) => return ToolExecution::recoverable("encode_error", call),
         };
-        if labelled_result(call, &body).len() > MAX_MESSAGE_BYTES {
+        if labelled_result(call, &body).len() > message_limit {
             entries.pop();
             truncated = true;
             break;
@@ -1095,7 +1124,7 @@ fn list_result(call: &ToolCall, listing: FileListing) -> ToolExecution {
         Err(_) => return ToolExecution::recoverable("encode_error", call),
     };
     let message = labelled_result(call, &body);
-    if message.len() > MAX_MESSAGE_BYTES {
+    if message.len() > message_limit {
         return ToolExecution::recoverable("output_too_large", call);
     }
     ToolExecution::success(message)

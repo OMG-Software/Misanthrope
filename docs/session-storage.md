@@ -99,8 +99,16 @@ journal. Current defaults and hard maxima are four model rounds, eight calls
 per round, sixteen calls per turn, 16 KiB per tool message, 256 KiB of aggregate
 tool messages, and a 30-second cooperative deadline. A read call accepts at most
 15 KiB of file content and defaults to 8 KiB; larger files are refused rather
-than truncated. Cancellation and the deadline are checked between bounded
-operations; they do not preempt a broker call already in progress.
+than truncated. Before each dispatch the runtime reserves the largest possible
+tool message against the assembled-prompt budget; if the next request could not
+fit, it fails the turn before recording an intent or opening the target. Every
+rendered tool message, including an error, must fit the selected per-message
+limit and the 16 KiB session message limit before it is recorded. Interim
+assistant text returned with tool calls is recorded and retained in the
+follow-up history. Call identifiers are scoped to one turn: a failed turn may
+leave a pending intent, and a later turn may reuse that identifier.
+Cancellation and the deadline are checked between bounded operations; they do
+not preempt a broker call already in progress.
 
 `workspace_list_directory` returns a Unicode name as a JSON string. A native
 name that cannot be represented as Unicode is returned with `name: null`,

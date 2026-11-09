@@ -248,14 +248,17 @@ fn allowed_read_and_list_produce_durable_source_labelled_results() {
     fs::write(fixture.workspace.join("notes.txt"), "hello from workspace")
         .expect("write workspace file");
     let mut model = ScriptedModel::new(vec![
-        tool_reply(vec![
-            call(
-                "read-1",
-                "workspace_read_file",
-                json!({"path": "notes.txt"}),
-            ),
-            call("list-1", "workspace_list_directory", json!({"path": ""})),
-        ]),
+        Ok(ToolModelReply {
+            content: "plan".into(),
+            tool_calls: vec![
+                call(
+                    "read-1",
+                    "workspace_read_file",
+                    json!({"path": "notes.txt"}),
+                ),
+                call("list-1", "workspace_list_directory", json!({"path": ""})),
+            ],
+        }),
         text_reply("done"),
     ]);
 
@@ -299,6 +302,12 @@ fn allowed_read_and_list_produce_durable_source_labelled_results() {
             .count(),
         1
     );
+    assert!(
+        second
+            .messages
+            .iter()
+            .any(|message| { message.role == ModelRole::Assistant && message.content == "plan" })
+    );
     assert!(second.messages.iter().any(|message| {
         message.role == ModelRole::User
             && message.content.contains("Tool result [call read-1")
@@ -321,6 +330,12 @@ fn allowed_read_and_list_produce_durable_source_labelled_results() {
     assert_eq!(
         snapshot.messages.first().expect("user message").role,
         MessageRole::User
+    );
+    assert!(
+        snapshot
+            .messages
+            .iter()
+            .any(|message| message.role == MessageRole::Assistant && message.text == "plan")
     );
     assert!(
         snapshot
@@ -661,6 +676,70 @@ fn turn_limits_fail_before_dispatch_or_before_extra_operations() {
         1,
         "the second round must be refused before dispatch"
     );
+}
+
+#[test]
+fn prompt_capacity_is_reserved_before_dispatch() {
+    let mut fixture = Fixture::new();
+    for _ in 0..15 {
+        fixture
+            .journal
+            .as_mut()
+            .expect("journal is open")
+            .record_message(MessageRole::User, &"x".repeat(16 * 1024))
+            .expect("record bounded history message");
+    }
+    let mut model = ScriptedModel::new(vec![tool_reply(vec![call(
+        "read-1",
+        "workspace_read_file",
+        json!({"path": "notes.txt"}),
+    )])]);
+
+    let error = fixture
+        .run(&mut model, TurnLimits::default())
+        .expect_err("prompt reserve must fail before dispatch");
+
+    assert!(matches!(error, TurnError::Prompt(_)));
+    assert_eq!(model.requests.len(), 1);
+    assert!(
+        !fixture.audit_path().exists(),
+        "the read must not run when the next prompt cannot fit"
+    );
+    assert_eq!(fixture.snapshot().active_turn, None);
+    fixture.close_journal();
+    assert_eq!(fixture.last_failure_code().as_deref(), Some("prompt_limit"));
+}
+
+#[test]
+fn selected_tool_message_limit_is_enforced_before_recording() {
+    let mut fixture = Fixture::new();
+    fs::write(fixture.workspace.join("quotes.txt"), "\"".repeat(1_000)).expect("write quoted file");
+    let mut model = ScriptedModel::new(vec![
+        tool_reply(vec![call(
+            "read-1",
+            "workspace_read_file",
+            json!({"path": "quotes.txt", "max_bytes": 1024}),
+        )]),
+        text_reply("done"),
+    ]);
+    let limits = TurnLimits {
+        max_result_bytes: 1024,
+        ..TurnLimits::default()
+    };
+
+    let report = fixture
+        .run(&mut model, limits)
+        .expect("oversized rendered output is a recoverable tool error");
+
+    assert_eq!(report.reply, "done");
+    let tool_message = fixture
+        .snapshot()
+        .messages
+        .iter()
+        .find(|message| message.role == MessageRole::Tool)
+        .expect("tool message");
+    assert!(tool_message.text.len() <= 1024);
+    assert!(tool_message.text.contains("output_too_large"));
 }
 
 #[test]

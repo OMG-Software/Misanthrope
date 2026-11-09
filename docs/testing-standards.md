@@ -36,11 +36,12 @@ configuration-only. File broker tests cover bounded reads, listings, exclusive
 creation, scope denials, path/link checks, collisions, audit privacy, and
 uncertain-create recovery. Turn-runtime tests cover allowed read/list through a
 fresh live binding, policy denial at the broker, revocation during model I/O,
-unknown and malformed calls, duplicate identifiers, per-round and aggregate
-limits, cancellation, deadline expiry, archived and active-turn refusal,
-workspace metadata mismatch, model-addressable listing names, source-labelled
-hostile content, non-UTF-8 withholding, and schema-v1/v2 replay including tool
-output-identity checks. Public integration tests exercise these operations
+unknown and malformed calls, duplicate identifiers, per-round, aggregate,
+prompt-capacity, and selected per-message limits, cancellation, deadline expiry,
+archived and active-turn refusal, workspace metadata mismatch, model-addressable
+listing names, interim assistant text retention, source-labelled hostile
+content, non-UTF-8 withholding, and schema-v1/v2 replay including tool
+output-identity checks and failed-turn call-ID reuse. Public integration tests exercise these operations
 through the broker API; core unit tests inject the uncertain outcome. These
 tests do not qualify release filesystem support or runtime containment.
 

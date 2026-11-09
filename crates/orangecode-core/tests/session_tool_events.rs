@@ -417,3 +417,112 @@ fn v1_journals_reject_tool_events_and_tool_manifest_fields() {
         Err(SessionError::InvalidJournal(_))
     ));
 }
+
+#[test]
+fn failed_turns_release_pending_call_ids_for_later_turns() {
+    let (_temporary, path, session_id) = setup();
+    let first = first_event(&path);
+    let first_request = Uuid::new_v4();
+    let second_request = Uuid::new_v4();
+    let text = "Tool result [call call-1]:\nok";
+    let text_bytes = u64::try_from(text.len()).expect("text length");
+
+    let mut events = vec![
+        first,
+        event(
+            session_id,
+            1,
+            2,
+            "turn.started",
+            json!({"request_id": first_request}),
+        ),
+        event(
+            session_id,
+            2,
+            2,
+            "tool.requested",
+            json!({
+                "request_id": first_request,
+                "call_id": "call-1",
+                "tool": "workspace_read_file",
+                "arguments": "{\"path\":\"notes.txt\"}"
+            }),
+        ),
+        event(
+            session_id,
+            3,
+            2,
+            "turn.failed",
+            json!({"request_id": first_request, "code": "cancelled"}),
+        ),
+    ];
+    write_events(&path, &events);
+    let reopened = SessionJournal::open(&path).expect("failed turn with pending intent reopens");
+    assert_eq!(reopened.snapshot().active_turn, None);
+    drop(reopened);
+
+    events.extend([
+        event(
+            session_id,
+            4,
+            2,
+            "turn.started",
+            json!({"request_id": second_request}),
+        ),
+        event(
+            session_id,
+            5,
+            2,
+            "tool.requested",
+            json!({
+                "request_id": second_request,
+                "call_id": "call-1",
+                "tool": "workspace_read_file",
+                "arguments": "{\"path\":\"notes.txt\"}"
+            }),
+        ),
+        event(
+            session_id,
+            6,
+            2,
+            "tool.completed",
+            json!({
+                "request_id": second_request,
+                "call_id": "call-1",
+                "outcome": "succeeded",
+                "output_bytes": text_bytes,
+                "output_sha256": digest(text)
+            }),
+        ),
+        event(
+            session_id,
+            7,
+            2,
+            "message.recorded",
+            json!({
+                "role": "tool",
+                "source": "core_tool",
+                "call_id": "call-1",
+                "text": text
+            }),
+        ),
+        event(
+            session_id,
+            8,
+            2,
+            "turn.completed",
+            json!({"request_id": second_request}),
+        ),
+    ]);
+    write_events(&path, &events);
+    let reopened = SessionJournal::open(&path).expect("later turn may reuse the call identifier");
+    assert_eq!(reopened.snapshot().active_turn, None);
+    assert_eq!(reopened.snapshot().schema_version, 2);
+    assert!(
+        reopened
+            .snapshot()
+            .messages
+            .iter()
+            .any(|message| message.role == MessageRole::Tool)
+    );
+}

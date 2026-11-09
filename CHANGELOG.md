@@ -6,6 +6,11 @@ Changes are recorded here before a release version is assigned.
 
 ### Fixed
 
+- Harden the core turn/tool runtime: reserve assembled-prompt capacity and
+  enforce the selected tool-message limit before recording results, retain
+  interim assistant text in follow-up history, preserve original policy
+  binding errors, and cover failed-turn call-identifier reuse in replay.
+
 - Keep operational file checks out of the settings journal so file traffic and
   audit-cap refusals cannot exhaust capacity needed for permission changes.
 - Add explicit, no-replace operation-journal exports and read-only archive
