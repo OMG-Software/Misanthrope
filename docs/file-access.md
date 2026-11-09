@@ -21,8 +21,10 @@ or provider integration must preserve those checks.
 Existing-file replacement, deletion, recursive directory creation, and action
 replay are not supported. A create operation refuses every existing entry.
 In particular, a hash check followed by rename is not atomic compare-and-swap
-against an independent editor. Replacement needs a separate conflict and
-recovery contract. See [ADR-0013](adr/0013-enforce-file-access-with-native-handles-and-exclusive-creation.md).
+against an independent editor. Replacement needs a separate reviewed conflict
+and recovery contract. The [proposal below](#proposed-replacement-contract) is
+documentation for that review; it enables no operation. See
+[ADR-0013](adr/0013-enforce-file-access-with-native-handles-and-exclusive-creation.md).
 
 ## Authorization
 
@@ -155,6 +157,214 @@ future replacement operation must recheck the target identity and content,
 define conflict and checkpoint behaviour, and handle uncertain outcomes without
 automatic retry. Existing-file replacement remains unsupported. See
 [ADR-0017](adr/0017-preview-edits-before-enabling-replacement.md).
+
+## Proposed replacement contract
+
+This section is the **Phase A1 proposal**, not implemented behaviour. Review
+and accept [ADR-0018](adr/0018-define-checkpointed-replacement-before-enabling-overwrites.md)
+before enabling replacement in Phase A2. There is no apply, checkpoint, or
+replacement-recovery command today. Existing capability output stays unchanged.
+
+### Admission and conflict checks
+
+The first apply interface must be trusted CLI input only. It must accept a
+lossless workspace-relative target, complete proposed UTF-8 content, and the
+expected current SHA-256 and byte count. Both current and proposed payloads
+must be valid UTF-8 and fit the existing 1 MiB file bound. Open an
+operator-selected proposed source with the same no-final-link and regular-file
+checks as the preview, and capture its bounded bytes once. Hash the exact
+bytes, including line endings and the final newline. Do not accept a truncated diff as proposed
+content or infer expected values from a saved conversation.
+
+Require a fresh process-local binding and both read and write preferences.
+Reading and retaining the original bytes is part of the operation. Reuse the
+current store/session/workspace/revision/expiry and native scope checks. Hold
+the control writer for the bounded synchronous operation. A preview, checkpoint
+ID, historical grant, or recovery acknowledgement cannot supply authority.
+
+Open and retain the target's parent and current regular file through native
+handles. Refuse missing targets, links, reparse points, multiple hard links,
+special files, mount crossings, invalid paths, and unavailable metadata. Retain
+the native file identity as well as the expected digest and size. An identity
+change after capture is a conflict even when its bytes match. The current
+preview does not expose an identity token, so this does not detect a same-bytes
+entry replacement made before apply opens the target. Parent traversal must
+meet the existing rooted-open contract.
+
+Capture at most 1 MiB of current bytes and calculate their digest and size.
+They must match the request. Use those same captured bytes for the checkpoint;
+do not copy the target again by pathname. Recheck the current entry's identity,
+digest, size, and required metadata immediately before the native replacement.
+Any mismatch observed before commit must return a controlled conflict without
+replacing the target. Private preparation artifacts can remain and must be
+recorded.
+Identical current and proposed bytes need no replacement or checkpoint.
+
+These checks are **not atomic compare-and-swap**. An independent editor can
+change a file or directory entry after the final check. It can also write
+during capture, so a read is not a filesystem snapshot. Repeated equal hashes
+and advisory locks do not prove an exclusive edit. A checkpoint preserves the
+bytes captured by OrangeCode; it cannot promise to preserve every concurrent
+edit or the exact bytes displaced by the rename. The first interface must
+explain this limit and require the operator to stop other writers before
+applying. That requirement is an operating assumption, not enforced isolation.
+If a caller requires a no-lost-update guarantee against independent writers,
+the operation must refuse that requirement. Do not label this mode conflict-free.
+
+### Private checkpoints, quota, and retention
+
+Use `<data-dir>/replacement-v1/`, outside the development root and workspace.
+It must be on the target's filesystem; refuse a cross-filesystem configuration
+before preparation rather than relocating storage or copying during commit.
+Keep this store under the control-store identity. Every admitted replacement
+gets an exclusive UUID-named entry containing the captured original bytes,
+proposed bytes, and a bounded manifest. The manifest binds the control store,
+operation, session, workspace, lossless target, native identity, required
+security metadata, expected and proposed sizes/digests, and format version.
+Names and metadata are untrusted when read back. Never overwrite or silently
+reuse an existing entry.
+
+Request mode 0700 for new Unix directories and 0600 for files; verify existing
+storage is private. On Windows, require a verified per-user ACL for this new
+store rather than assuming inherited ACLs are private. Require native directory
+objects for the store and operation entries, and regular single-link files for
+payloads, manifests, and the ledger. Refuse links/reparse points, foreign-store
+objects, and unavailable controls. Native parent/entry checks must protect both
+creation and reopening. Existing journal helpers alone do not establish that
+protection.
+
+The store has at most 64 operation entries and 64 MiB of total managed file
+bytes, including manifests and the replacement ledger. Each manifest is at
+most 64 KiB. Reserve the worst-case original, proposed, and staging payloads
+(1 MiB each), manifest, and terminal ledger space before preparation. Count
+incomplete entries and staging data inside this store against the limits.
+Bound enumeration and refuse an unknown layout; do not recursively scan an
+arbitrary tree or ignore unknown files to make capacity available. Only one
+replacement can be active per store.
+
+Sync the original and proposed files, their manifest, and the required parent
+directory entries before recording the checkpoint as prepared. Reopen and
+verify the exact checkpoint bytes against the manifest before use. A checkpoint
+is durable only when the backend's reviewed persistence requirements succeed.
+Any preparation, quota, validation, or sync failure must prevent replacement.
+Partial preparation remains evidence and can require explicit acknowledgement.
+
+Keep completed, conflicted, and uncertain entries. There is no automatic
+expiration, eviction, export, or pruning in the first increment. At the quota,
+refuse further replacements while preserving inspection and permission changes.
+Deletion/export needs a later reviewed lifecycle; journal rotation must not
+discard referenced checkpoints. Checkpoints contain source bytes and can
+contain secrets. They are private recovery data, never ordinary model context,
+tool output, or conversation events.
+
+### Replacement sequence and audit compatibility
+
+Use a separate versioned replacement ledger in the private store. Do not add
+replacement variants to strict `file-operations-v1.jsonl` or rewrite control-v1
+settings or session journals. The new ledger must strictly validate bounded
+records, store identity, unique operation IDs, contiguous sequence numbers,
+state transitions, and exact manifest references. Limit it to 4,096 events,
+8 MiB total, and 64 KiB per event, also within the store's aggregate quota.
+Reserve terminal outcome and acknowledgement capacity before admission.
+
+Required ordering:
+
+1. Check binding, policy, native objects, expected bytes, both operation logs,
+   and capacity, including same-filesystem staging support. Persist a replacement
+   intent, including the exclusive artifact names, before creating artifacts.
+2. Prepare and verify the durable private checkpoint. Record its prepared state
+   durably before staging or replacement.
+3. Exclusively create a bounded staging file inside the private operation
+   entry, through its retained directory handle. Write and sync the exact
+   proposed bytes. Apply and verify required metadata before publication. Keep
+   the original and proposed checkpoint files separate from this stage. Record
+   the staging identity before the native commit attempt; an interrupted
+   staging creation is unresolved, not permission to delete that name.
+4. Recheck the expected current entry and stage, including single-link status,
+   identity, bytes, and required metadata. Record commit intent durably, then
+   perform one reviewed native replacement. Never truncate the current inode.
+5. Verify the published object and bytes, sync the required file/directory
+   state, and persist the terminal outcome before reporting success. A later
+   external edit is still possible. Success describes the completed operation,
+   not permanent ownership of the target.
+
+Preparation writes only private application storage. A detected conflict leaves
+workspace entries unchanged. Publication moves the private stage to the target;
+it does not consume either checkpoint payload. Sync both changed parent
+directories where required. A failed or interrupted publication must preserve
+enough recorded names and identities to inspect both locations.
+
+New file-operation admission must inspect unresolved state in both the existing
+operation log and the replacement ledger. A missing, corrupt, foreign, or
+unsupported required artifact must fail closed. Inspection, acknowledgement,
+and settings changes must remain possible at the ordinary admission caps.
+Never recreate a missing referenced checkpoint as an empty file. Older binaries
+do not inspect the new ledger and cannot enforce this admission rule. Downgrade
+is unsupported while replacement state exists; no old-binary recovery guarantee
+is made. Replay and archive/restore must never execute a recorded replacement.
+
+### Native backend gates
+
+The following are implementation directions, not qualified backends:
+
+| Backend | Required primitive and review gate |
+| --- | --- |
+| Linux | Retain rooted parent handles and use a same-filesystem `renameat2` replacement from the private stage. The rename is atomic namespace publication, not an expected-content check. Verify `fsync` for checkpoint files, checkpoint directories, the staged file, and both rename parents in the required order. |
+| Windows | Review a retained-source-handle rename with a retained target-parent handle through `FILE_RENAME_INFORMATION`, using replace-if-exists semantics. Verify access/share requirements, target-open conflicts, reparse controls, metadata handling, failure states, and directory-entry persistence. Resolve the existing directory-option contract gap for this operation. |
+
+The [Linux rename contract](https://man7.org/linux/man-pages/man2/rename.2.html)
+defines replacement publication, and its
+[fsync contract](https://man7.org/linux/man-pages/man2/fsync.2.html) requires
+separate parent-directory synchronization for directory entries. Microsoft's
+[rename information contract](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information)
+provides destination-directory and replacement fields; this is not evidence
+that an OrangeCode wrapper or a filesystem meets all requirements above.
+
+Preserve and verify the target's security metadata before publication: Unix
+owner/group, mode, and access ACL; Windows owner and access-control/protection
+state. Refuse unsupported metadata, alternate data streams, or file attributes
+whose preservation has not been defined and tested. Do not broaden access by
+replacing a restricted file with a staged file's default permissions. Define
+other preserved metadata explicitly in the backend review. A new inode/file ID
+and changed modification time are expected; whole-file metadata equivalence is
+not implied.
+
+No copy/delete, in-place truncate/write, weaker traversal, or ambient-path
+fallback is allowed. Do not substitute `RENAME_EXCHANGE` plus automatic rollback.
+Do not use path-based `ReplaceFileW` as a shortcut: its
+[documented errors](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-replacefilew)
+include partial name/metadata changes, and its write-through flag is unsupported.
+Backend unavailability must be reported before workspace mutation. Windows
+directory durability and ACL hardening remain gates, not current guarantees.
+
+### Uncertain outcomes and recovery
+
+| Last durable state | Required behaviour after reopen |
+| --- | --- |
+| Intent only, or incomplete preparation | Report unresolved preparation; preserve any artifacts; do not stage or replace. |
+| Prepared checkpoint, no commit intent | Report unresolved preparation/staging; inspect the target and recorded stage; do not infer that every artifact was fully written. |
+| Commit intent, missing/uncertain outcome | Report that replacement may have occurred. Inspect target, stage, and checkpoint identities and digests. Do not infer success solely from matching proposed bytes. |
+| Terminal outcome | Validate it and show its evidence; do not retry. A sync failure can leave a complete visible outcome despite an uncertain caller result. |
+
+An error after the commit syscall starts must be uncertain unless the reviewed
+backend proves no mutation for that error. Failure in post-checks, required
+syncs, or outcome acknowledgement is uncertain. Poison the active writer after
+a write/sync failure and require reopen for inspection. Preserve checkpoints
+and staging evidence. Never retry, unlink a stage, swap back, or restore
+automatically after an ambiguous result. A known pre-commit conflict does not
+authorize cleanup of an entry another actor may have changed.
+
+Recovery inspection must be existing-only and must withhold file contents from
+ordinary audit output. A trusted acknowledgement records operator inspection;
+it does not assert success, repair files, or grant access. Phase A2 provides
+inspection and acknowledgement only; restore remains disabled. A later explicit
+restore must use the same replacement path with a fresh live binding, current
+read/write preferences, and an explicit expected digest/size for the *current*
+target. Checkpoint IDs do not supply those expected values. Detect later user
+changes, checkpoint the current bytes again, and never overwrite them merely
+because an older checkpoint exists. Missing targets and restore-as-create are
+outside this first contract. General deletion and recursive operations remain
+unsupported.
 
 ## Private operation journal and recovery
 

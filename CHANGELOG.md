@@ -46,6 +46,12 @@ Changes are recorded here before a release version is assigned.
 
 ### Added
 
+- Phase A1 replacement/checkpoint/recovery proposal and ADR-0018. Define exact
+  preconditions, private same-filesystem staging, bounded checkpoint retention,
+  versioned audit, uncertain-outcome handling, and native backend/test gates.
+  Update the plan for merged PR #9 and split contract review from Phase A2
+  implementation. This documentation enables no overwrite or recovery command.
+
 - Root implementation plan recording the verified baseline, phase order,
   acceptance criteria, verification commands, and known cautions for resuming.
 

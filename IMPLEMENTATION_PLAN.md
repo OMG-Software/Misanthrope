@@ -2,16 +2,9 @@
 
 Last verified: 2026-11-09.
 
-This guide was added on PR #9's branch. Until that PR merges, `main` does not
-contain this file, so switching branches removes the working-tree copy. Read it
-before switching, or retrieve it with:
-
-```text
-git fetch origin
-git show origin/codex/edit-preview:IMPLEMENTATION_PLAN.md
-```
-
-Once PR #9 merges, the file is part of `main`.
+This guide is part of `main` after PR #9. Read it before selecting the next
+increment. Its baseline describes merged behaviour; a proposed contract does
+not mean its runtime exists.
 
 This is a resume guide, not a replacement for the owning contracts in
 [docs](docs/README.md). Read [AGENTS.md](AGENTS.md),
@@ -23,9 +16,13 @@ This is a resume guide, not a replacement for the owning contracts in
 
 - `main` contains **PR #8** at `56ed9bf`: schema-v2 session tool events and the
   core read/list turn runtime.
-- **PR #9** (`codex/edit-preview`) is open with read-only edit previews and its
-  review fixes. Its CI was green before this plan commit; see the PR for the
-  current head. It is not merged.
+- **PR #9** merged at `e4dbeca`: read-only edit previews, review fixes, and this
+  resume guide. The merge was verified through GitHub on 2026-11-09.
+- **Phase A1** proposes the replacement/checkpoint/recovery contract in
+  [ADR-0018](docs/adr/0018-define-checkpointed-replacement-before-enabling-overwrites.md)
+  and the [file-access guide](docs/file-access.md#proposed-replacement-contract).
+  It changes documentation only. Review and accept that contract before A2;
+  replacement, checkpoints, and replacement recovery are still unimplemented.
 - The application version is **0.5.0**.
 
 Implemented today:
@@ -61,20 +58,21 @@ Not implemented:
 
 ## Resume steps
 
-0. If this file is not on your current branch yet, read it here or retrieve it
-   with `git show origin/codex/edit-preview:IMPLEMENTATION_PLAN.md` before
-   switching to `main`.
-1. Verify the baseline:
+1. Inspect the current branch and local changes. Preserve unfinished feature
+   work and unrelated files. When there is no unfinished feature work, update
+   the baseline:
 
    ```text
    git fetch origin --prune
+   git status --short --branch
    git switch main
    git pull --ff-only
    git status --porcelain
    ```
 
-2. If PR #9 is still open, review and merge it before starting a replacement
-   phase. Then update this file's baseline and PR references.
+2. Verify that PR #9 is merged. For A2, also verify that the A1 contract has
+   been reviewed and accepted. Do not infer acceptance from this plan or an
+   unmerged branch. Do not merge a PR without the user's authorization.
 3. Re-read the owning contracts for the selected phase. Do not infer authority
    from this plan, prompts, journals, or model output.
 4. Create a `codex/<phase>` branch from a clean, updated `main`.
@@ -93,22 +91,37 @@ cargo test --workspace --all-targets --locked
 cargo test --workspace --doc --locked
 ```
 
-Run native checks on Windows and Linux. Use a separate target directory for a
-Linux run so Windows artifacts cannot mask stale results. For documentation,
-run the repository checker described in
-[docs/repository-checks.md](docs/repository-checks.md) and `git diff --check`.
+Run native checks on Windows and Linux for runtime changes. Use a separate
+target directory for a Linux run so Windows artifacts cannot mask stale
+results. Documentation-only increments need local Markdown link/fragment and
+whitespace checks, plus the applicable review and analysis checks in
+[docs/repository-checks.md](docs/repository-checks.md). That guide describes CI
+services; the repository has no standalone documentation checker. Record the
+checks that actually ran. Application tests are not applicable to A1.
 
 A mock or compile-only result does not establish native containment, live
 provider compatibility, or release filesystem support.
 
 ## Phase plan
 
-### Phase A (next): replacement contract, checkpoints, and recovery
+### Phase A: replacement contract, checkpoints, and recovery
 
 The read-only preview is evidence, not an apply operation. Replacement needs a
-separate reviewed contract before any overwrite is enabled.
+separate reviewed contract before any overwrite is enabled. Split this phase
+at that review boundary:
 
-Decisions to make and record:
+- **A1 (current increment):** propose the contract and ADR, define the platform
+  gates and acceptance cases, and update the owning guides. Keep runtime
+  behaviour and capabilities unchanged. This increment needs contract review;
+  it does not complete Phase A.
+- **A2 (next after acceptance):** implement and verify the accepted contract.
+  Review platform wrappers and storage compatibility before enabling a trusted
+  CLI apply command. An unqualified backend must refuse replacement. Do not
+  treat passing existing read/create tests as replacement evidence. The first
+  recovery surface is inspection and acknowledgement. Explicit restore remains
+  a later feature with its own current-content and checkpoint tests.
+
+Contract decisions proposed in A1:
 
 - The expected-content precondition (digest and size) and what happens when the
   target changes before or during the operation.
@@ -122,7 +135,11 @@ Decisions to make and record:
 - Whether the first apply command is trusted CLI only. It must not become a
   model tool before approval, containment, and policy review exist.
 
-Acceptance criteria:
+The [proposed replacement contract](docs/file-access.md#proposed-replacement-contract)
+owns the selected limits, state transitions, and recovery rules. The native
+primitive and durability gates there remain implementation prerequisites.
+
+Runtime acceptance criteria for A2:
 
 - Replacement requires a live binding, write permission, and the expected
   current digest/size. A mismatch produces a controlled conflict with no

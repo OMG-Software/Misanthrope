@@ -7,6 +7,12 @@ separate journal records metadata for bounded file-broker operations. The
 prototype does not provide a session UI, search index, task execution, or
 recovery UI.
 
+The [proposed replacement contract](file-access.md#proposed-replacement-contract)
+uses a separate versioned ledger and private checkpoint store. They are not
+implemented. They must not add replacement variants to the existing strict
+file-operation-v1 log or store checkpoint contents in conversation events.
+Session replay, archive, and restore cannot authorize or replay replacement.
+
 ## Implemented prototype (v0.4.0)
 
 The Rust core creates and opens one UTF-8 JSONL journal per session. The CLI

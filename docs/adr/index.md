@@ -32,3 +32,4 @@ meaningful alternative does not need an ADR.
 | [0015: Archive operation logs without consuming settings capacity](0015-archive-operation-logs-without-consuming-settings-capacity.md) | Accepted | 2026-11-09 |
 | [0016: Add a session-owned tool runtime with session schema v2](0016-add-a-session-owned-tool-runtime-with-schema-v2.md) | Accepted | 2026-11-09 |
 | [0017: Preview edits before enabling replacement](0017-preview-edits-before-enabling-replacement.md) | Accepted | 2026-11-09 |
+| [0018: Define checkpointed replacement before enabling overwrites](0018-define-checkpointed-replacement-before-enabling-overwrites.md) | Proposed | 2026-11-09 |
