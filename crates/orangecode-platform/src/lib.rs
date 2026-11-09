@@ -3,8 +3,112 @@
 pub mod broker;
 pub mod journal;
 
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io;
+use std::path::Path;
+
+/// Open one trusted local regular file read-only without following a final link.
+///
+/// This is for trusted operator-selected input, not workspace containment. On
+/// Windows it opens a final reparse point itself and rejects reparse, device,
+/// and non-regular handles. On Unix it uses no-follow semantics and rejects a
+/// non-regular handle. The caller owns the returned file.
+pub fn open_regular_file_readonly(path: &Path) -> io::Result<File> {
+    open_regular_file_readonly_impl(path)
+}
+
+#[cfg(unix)]
+fn open_regular_file_readonly_impl(path: &Path) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|error| {
+            if error.raw_os_error() == Some(libc::ELOOP) {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "input must not be a symbolic link",
+                )
+            } else {
+                error
+            }
+        })?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "input must be a regular non-link file",
+        ));
+    }
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn open_regular_file_readonly_impl(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_DEVICE, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+
+    reject_windows_device_path(path)?;
+    let file = OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file()
+        || metadata.file_attributes() & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DEVICE) != 0
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "input must be a regular non-reparse file",
+        ));
+    }
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn reject_windows_device_path(path: &Path) -> io::Result<()> {
+    let text = path.as_os_str().to_string_lossy();
+    let upper = text.to_ascii_uppercase();
+    if upper.starts_with(r"\\.\") || upper.starts_with(r"\\?\GLOBALROOT") {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "input must not use a device namespace",
+        ));
+    }
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return Ok(());
+    };
+    let upper = name.to_ascii_uppercase();
+    let base = upper.split('.').next().unwrap_or("");
+    let reserved = matches!(base, "CON" | "PRN" | "AUX" | "NUL")
+        || (base.len() == 4
+            && (base.starts_with("COM") || base.starts_with("LPT"))
+            && base
+                .as_bytes()
+                .get(3)
+                .is_some_and(|digit| digit.is_ascii_digit()));
+    if reserved {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "input must not use a reserved device name",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_regular_file_readonly_impl(_path: &Path) -> io::Result<File> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "trusted regular-file open is unavailable on this platform",
+    ))
+}
 
 /// Native volume and file identity read from an open directory handle.
 ///
@@ -241,6 +345,63 @@ mod tests {
         let mut file = tempfile::NamedTempFile::new().expect("private temporary file");
         validate_journal_handle(file.as_file()).expect("regular single-link file");
         file.write_all(b"still owned").expect("handle remains open");
+    }
+
+    #[test]
+    fn readonly_open_accepts_a_regular_file_and_rejects_a_directory() {
+        let file = tempfile::NamedTempFile::new().expect("private temporary file");
+        super::open_regular_file_readonly(file.path()).expect("regular file");
+
+        let directory = tempfile::tempdir().expect("private temporary directory");
+        let error = super::open_regular_file_readonly(directory.path())
+            .expect_err("directory must be rejected");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn readonly_open_rejects_a_symbolic_link() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().expect("private temporary directory");
+        let target = directory.path().join("target");
+        let link = directory.path().join("link");
+        fs::write(&target, b"target content").expect("target file");
+        symlink(&target, &link).expect("symlink fixture");
+
+        let error =
+            super::open_regular_file_readonly(&link).expect_err("symbolic link must be rejected");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn readonly_open_rejects_a_fifo_without_blocking() {
+        use std::process::Command;
+
+        let directory = tempfile::tempdir().expect("private temporary directory");
+        let fifo = directory.path().join("fifo");
+        assert!(
+            Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .expect("run mkfifo")
+                .success()
+        );
+
+        let error = super::open_regular_file_readonly(&fifo)
+            .expect_err("fifo must be rejected without blocking");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn readonly_open_rejects_windows_device_names() {
+        for path in [r"CON", r"aux.txt", r"\\.\pipe\fixture"] {
+            let error = super::open_regular_file_readonly(std::path::Path::new(path))
+                .expect_err("device name must be rejected");
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        }
     }
 
     #[test]

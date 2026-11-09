@@ -247,6 +247,7 @@ fn cli_creates_lists_reads_and_audits_files_without_recording_contents() {
         expected_availability
     );
     assert_eq!(capabilities["existing_file_replacement"], false);
+    assert_eq!(capabilities["edit_previews"], native_broker_implemented);
     assert_eq!(capabilities["workspace_file_tools"], false);
 }
 
@@ -426,4 +427,160 @@ fn cli_archives_completed_audit_and_inspects_it_after_workspace_selection_change
         "file_audit",
     );
     assert!(!missing.exists());
+}
+
+#[test]
+fn cli_previews_a_bounded_diff_without_modifying_the_workspace() {
+    let fixture = workspace_fixture();
+    let mut create_args = scoped_args(&fixture, "create");
+    create_args.extend(["note.txt", "--content", "one\ntwo\nthree\n"]);
+    assert_success(&run_cli(&fixture.data_root, &create_args));
+
+    let proposed = fixture._temporary.path().join("proposed.txt");
+    fs::write(&proposed, "one\nTWO\nthree\n").expect("write proposed content");
+    let mut diff_args = scoped_args(&fixture, "diff");
+    diff_args.extend(["note.txt", "--content-file", path_arg(&proposed)]);
+    let diff = run_cli(&fixture.data_root, &diff_args);
+    assert_success(&diff);
+    let diff = json_output(&diff);
+    assert_eq!(diff["changed"], true);
+    assert_eq!(diff["truncated"], false);
+    assert_eq!(
+        diff["diff"],
+        "--- current\n+++ proposed\n one\n-two\n+TWO\n three\n"
+    );
+    assert_eq!(
+        fs::read(fixture.workspace.join("note.txt")).expect("workspace file"),
+        b"one\ntwo\nthree\n"
+    );
+
+    // The preview performs a broker read but no workspace mutation.
+    let audit = run_cli(&fixture.data_root, &["file", "audit", "--limit", "20"]);
+    assert_success(&audit);
+    let audit = json_output(&audit);
+    let started: Vec<&Value> = audit["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .filter(|entry| entry["action"]["type"] == "operation_started")
+        .collect();
+    assert_eq!(started.len(), 2);
+    assert_eq!(started[0]["action"]["payload"]["operation"], "create_file");
+    assert_eq!(started[1]["action"]["payload"]["operation"], "read");
+}
+
+#[test]
+fn edit_preview_fails_closed_on_denial_and_invalid_content() {
+    let fixture = workspace_fixture();
+    let mut create_args = scoped_args(&fixture, "create");
+    create_args.extend(["note.txt", "--content", "original\n"]);
+    assert_success(&run_cli(&fixture.data_root, &create_args));
+
+    let proposed = fixture._temporary.path().join("proposed.txt");
+    fs::write(&proposed, "changed\n").expect("write proposed content");
+
+    // When read is revoked, the preview is denied before file-operation audit.
+    let permissions = run_cli(
+        &fixture.data_root,
+        &[
+            "workspace",
+            "permissions",
+            &fixture.workspace_id,
+            "--revision",
+            "2",
+            "--read",
+            "false",
+        ],
+    );
+    assert_success(&permissions);
+    let mut denied_args = scoped_args(&fixture, "diff");
+    denied_args.extend(["note.txt", "--content-file", path_arg(&proposed)]);
+    assert_error_code(&run_cli(&fixture.data_root, &denied_args), "file_denied");
+    let audit = run_cli(&fixture.data_root, &["file", "audit"]);
+    assert_success(&audit);
+    assert_eq!(
+        json_output(&audit)["entries"]
+            .as_array()
+            .expect("entries")
+            .iter()
+            .filter(|entry| entry["action"]["type"] == "operation_started")
+            .count(),
+        1,
+        "only the initial create may be recorded"
+    );
+
+    // Re-enable read for the content-validation cases.
+    let permissions = run_cli(
+        &fixture.data_root,
+        &[
+            "workspace",
+            "permissions",
+            &fixture.workspace_id,
+            "--revision",
+            "3",
+            "--read",
+            "true",
+        ],
+    );
+    assert_success(&permissions);
+
+    let binary = fixture._temporary.path().join("binary.bin");
+    fs::write(&binary, [0xff, 0xfe]).expect("write binary proposal");
+    let mut binary_args = scoped_args(&fixture, "diff");
+    binary_args.extend(["note.txt", "--content-file", path_arg(&binary)]);
+    assert_error_code(&run_cli(&fixture.data_root, &binary_args), "edit_text");
+
+    let large = fixture._temporary.path().join("large.txt");
+    fs::write(&large, "x".repeat(64)).expect("write oversized proposal");
+    let mut large_args = scoped_args(&fixture, "diff");
+    large_args.extend([
+        "note.txt",
+        "--content-file",
+        path_arg(&large),
+        "--max-bytes",
+        "32",
+    ]);
+    assert_error_code(&run_cli(&fixture.data_root, &large_args), "edit_limit");
+
+    // The current-side size limit is enforced by the broker and reports file_io.
+    fs::write(fixture.workspace.join("oversized.txt"), "x".repeat(64))
+        .expect("write oversized current file");
+    let mut current_args = scoped_args(&fixture, "diff");
+    current_args.extend([
+        "oversized.txt",
+        "--content-file",
+        path_arg(&proposed),
+        "--max-bytes",
+        "32",
+    ]);
+    assert_error_code(&run_cli(&fixture.data_root, &current_args), "file_io");
+
+    assert_eq!(
+        fs::read(fixture.workspace.join("note.txt")).expect("workspace file"),
+        b"original\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn edit_preview_rejects_a_symlinked_proposed_source() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = workspace_fixture();
+    let mut create_args = scoped_args(&fixture, "create");
+    create_args.extend(["note.txt", "--content", "original\n"]);
+    assert_success(&run_cli(&fixture.data_root, &create_args));
+
+    let target = fixture._temporary.path().join("proposed-target.txt");
+    let link = fixture._temporary.path().join("proposed-link.txt");
+    fs::write(&target, "changed\n").expect("write proposed target");
+    symlink(&target, &link).expect("create proposed symlink");
+    let mut diff_args = scoped_args(&fixture, "diff");
+    diff_args.extend(["note.txt", "--content-file", path_arg(&link)]);
+
+    assert_error_code(&run_cli(&fixture.data_root, &diff_args), "edit_request");
+    assert_eq!(
+        fs::read(fixture.workspace.join("note.txt")).expect("workspace file"),
+        b"original\n"
+    );
 }

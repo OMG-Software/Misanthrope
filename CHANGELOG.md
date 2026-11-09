@@ -46,6 +46,11 @@ Changes are recorded here before a release version is assigned.
 
 ### Added
 
+- Rust 0.5.0 read-only edit preview: `file diff` compares a broker-read
+  workspace file with trusted proposed UTF-8 content, returns exact digests and
+  a bounded single-hunk diff, and never writes to the workspace or creates a
+  checkpoint. Existing-file replacement remains disabled.
+
 - Rust 0.4.0 session-owned turn/tool runtime for library callers and tests:
   strict read/list tool admission, a fresh workspace binding per operation,
   control-store release before model I/O, round/call/byte/deadline limits,

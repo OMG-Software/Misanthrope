@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use clap::{Args, Subcommand};
 use orangecode_core::control::ControlStore;
+use orangecode_core::edit::{self, EditError};
 use orangecode_core::files::{FileBroker, FileError, FileTarget};
 use orangecode_core::policy::WorkspaceId;
 use serde_json::json;
@@ -51,6 +52,19 @@ pub(crate) enum FileCommand {
         #[command(flatten)]
         scope: Scope,
         path: PathBuf,
+    },
+    /// Preview a bounded diff against trusted proposed content without writing.
+    Diff {
+        #[command(flatten)]
+        scope: Scope,
+        /// Existing workspace-relative file to compare.
+        path: PathBuf,
+        /// Trusted local file containing the complete proposed UTF-8 content.
+        #[arg(long)]
+        content_file: PathBuf,
+        /// Maximum accepted size of either side of the comparison.
+        #[arg(long, default_value_t = edit::MAX_EDIT_CONTENT_BYTES)]
+        max_bytes: usize,
     },
     /// Inspect validated private file-operation metadata and pending recovery.
     Audit {
@@ -128,6 +142,31 @@ pub(crate) fn run(command: FileCommand, data_root: &Path) -> Result<(), CliError
                     .map_err(file_error)?,
             )
         }
+        FileCommand::Diff {
+            scope,
+            path,
+            content_file,
+            max_bytes,
+        } => {
+            if !(1..=edit::MAX_EDIT_CONTENT_BYTES).contains(&max_bytes) {
+                return Err(CliError::new(
+                    "edit_request",
+                    "Edit-preview limit must be 1 byte through 1 MiB",
+                ));
+            }
+            let binding = control
+                .bind_session(scope.session, scope.workspace)
+                .map_err(|error| CliError::new("control", error.to_string()))?;
+            let target = target(scope, path);
+            let current = FileBroker::new(&mut control)
+                .read(&binding, &target, max_bytes)
+                .map_err(file_error)?;
+            let proposed =
+                edit::read_proposed_file(&content_file, max_bytes).map_err(proposed_error)?;
+            print_json(
+                &edit::preview(&current.bytes, &proposed, current.target).map_err(edit_error)?,
+            )
+        }
         FileCommand::Audit { limit, archive } => {
             let mut broker = FileBroker::new(&mut control);
             let view = match archive {
@@ -158,6 +197,29 @@ fn target(scope: Scope, path: PathBuf) -> FileTarget {
         workspace_id: scope.workspace,
         path,
     }
+}
+
+/// Return stable categories for trusted proposed-content read failures.
+fn proposed_error(error: edit::ProposedReadError) -> CliError {
+    let code = match error {
+        edit::ProposedReadError::TooLarge => "edit_limit",
+        edit::ProposedReadError::ChangedDuringRead
+        | edit::ProposedReadError::NotRegular
+        | edit::ProposedReadError::Unsupported
+        | edit::ProposedReadError::Io => "edit_request",
+    };
+    CliError::new(code, error.to_string())
+}
+
+/// Return stable categories for non-destructive edit-preview failures.
+fn edit_error(error: EditError) -> CliError {
+    let code = match error {
+        EditError::CurrentTooLarge | EditError::ProposedTooLarge | EditError::TooManyLines => {
+            "edit_limit"
+        }
+        EditError::CurrentNotText | EditError::ProposedNotText => "edit_text",
+    };
+    CliError::new(code, error.to_string())
 }
 
 /// Return stable categories while retaining a useful, escaped operator message.

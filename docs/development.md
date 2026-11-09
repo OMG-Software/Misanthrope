@@ -1,14 +1,14 @@
 # Build and run the core prototype
 
-OrangeCode 0.4.0 is a developer CLI prototype with workspace permission
+OrangeCode 0.5.0 is a developer CLI prototype with workspace permission
 settings and bounded native file operations through trusted operator commands.
 It can send a text conversation to an explicitly selected local LM Studio model
-and save that conversation. It can read/list files and exclusively create new
-files/directories in a registered workspace. The core also has a bounded
-turn/tool runtime for library callers and tests, but no CLI command exposes it.
-The CLI cannot replace or delete existing files, run commands, use Git, or
-connect to MCP servers. CLI/provider model tool dispatch and an execution
-sandbox are not implemented.
+and save that conversation. It can read/list files, exclusively create new
+files/directories, and preview a bounded diff against trusted proposed content
+in a registered workspace. The core also has a bounded turn/tool runtime for
+library callers and tests, but no CLI command exposes it. The CLI cannot replace
+or delete existing files, run commands, use Git, or connect to MCP servers.
+CLI/provider model tool dispatch and an execution sandbox are not implemented.
 
 ## Build
 
@@ -81,12 +81,12 @@ folder/session tree remain future work.
 
 ## Workspace files
 
-Scoped file commands (`read`, `list`, `create`, and `mkdir`) require existing
-workspace settings, a configured development root, a registered workspace ID,
-and an explicit session UUID. They do not initialize settings, infer a root, or
-treat a journal's workspace metadata as a grant. `read` and `list` require the
-read preference. `create` and `mkdir` require the write preference. Execute
-remains disabled. The `audit` and `acknowledge` recovery commands require only
+Scoped file commands (`read`, `list`, `create`, `mkdir`, and `diff`) require
+existing workspace settings, a configured development root, a registered
+workspace ID, and an explicit session UUID. They do not initialize settings,
+infer a root, or treat a journal's workspace metadata as a grant. `read`, `list`,
+and `diff` require the read preference. `create` and `mkdir` require the write
+preference. Execute remains disabled. The `audit` and `acknowledge` recovery commands require only
 existing workspace settings. They do not require a configured root, workspace
 registration, or session selection. Chat advertises no file tools.
 
@@ -96,7 +96,8 @@ Windows, `workspace_file_broker_implemented` is `true`, while
 other platforms, all three values are `false`. The CLI does not probe the ambient
 filesystem for capability reporting. A command checks settings, scope, policy,
 and native requirements when it runs. These values do not promise that an
-operation can proceed. `existing_file_replacement` and `workspace_file_tools`
+operation can proceed. `edit_previews` is `true` on Linux and Windows for the
+trusted CLI preview. `existing_file_replacement` and `workspace_file_tools`
 remain `false`.
 
 ```text
@@ -104,6 +105,7 @@ orangecode --data-dir C:\orangecode-data file read WORKSPACE_ID --session SESSIO
 orangecode --data-dir C:\orangecode-data file list WORKSPACE_ID --session SESSION_UUID src --limit 100
 orangecode --data-dir C:\orangecode-data file create WORKSPACE_ID --session SESSION_UUID notes.txt --content "Review this file"
 orangecode --data-dir C:\orangecode-data file mkdir WORKSPACE_ID --session SESSION_UUID notes
+orangecode --data-dir C:\orangecode-data file diff WORKSPACE_ID --session SESSION_UUID src\main.rs --content-file C:\drafts\main.rs
 orangecode --data-dir C:\orangecode-data file audit --limit 20
 orangecode --data-dir C:\orangecode-data file acknowledge OPERATION_UUID
 orangecode --data-dir C:\orangecode-data file rotate --archive-dir C:\private-audit-exports
@@ -111,8 +113,16 @@ orangecode --data-dir C:\orangecode-data file audit --archive ARCHIVE_PATH --lim
 ```
 
 Omit the list path to list the selected workspace root. The empty path is not
-valid for read, create, or mkdir. Reads return bounded bytes as untrusted data.
-Creation refuses every existing entry. File-operation intents and outcomes use
+valid for read, create, mkdir, or diff. Reads return bounded bytes as untrusted
+data. Creation refuses every existing entry. `file diff` reads the current file
+through the broker, reads the complete proposed content from the trusted
+operator-selected local file, and returns a bounded single-hunk diff with exact
+digests and sizes. The proposed source is opened read-only without following a
+final link; Windows reparse, device, and non-regular handles are rejected. It
+accepts only UTF-8 content, limits each side to 1 MiB and 65,536 lines, and
+limits the rendered diff to 64 KiB. It never writes to the workspace, creates no
+checkpoint, and is not a replacement operation. The preview is a snapshot of the
+bytes read; a later replacement must recheck the content identity. File-operation intents and outcomes use
 a separate private `file-operations-v1.jsonl`; the `control-v1` settings journal
 and session journal schema remain unchanged. The file journal stores operation
 metadata, not file contents. If a create result is uncertain, inspect the path
@@ -254,6 +264,9 @@ planned. See the complete [session contract](session-storage.md).
 | Journal | 8 MiB and 10,000 events |
 | Tool call arguments in a session event | 4 KiB |
 | Read file size per call | 15 KiB maximum, 8 KiB default |
+| Edit preview content | 1 MiB per side |
+| Edit preview lines | 65,536 per side |
+| Edit preview diff | 64 KiB |
 | Source-labelled tool message | 16 KiB |
 | Tool rounds per turn | 4 |
 | Tool calls per round / per turn | 8 / 16 |
@@ -281,8 +294,8 @@ usage events, streaming chunks, and large-output artifacts remain planned.
 
 | Crate | Responsibility |
 | --- | --- |
-| orangecode-core | Compiled prompt, bounded model adapter, session/control/file-operation journals, workspace policy, broker orchestration, and bounded turn/tool lifecycle |
-| orangecode-cli | Trusted operator input, one-turn text chat orchestration, bounded file commands, JSON output |
+| orangecode-core | Compiled prompt, bounded model adapter, session/control/file-operation journals, workspace policy, broker orchestration, bounded turn/tool lifecycle, and non-destructive edit previews |
+| orangecode-cli | Trusted operator input, one-turn text chat orchestration, bounded file and preview commands, JSON output |
 | orangecode-platform | Native journal validation, directory identity, and handle-relative workspace file operations |
 
 Core and CLI forbid unsafe code. The platform crate denies unsafe code except

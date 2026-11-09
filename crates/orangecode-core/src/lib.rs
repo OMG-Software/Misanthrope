@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 pub mod control;
+pub mod edit;
 mod file_audit;
 pub mod files;
 pub mod policy;
