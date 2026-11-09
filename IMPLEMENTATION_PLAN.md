@@ -2,6 +2,17 @@
 
 Last verified: 2026-11-09.
 
+This guide was added on PR #9's branch. Until that PR merges, `main` does not
+contain this file, so switching branches removes the working-tree copy. Read it
+before switching, or retrieve it with:
+
+```text
+git fetch origin
+git show origin/codex/edit-preview:IMPLEMENTATION_PLAN.md
+```
+
+Once PR #9 merges, the file is part of `main`.
+
 This is a resume guide, not a replacement for the owning contracts in
 [docs](docs/README.md). Read [AGENTS.md](AGENTS.md),
 [docs/coding-rules.md](docs/coding-rules.md),
@@ -50,6 +61,9 @@ Not implemented:
 
 ## Resume steps
 
+0. If this file is not on your current branch yet, read it here or retrieve it
+   with `git show origin/codex/edit-preview:IMPLEMENTATION_PLAN.md` before
+   switching to `main`.
 1. Verify the baseline:
 
    ```text
