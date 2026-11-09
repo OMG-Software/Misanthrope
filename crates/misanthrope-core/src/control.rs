@@ -175,7 +175,40 @@ pub struct ControlStore {
     fail_next_sync: bool,
 }
 
+/// Descriptive directory records. Only the broker's live checks can authorize I/O.
+pub(crate) struct FileScope {
+    pub(crate) root: DirectoryRecord,
+    pub(crate) workspace: DirectoryRecord,
+}
+
 impl ControlStore {
+    /// Get current records after configuration checks; this does not mint a permit.
+    pub(crate) fn file_scope(&self, workspace_id: WorkspaceId) -> Result<FileScope, ControlError> {
+        self.ensure_healthy()?;
+        let workspace = self
+            .workspace(workspace_id)
+            .ok_or(ControlError::UnknownWorkspace)?;
+        self.check_directory_scope(&workspace.directory)?;
+        let root = self
+            .snapshot
+            .development_root
+            .as_ref()
+            .ok_or(ControlError::NoRoot)?;
+        Ok(FileScope {
+            root: root.clone(),
+            workspace: workspace.directory.clone(),
+        })
+    }
+
+    /// Locate private operation audit storage without exposing it as a task target.
+    pub(crate) fn file_audit_context(&self) -> Result<(std::path::PathBuf, Uuid), ControlError> {
+        self.ensure_healthy()?;
+        if !self.data_directory.is_current()? {
+            return Err(ControlError::DirectoryChanged);
+        }
+        Ok((self.data_directory.live_path()?, self.snapshot.store_id))
+    }
+
     /// Open or initialize `<data_directory>/control-v1.jsonl` under an exclusive lock.
     /// Existing empty, malformed, or incomplete files cause an error without repair.
     pub fn open(data_directory: &Path) -> Result<Self, ControlError> {

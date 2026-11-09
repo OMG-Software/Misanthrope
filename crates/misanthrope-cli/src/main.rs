@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 mod control_cli;
+mod file_cli;
 
 use clap::{Args, Parser, Subcommand};
 use directories::ProjectDirs;
@@ -49,6 +50,11 @@ enum Command {
     Workspace {
         #[command(subcommand)]
         action: control_cli::WorkspaceCommand,
+    },
+    /// Perform bounded, native file operations through trusted operator input.
+    File {
+        #[command(subcommand)]
+        action: file_cli::FileCommand,
     },
     /// Send one turn to an explicitly selected local LM Studio model.
     Chat(ChatArgs),
@@ -192,6 +198,9 @@ fn run(cli: Cli) -> Result<(), CliError> {
             "permission_policy": true,
             "permission_audit": true,
             "policy_decision": "configuration_only",
+            "workspace_file_broker": true,
+            "exclusive_file_creation": true,
+            "existing_file_replacement": false,
             "workspace_file_tools": false,
             "process_execution": false,
             "mcp": false,
@@ -238,6 +247,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
             let data_root = data_root(cli.data_dir)?;
             control_cli::run(action, &data_root)
         }
+        Command::File { action } => file_cli::run(action, &data_root(cli.data_dir)?),
         Command::Chat(args) => chat(cli.data_dir, args),
     }
 }

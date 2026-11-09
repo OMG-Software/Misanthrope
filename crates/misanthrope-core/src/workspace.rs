@@ -41,6 +41,24 @@ pub(crate) struct DirectoryRecord {
 }
 
 impl DirectoryRecord {
+    /// Compare the identity of the directory actually opened by the native broker.
+    pub(crate) fn native_identity(&self) -> misanthrope_platform::DirectoryIdentity {
+        misanthrope_platform::DirectoryIdentity {
+            volume: self.volume,
+            file_id: self.file_id,
+        }
+    }
+
+    /// Compare native creation time without relying on mutable child timestamps.
+    pub(crate) fn matches_created(&self, created: SystemTime) -> bool {
+        encode_system_time(created)
+            == (
+                self.creation_pre_epoch,
+                self.creation_seconds,
+                self.creation_nanos,
+            )
+    }
+
     /// Capture canonical path, live directory identity, and creation time.
     ///
     /// This is for a trusted configuration selection. The result is not an

@@ -12,6 +12,44 @@ use uuid::Uuid;
 const MAX_FILE_BYTES: usize = 1024 * 1024;
 const FILE_AUDIT_NAME: &str = "file-operations-v1.jsonl";
 
+/// Unpaired UTF-16 units must survive native I/O, audit replay and listing metadata.
+#[cfg(windows)]
+#[test]
+fn windows_unpaired_surrogate_names_survive_creation_read_and_listing() {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+    let mut fixture = Fixture::new();
+    let binding = fixture.binding();
+    let relative = PathBuf::from(OsString::from_wide(&[102, 0xd800, 46, 116, 120, 116]));
+    let target = target(fixture.session_id, fixture.workspace_id, relative.clone());
+    let mut broker = FileBroker::new(&mut fixture.control);
+    let created = broker
+        .create_file(&binding, &target, b"native\0bytes")
+        .expect("native create");
+    assert_eq!(path_from_native(&created.target), relative);
+    assert_eq!(
+        broker
+            .read(&binding, &target, 64)
+            .expect("native read")
+            .bytes,
+        b"native\0bytes"
+    );
+    let listing_target = FileTarget {
+        session_id: fixture.session_id,
+        workspace_id: fixture.workspace_id,
+        path: PathBuf::new(),
+    };
+    let listing = broker
+        .list(&binding, &listing_target, 16)
+        .expect("native listing");
+    assert!(
+        listing
+            .entries
+            .iter()
+            .any(|entry| path_from_native(&entry.name) == relative)
+    );
+}
+
 struct Fixture {
     temporary: TempDir,
     data: PathBuf,
@@ -656,7 +694,7 @@ fn non_unicode_names_round_trip_through_reads_and_listings() {
     assert_eq!(read.bytes, b"native bytes");
     assert_eq!(path_from_native(&read.target), relative);
     assert!(listing.entries.iter().any(|entry| {
-        path_from_native(&entry.name) == PathBuf::from(name.clone()) && entry.kind == "file"
+        path_from_native(&entry.name).as_os_str() == name.as_os_str() && entry.kind == "file"
     }));
 }
 

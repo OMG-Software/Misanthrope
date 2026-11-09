@@ -434,6 +434,16 @@ fn open_relative_inner(
     share_access: u32,
     attributes: u32,
 ) -> Result<File, RelativeOpenFailure> {
+    // Every returned handle must preserve the synchronous buffer-lifetime contract.
+    if options & FILE_SYNCHRONOUS_IO_NONALERT == 0
+        || access & windows_sys::Win32::Storage::FileSystem::SYNCHRONIZE == 0
+        || ![FILE_OPEN, FILE_CREATE].contains(&disposition)
+    {
+        return Err(RelativeOpenFailure {
+            error: invalid_input("native opens require synchronous non-destructive options"),
+            may_have_created: false,
+        });
+    }
     let units = encode_component(name).map_err(|error| RelativeOpenFailure {
         error,
         may_have_created: false,

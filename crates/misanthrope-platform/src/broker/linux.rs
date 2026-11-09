@@ -108,7 +108,10 @@ impl NativeWorkspace {
             workspace_resolve(),
         )?;
         let initial = regular_single_link_snapshot(&object)?;
-        if initial.length > max_bytes as u64 {
+        if initial.length
+            > u64::try_from(max_bytes)
+                .map_err(|_| invalid_input("read limit cannot be represented"))?
+        {
             return Err(invalid_data("file exceeds the read limit"));
         }
 
@@ -214,7 +217,7 @@ impl NativeWorkspace {
             file_mode(),
             workspace_resolve(),
         )
-        .map_err(not_created)?;
+        .map_err(create_attempt_error)?;
         let mut file = descriptor;
 
         if let Err(error) = file.write_all(data) {
@@ -240,7 +243,7 @@ impl NativeWorkspace {
             .parent_and_name(&workspace, path)
             .map_err(not_created)?;
         if let Err(error) = mkdirat(&parent, &name, directory_mode()) {
-            return Err(not_created(error.into()));
+            return Err(create_attempt_error(error.into()));
         }
 
         let created = open_confined(
@@ -322,6 +325,7 @@ fn open_root(root: &Path) -> io::Result<File> {
     )
 }
 
+/// Retry only read-only resolution; a mutating create attempt is never repeated.
 fn open_confined(
     directory: &impl AsFd,
     path: &Path,
@@ -332,7 +336,13 @@ fn open_confined(
     for attempt in 0..OPEN_RETRIES {
         match openat2(directory, path, flags, mode, resolve) {
             Ok(descriptor) => return Ok(File::from(descriptor)),
-            Err(error) if is_errno(error, Errno::AGAIN) && attempt + 1 < OPEN_RETRIES => continue,
+            Err(error)
+                if is_errno(error, Errno::AGAIN)
+                    && !flags.contains(OFlags::CREATE)
+                    && attempt + 1 < OPEN_RETRIES =>
+            {
+                continue;
+            }
             Err(error) if is_errno(error, Errno::NOSYS) => {
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,
@@ -485,6 +495,15 @@ fn not_created(error: io::Error) -> CreateError {
     }
 }
 
+/// A failed mutating syscall can leave an entry; only collision proves no creation.
+fn create_attempt_error(error: io::Error) -> CreateError {
+    if error.kind() == io::ErrorKind::AlreadyExists {
+        not_created(error)
+    } else {
+        may_have_created(error)
+    }
+}
+
 fn may_have_created(error: io::Error) -> CreateError {
     CreateError {
         error,
@@ -517,6 +536,25 @@ mod tests {
         )
         .expect("open native workspace");
         (temporary, native)
+    }
+
+    /// Exercise a real mount crossing without requiring mount privileges.
+    #[test]
+    fn confined_resolution_refuses_the_procfs_mount_boundary() {
+        assert!(
+            Path::new("/proc/self/fd").is_dir(),
+            "procfs is required by the broker"
+        );
+        let root = File::open("/").expect("root directory handle");
+        let error = open_confined(
+            &root,
+            Path::new("proc"),
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+            workspace_resolve(),
+        )
+        .expect_err("the procfs mount must not be traversed");
+        assert_eq!(error.raw_os_error(), Some(Errno::XDEV.raw_os_error()));
     }
 
     #[test]

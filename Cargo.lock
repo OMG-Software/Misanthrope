@@ -586,7 +586,7 @@ dependencies = [
 
 [[package]]
 name = "misanthrope-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "clap",
  "directories",
@@ -599,7 +599,7 @@ dependencies = [
 
 [[package]]
 name = "misanthrope-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "libc",
  "misanthrope-platform",
@@ -615,8 +615,9 @@ dependencies = [
 
 [[package]]
 name = "misanthrope-platform"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
+ "rustix",
  "tempfile",
  "windows-sys",
 ]

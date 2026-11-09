@@ -320,11 +320,11 @@ impl FileAudit {
             .strip_suffix(b"\n")
             .ok_or(FileAuditError::Invalid("incomplete audit log"))?;
         for line in complete.split(|byte| *byte == b'\n') {
-            let line_ending_bytes = if line.ends_with(b"\r") { 2 } else { 1 };
+            // The split removes LF only; any CR is already included in line.len().
             if line.is_empty()
                 || line
                     .len()
-                    .checked_add(line_ending_bytes)
+                    .checked_add(1)
                     .is_none_or(|length| length > MAX_EVENT_BYTES)
                 || audit.entries.len() >= MAX_EVENTS
             {
@@ -427,18 +427,23 @@ impl FileAudit {
             .checked_add(1)
             .ok_or(FileAuditError::LimitReached)?;
         let mut total = 0usize;
-        for action in [
+        for (index, action) in [
             FileAuditAction::OperationFinished {
                 operation_id,
                 outcome: FileOutcome::Uncertain,
             },
             FileAuditAction::OperationAcknowledged { operation_id },
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let entry = AuditEntry {
                 schema_version: SCHEMA_VERSION,
                 store_id: self.store_id,
                 event_id: Uuid::new_v4(),
-                sequence,
+                sequence: sequence
+                    .checked_add(u64::try_from(index).map_err(|_| FileAuditError::LimitReached)?)
+                    .ok_or(FileAuditError::LimitReached)?,
                 // Use the longest valid RFC 3339 precision for the reserve
                 // calculation, independent of the start event's clock value.
                 timestamp: "9999-12-31T23:59:59.999999999Z".to_owned(),
@@ -664,6 +669,29 @@ mod tests {
 
     fn valid_target() -> NativePath {
         native_target(Path::new("notes.txt"))
+    }
+
+    /// Count the CR byte once when accepting an event exactly at the encoded cap.
+    #[test]
+    fn crlf_event_at_the_encoded_byte_limit_reopens_without_changes() {
+        let temporary = tempfile::tempdir().expect("private temporary directory");
+        let store_id = Uuid::new_v4();
+        let audit = FileAudit::open(temporary.path(), store_id).expect("audit header");
+        let entry = audit
+            .entries(1)
+            .expect("header entry")
+            .pop()
+            .expect("header exists");
+        drop(audit);
+        let mut encoded = serde_json::to_vec(&entry).expect("header JSON");
+        encoded.resize(MAX_EVENT_BYTES - 2, b' ');
+        encoded.extend_from_slice(b"\r\n");
+        let path = temporary.path().join(FILE_NAME);
+        fs::write(&path, &encoded).expect("maximum CRLF fixture");
+        let reopened = FileAudit::open(temporary.path(), store_id).expect("bounded CRLF header");
+        assert_eq!(reopened.entries(100).expect("audit").len(), 1);
+        drop(reopened);
+        assert_eq!(fs::read(path).expect("preserved fixture"), encoded);
     }
 
     #[test]

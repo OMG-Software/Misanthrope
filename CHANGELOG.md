@@ -30,6 +30,15 @@ Changes are recorded here before a release version is assigned.
 
 ### Added
 
+- Rust 0.3.0 native workspace file broker with bounded reads/listings, exclusive
+  new-file/directory creation, current binding checks, and handle-relative
+  Linux/Windows enforcement. Existing entries cannot be replaced or deleted.
+- Separate bounded operation intent/outcome journal, read withholding on audit
+  failure, explicit uncertainty acknowledgement, and no action replay.
+- Trusted file CLI commands, native traversal/link/mount and collision tests,
+  audit failure/recovery coverage, and an ADR for native file-access boundaries.
+  Model tool dispatch and command execution remain disabled.
+
 - Rust 0.2.0 workspace settings core: explicit development root, persistent
   directory-backed workspace IDs, permission preferences, revision checks, and
   short-lived process-local session bindings. No file or command tools enabled.
