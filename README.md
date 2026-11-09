@@ -3,16 +3,18 @@
 **A Rust coding-assistant prototype for Windows and Linux.**
 
 Misanthrope aims to connect language models to controlled development tools.
-The current code is an early Rust core and command-line prototype. A desktop
-interface, workspace tools, Git workflows, and an execution sandbox remain
-planned.
+The current code is an early Rust core and command-line prototype. A bounded
+native workspace file broker is available through trusted CLI commands. Model
+tool dispatch, a desktop interface, Git workflows, and an execution sandbox
+remain planned.
 
 > **Status: early prototype, not release-ready.** The Rust CLI can inspect the
 > compiled prompt, report implemented capabilities, manage JSONL sessions and
-> workspace permission preferences, and
-> send one non-streaming chat request to an explicitly selected local LM Studio
-> model. It cannot read or edit workspace files or run commands. No execution
-> sandbox is implemented.
+> workspace permission preferences, perform bounded workspace reads/listings,
+> create new files/directories through the trusted CLI, and send one
+> non-streaming chat request to an explicitly selected local LM Studio model.
+> Chat still has no file tools. Existing files cannot be replaced or deleted,
+> commands cannot be run, and no execution sandbox is implemented.
 
 ## Goals
 
@@ -35,6 +37,9 @@ and `misanthrope-platform`. The CLI command is `misanthrope`. It provides:
 - `workspace`: configure the development root, register stable workspace IDs,
   change read/write/execute/task-network preferences, and inspect audited policy
   checks. These checks describe configuration only; execution stays disabled.
+- `file`: use bounded native reads, listings, exclusive new-file creation, and
+  single-directory creation through explicit workspace/session CLI selections.
+  These trusted operator commands do not provide model tool definitions.
 - `session`: create, inspect, archive, restore, and explicitly interrupt an
   abandoned turn in a JSONL journal.
 - `chat`: send one user turn to an already-running LM Studio server at a literal
@@ -48,12 +53,15 @@ refuses to chat with an archived session or one with an incomplete prior turn;
 it does not replay recorded actions. An abandoned turn must be inspected and
 marked interrupted before chat can continue.
 
-The platform crate checks opened journal handles and captures native directory
-identity for workspace registration. These checks do not protect parent paths
-or contain a process. Workspace settings and audit records are implemented;
-filesystem enforcement, process/network confinement, Git, MCP, and memories
-remain planned. See the [workspace settings contract](docs/workspace-permissions.md). See the
-[development guide](docs/development.md) for setup and command details.
+The platform crate checks opened journal handles, captures native directory
+identity for workspace registration, and implements handle-relative file
+operations. The broker applies the current registered workspace checks, but it
+does not isolate hostile same-user processes or contain a process. Existing
+file replacement, deletion, and model-dispatched file tools remain unavailable.
+Process/network confinement, Git, MCP, and memories remain planned. See the
+[workspace settings contract](docs/workspace-permissions.md), the
+[workspace file-access guide](docs/file-access.md), and the [development
+guide](docs/development.md) for limits and command details.
 
 The current CLI has no operating-system credential service. Its optional local
 server token input remains prototype wiring; it is not a release credential
@@ -100,8 +108,9 @@ check the server's configuration before sending sensitive text.
   host development data. Sessions will normally have read and write access to
   their active workspace within that root. Other host folders will be denied
   by default.
-- **Sandboxed tools:** File operations, terminals, and background tasks governed
-  by the same permission policy and enforced with operating-system controls.
+- **Sandboxed tools:** Extend the current bounded trusted-CLI file broker with
+  model-authorized file tools, terminals, and background tasks governed by the
+  same permission policy and enforced with operating-system controls.
 - **Git workflows:** Status, diffs, staging, commits, branches, worktrees, fetch,
   pull, and push, with controlled remote access and credential handling.
 - **Development panels:** Terminal tabs, background task status and logs, and
@@ -223,7 +232,7 @@ cannot grant permissions. See [context management](docs/context-management.md) a
 5. Expand provider adapters and add streaming and core-authorized tool workflows.
 6. Add visible instructions, token accounting, compaction, safe caching, skills,
    and project/global memories with boundary tests and efficiency measurements.
-7. Add scoped file tools, sandboxed terminals, background tasks, and MCP clients.
+7. Add model-scoped file tools, sandboxed terminals, background tasks, and MCP clients.
 8. Add mediated Git workflows, diff review, checkpoints, and crash recovery.
 9. Verify the full workflow on both platforms and prepare installers and
    documentation.

@@ -72,6 +72,14 @@ checks always deny execution and do not replace per-target authorization. See
 - Make recovery preserve unrelated changes. A checkpoint must not restore over
   later user work without detecting it.
 
+The v0.3.0 native file broker currently exposes bounded read, list,
+exclusive-create, and single-directory creation through trusted CLI commands.
+Its checks do not isolate hostile same-user processes or provide process
+containment. Model file tools remain disabled; capability output keeps
+`workspace_file_tools` false. Do not treat journal metadata or enabled
+preferences as authority. Follow the [workspace file-access contract](file-access.md)
+for current native operations, failure states, and explicit recovery.
+
 ## Process and sandbox boundary
 
 - Apply policy and operating-system restrictions before untrusted code starts.

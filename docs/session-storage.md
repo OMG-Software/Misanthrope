@@ -2,10 +2,12 @@
 
 This document separates the current JSONL session prototype from the complete
 release contract. Conversation and session refer to the same saved coding
-interaction. The prototype stores a bounded transcript and archive state. It
-does not provide a session UI, search index, task execution, or recovery UI.
+interaction. The prototype stores a bounded transcript and archive state. A
+separate journal records metadata for bounded file-broker operations. The
+prototype does not provide a session UI, search index, task execution, or
+recovery UI.
 
-## Implemented prototype (v0.2.0)
+## Implemented prototype (v0.3.0)
 
 The Rust core creates and opens one UTF-8 JSONL journal per session. The CLI
 uses the operating system's per-user local application data location by default;
@@ -107,6 +109,23 @@ Post-open chat errors include this locator under error.session.
 
 These are implemented prototype facts, not a claim that the full release
 contract below is complete.
+
+## File-operation journal
+
+The workspace file broker records operation intent and outcome in a separate
+`file-operations-v1.jsonl` file under the private application data directory.
+It does not change the session JSONL event schema or the `control-v1.jsonl`
+settings journal. Existing text-only sessions remain readable. A session journal's
+workspace path or ID never creates a current binding or grants file access.
+
+The file-operation log stores operation metadata, including native relative
+paths, but never file contents. Treat path metadata as private user data. A
+read result is returned only after its outcome is synced. A create that may have
+changed the filesystem but lacks a durable outcome remains unresolved. The
+operator must inspect the file and audit record, then explicitly acknowledge
+inspection. Acknowledgement does not retry, repair, or remove the file. See the
+[workspace file-access contract](file-access.md) for native operations and
+recovery limits.
 
 ## Location and file naming
 

@@ -1,10 +1,12 @@
 # Build and run the core prototype
 
-Misanthrope 0.2.0 is a developer CLI prototype with workspace permission settings.
-It can send a text conversation
-to an explicitly selected local LM Studio model and save that conversation.
-It is not yet a coding agent: it cannot read project contents, edit files, run
-commands, use Git, or connect to MCP servers. No execution sandbox exists yet.
+Misanthrope 0.3.0 is a developer CLI prototype with workspace permission
+settings and bounded native file operations through trusted operator commands.
+It can send a text conversation to an explicitly selected local LM Studio model
+and save that conversation. It can read/list files and exclusively create new
+files/directories in a registered workspace. It cannot replace or delete
+existing files, run commands, use Git, or connect to MCP servers. Model tool
+dispatch and an execution sandbox are not implemented.
 
 ## Build
 
@@ -55,6 +57,36 @@ With no configured root, the earlier text-only behavior remains available and
 sets no implicit root. Registrations store settings and audit history; they do
 not create project folders or grant access. A broader project registry and the
 folder/session tree remain future work.
+
+## Workspace files
+
+File commands require existing workspace settings, a configured development
+root, a registered workspace ID, and an explicit session UUID. They do not
+initialize settings, infer a root, or treat a journal's workspace metadata as a
+grant. `read` and `list` require the read preference. `create` and `mkdir`
+require the write preference. Execute remains disabled. The command is a trusted
+operator interface; chat advertises no file tools. Capability output reports
+`workspace_file_broker: true`, `exclusive_file_creation: true`,
+`existing_file_replacement: false`, and `workspace_file_tools: false`.
+
+```text
+misanthrope --data-dir C:\misanthrope-data file read WORKSPACE_ID --session SESSION_UUID src\main.rs --max-bytes 65536
+misanthrope --data-dir C:\misanthrope-data file list WORKSPACE_ID --session SESSION_UUID src --limit 100
+misanthrope --data-dir C:\misanthrope-data file create WORKSPACE_ID --session SESSION_UUID notes.txt --content "Review this file"
+misanthrope --data-dir C:\misanthrope-data file mkdir WORKSPACE_ID --session SESSION_UUID notes
+misanthrope --data-dir C:\misanthrope-data file audit --limit 20
+misanthrope --data-dir C:\misanthrope-data file acknowledge OPERATION_UUID
+```
+
+Omit the list path to list the selected workspace root. The empty path is not
+valid for read, create, or mkdir. Reads return bounded bytes as untrusted data.
+Creation refuses every existing entry. File-operation intents and outcomes use
+a separate private `file-operations-v1.jsonl`; the `control-v1` settings journal
+and session journal schema remain unchanged. The file journal stores operation
+metadata, not file contents. If a create result is uncertain, inspect the path
+and audit record, then acknowledge the operation. Acknowledgement records
+inspection only. It does not retry, repair, or delete the entry. See the
+[workspace file-access contract](file-access.md) for bounds and native failures.
 
 ## Local chat
 
@@ -170,24 +202,37 @@ usage events, streaming chunks, and large-output artifacts remain planned.
 
 | Crate | Responsibility |
 | --- | --- |
-| misanthrope-core | Compiled prompt, bounded model adapter, session/control journals, workspace settings and policy |
-| misanthrope-cli | Trusted operator input, one-turn orchestration, JSON output |
-| misanthrope-platform | Native journal-handle validation and directory identity |
+| misanthrope-core | Compiled prompt, bounded model adapter, session/control/file-operation journals, workspace policy and broker orchestration |
+| misanthrope-cli | Trusted operator input, one-turn orchestration, bounded file commands, JSON output |
+| misanthrope-platform | Native journal validation, directory identity, and handle-relative workspace file operations |
 
 Core and CLI forbid unsafe code. The platform crate denies unsafe code except
-inside its reviewed Windows handle wrappers. Directory registration uses
-128-bit native file IDs and requires directory creation-time metadata.
+inside its reviewed Windows handle wrappers for directory identity and native
+file operations. Linux uses Rustix's safe `openat2` API. Directory registration
+uses native file IDs and requires directory creation-time metadata. The broker
+reopens the registered root and workspace, checks their identities and creation
+times, then accesses relative names through retained handles. These live checks
+apply to broker calls; directory identity recording alone remains configuration
+metadata.
 Rust's stable metadata API does not
 provide the needed Windows hard-link count. The wrapper borrows the existing
 handle and checks GetFileInformationByHandle; it never takes ownership of a raw
-handle. Unix uses standard file metadata. These checks reject known unsafe
-journal objects; they do not establish a development-root access broker or an
-execution boundary. Existing parent directories must remain trusted. Windows
-ACL hardening and power-loss durability qualification are still required.
+handle. Linux broker traversal requires kernel 5.6 or later for `openat2` and
+available `/proc/self/fd` support. Required beneath-root, no-symlink,
+no-magic-link, and no-mount-crossing resolution has no weaker fallback.
+Unsupported APIs fail closed. Windows uses native handle-relative and
+reparse-point controls. Existing
+parent directories must remain trusted. Windows ACL hardening, local filesystem
+qualification, and power-loss durability are still required. The broker is not
+whole-user or process containment.
 
-Session workspace IDs are descriptive metadata. They grant no access. The
-control journal persists workspace registrations, settings, revisions, and
-audit events. A broader project registry and the folder/session tree remain
+Session workspace IDs in session journals are descriptive metadata. They grant
+no access. Each file command supplies the workspace ID and session UUID to the
+loaded control store; the broker checks the current binding, policy revision,
+registration, and native directory identity. The control journal persists
+workspace registrations, settings, revisions, and policy audit events. File
+operations use a separate journal, so they do not change the `control-v1.jsonl`
+or session JSONL schemas. A broader project registry and the folder/session tree remain
 future work. The CLI's explicit journal path is a trusted operator interface;
 it must not become a raw-path command in the future web interface.
 
@@ -200,13 +245,14 @@ Direct dependencies have specific purposes:
 | serde / serde_json | Typed JSON serialization and bounded protocol parsing; derive macros run during compilation |
 | uuid | Random UUIDv4 identifiers and typed JSON identifiers; OS-backed randomness through its dependency graph |
 | libc (Unix only) | Locked at 0.2.191; supplies `O_DIRECTORY` and `O_NOFOLLOW` constants to safe `std::fs::OpenOptions` flag configuration, avoiding ABI-specific numeric flags without adding unsafe core code |
+| rustix (Linux only) | Locked at 1.1.6 with the `fs` feature; supplies safe Rust wrappers for `openat2`, directory-relative opens, metadata, enumeration, and sync without adding unsafe Linux code |
 | time | UTC date layout and RFC 3339 formatting/parsing |
 | sha2 | Standard SHA-256 prompt digest; no custom cryptography |
 | thiserror | Typed component errors; derive macro runs during compilation |
 | reqwest | Blocking HTTP client; default features disabled, no TLS backend or hosted execution used in this loopback-only increment |
 | clap | CLI parsing and help; derive macro runs during compilation |
 | directories | Platform application-data location selection |
-| windows-sys | Maintained Windows API bindings, Windows-only Foundation and Storage/FileSystem features |
+| windows-sys | Maintained Windows API bindings behind narrow reviewed wrappers for Win32/WDK Foundation and Storage/FileSystem, Security, and I/O handles |
 | tempfile | Private disposable test data; development dependency only |
 
 The selected direct crates declare MIT and/or Apache-2.0 licensing and support
@@ -225,6 +271,7 @@ unit/integration tests, and separate documentation tests. Tests use private data
 and loopback fixtures. They do not call a live model. Live compatibility checks
 are explicit, bounded checks of a particular server/model/auth profile.
 
-Do not infer process containment, permission revocation, Git safety, credential
-storage, or full coding-agent support from these tests. Those controls and their
-native-platform acceptance tests are the next implementation boundaries.
+Do not infer whole-user/process containment, Git safety, credential storage,
+release filesystem support, or full coding-agent support from these tests. The
+broker supports bounded file operations only through trusted CLI input; model
+dispatch and process containment remain separate implementation boundaries.
