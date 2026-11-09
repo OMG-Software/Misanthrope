@@ -41,6 +41,10 @@ Changes are recorded here before a release version is assigned.
 
 ### Added
 
+- User-provided pull-request-review skill source package, preserved instructions,
+  provenance/digest catalog, and documentation links. Runtime skill loading and
+  enablement remain planned.
+
 - OrangeCode application namespace across Rust crates, CLI, token environment
   variable, default data directory, session filenames, repository links, and
   Sonar project configuration. Existing private data is not moved automatically.

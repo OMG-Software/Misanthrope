@@ -4,6 +4,14 @@ This document defines the planned skills manager. No skill loader or settings
 page is implemented yet. Skills are reusable task instructions and resources.
 They are not permission grants or trusted application extensions.
 
+## Bundled source packages
+
+The [source catalog](../skills/README.md) includes the user-provided
+[pull-request-review package](../skills/pull-request-review/SKILL.md).
+Its instructions are preserved as package content. It is not registered,
+enabled, or loaded by OrangeCode. The catalog records provenance and a content
+digest; it does not replace the future core-owned registry.
+
 ## Settings page and scope
 
 Provide Add, Remove, Enable, and Disable controls. Each entry shows its name,
