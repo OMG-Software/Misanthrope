@@ -46,6 +46,16 @@ Changes are recorded here before a release version is assigned.
 
 ### Added
 
+- Rust 0.6.0 read-only replacement-record validation for library callers:
+  strict initialization/ledger replay, bounded records and descriptors, native
+  path validation, exact manifest references, ordered lifecycle transitions,
+  unresolved-state retention, and acknowledgement without replay or success
+  synthesis. Add public-API boundary tests and an executable documentation example.
+  No filesystem writer, checkpoint store, CLI apply, or broker-admission change
+  is enabled. ADR-0019 records the remaining implementation increments.
+
+- Record merged PR #10 as acceptance of ADR-0018 and update the resume baseline.
+
 - Phase A1 replacement/checkpoint/recovery proposal and ADR-0018. Define exact
   preconditions, private same-filesystem staging, bounded checkpoint retention,
   versioned audit, uncertain-outcome handling, and native backend/test gates.

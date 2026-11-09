@@ -1,6 +1,6 @@
 # 0018: Define checkpointed replacement before enabling overwrites
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-09
 
 ## Context
@@ -20,10 +20,10 @@ outcomes therefore need explicit decisions before runtime work.
 
 ## Decision
 
-Propose the [replacement contract](../file-access.md#proposed-replacement-contract)
-as Phase A1. Keep this record Proposed until contract review accepts it.
-Phase A2 implements the accepted contract; this change adds no runtime API,
-CLI apply command, checkpoint storage, or model write tool.
+Accept the [replacement contract](../file-access.md#replacement-contract)
+through [PR #10](https://github.com/OMG-Software/OrangeCode/pull/10), merged on
+2026-11-09. Phase A2 implements this contract in bounded increments. Acceptance
+does not establish that native storage, replacement, or recovery is available.
 
 The first replacement interface is trusted CLI only. Require fresh read/write
 authority, bounded exact expected bytes, native identity checks, and a durable
@@ -84,9 +84,9 @@ requirements before Phase A2 enables replacement.
 ## Consequences
 
 The next runtime increment has a reviewable contract and explicit native test
-gates. Replacement remains disabled while this proposal is reviewed. Phase A
-is incomplete until implementation and native verification finish. No version
-bump is needed for this documentation-only change.
+gates. Replacement remains disabled until implementation and native verification
+finish. Phase A remains incomplete. The original Phase A1 change was
+documentation-only and required no version bump.
 
 Availability is deliberately restricted. Application storage and the target
 must share a filesystem. Full storage stops replacements. Independent writes
@@ -97,7 +97,7 @@ limits must be visible to the operator; tests cannot remove them.
 ## References
 
 - [Implementation plan](../../IMPLEMENTATION_PLAN.md)
-- [Workspace file access](../file-access.md#proposed-replacement-contract)
+- [Workspace file access](../file-access.md#replacement-contract)
 - [Security rules](../security-coding-rules.md)
 - [Platform support](../platform-support.md)
 - [ADR-0013](0013-enforce-file-access-with-native-handles-and-exclusive-creation.md)

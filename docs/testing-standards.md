@@ -232,10 +232,15 @@ commands after a development-root change.
 
 ## Replacement acceptance gates (planned)
 
-Phase A1 changes the contract only. No replacement tests or runtime exist yet.
-Before enabling Phase A2, implement the
-[proposed replacement contract](file-access.md#proposed-replacement-contract)
-and run its acceptance cases on native Windows and Linux. Use private,
+Phase A2a has read-only initialization/ledger record tests through the public
+core API. They cover complete/incomplete histories, ordering, acknowledgements,
+scope/UUID/UTC validation, strict JSON, descriptors, raw native paths, and exact
+byte/count bounds. A separate executable doc example checks the initialization
+API. They do not test native checkpoint persistence or workspace replacement.
+
+Before enabling native replacement, implement the
+[accepted replacement contract](file-access.md#replacement-contract)
+and run the remaining acceptance cases on native Windows and Linux. Use private,
 disposable files. Use barriers or injected failures at the actual stage/check/
 commit/sync boundaries; sleeps and pre-operation path swaps are insufficient.
 

@@ -11,6 +11,8 @@ preferences never authorize execution. The prototype is not a desktop app and
 does not expose model-dispatched file tools through the CLI or a real provider
 adapter, process execution, or an execution sandbox.
 The bundled web interface and most planned features are not implemented.
+The core can validate replacement-record bytes without filesystem I/O. This
+does not implement checkpoint storage, replacement, or a recovery command.
 Repository review and analysis are defined in
 [docs/repository-checks.md](docs/repository-checks.md).
 Do not describe planned features or security controls as implemented. Do not

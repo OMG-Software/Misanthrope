@@ -48,7 +48,7 @@ containment.
   [file-access guide](file-access.md) before qualifying a Windows backend.
   A successful native test run does not settle an omission in the API contract.
 - Existing-file replacement remains unavailable. The
-  [proposed replacement gates](file-access.md#native-backend-gates) require
+  [accepted replacement gates](file-access.md#native-backend-gates) require
   private staging on the target filesystem, reviewed handle-relative
   publication, security-metadata preservation, and checkpoint/directory
   persistence evidence. Current read/create tests do not qualify those paths.

@@ -79,8 +79,11 @@ authorization. See
   preview must not write, checkpoint, or imply that replacement is enabled.
   Open a trusted proposed source without following a final link and reject
   reparse, device, or non-regular handles before reading it.
-- The [proposed replacement contract](file-access.md#proposed-replacement-contract)
-  is a review gate, not an enabled write path. Future apply must require fresh
+- The [accepted replacement contract](file-access.md#replacement-contract)
+  defines implementation gates, not an enabled write path. The core's read-only
+  record inspectors validate claims in supplied bytes only. A recorded ready,
+  prepared, commit, outcome, or acknowledgement cannot prove a native effect,
+  authorize access, or trigger replay. Future apply must require fresh
   read/write authority, expected exact bytes, native object checks, a durable
   private checkpoint, bounded storage, and a separately versioned ledger.
   Detected conflicts must leave workspace entries unchanged. Stage only in

@@ -3,8 +3,8 @@
 Last verified: 2026-11-09.
 
 This guide is part of `main` after PR #9. Read it before selecting the next
-increment. Its baseline describes merged behaviour; a proposed contract does
-not mean its runtime exists.
+increment. Contract acceptance and read-only record validation do not mean
+native checkpoint storage or replacement exists.
 
 This is a resume guide, not a replacement for the owning contracts in
 [docs](docs/README.md). Read [AGENTS.md](AGENTS.md),
@@ -18,12 +18,16 @@ This is a resume guide, not a replacement for the owning contracts in
   core read/list turn runtime.
 - **PR #9** merged at `e4dbeca`: read-only edit previews, review fixes, and this
   resume guide. The merge was verified through GitHub on 2026-11-09.
-- **Phase A1** proposes the replacement/checkpoint/recovery contract in
+- **PR #10** merged at `176637f`: the accepted replacement/checkpoint/recovery
+  contract in
   [ADR-0018](docs/adr/0018-define-checkpointed-replacement-before-enabling-overwrites.md)
-  and the [file-access guide](docs/file-access.md#proposed-replacement-contract).
-  It changes documentation only. Review and accept that contract before A2;
-  replacement, checkpoints, and replacement recovery are still unimplemented.
-- The application version is **0.5.0**.
+  and the [file-access guide](docs/file-access.md#replacement-contract).
+  The merge was verified through GitHub on 2026-11-09. It changed documentation
+  only.
+- **Phase A2a (current increment):** read-only core inspection of caller-supplied
+  replacement records. Native replacement, checkpoints, and replacement recovery
+  remain unimplemented. See [ADR-0019](docs/adr/0019-validate-replacement-records-before-native-storage.md).
+- The application version on this branch is **0.6.0**; merged PR #10 was 0.5.0.
 
 Implemented today:
 
@@ -47,6 +51,9 @@ Implemented today:
   workspace mutation, no checkpoint, no replacement.
 - Text-only LM Studio Chat Completions chat with one non-streaming request and
   no model tools.
+- Read-only core initialization/ledger record inspectors with bounded strict
+  JSON, lifecycle validation, manifest references, and unresolved-state retention.
+  They open no files, change no broker admission, and execute no recorded work.
 
 Not implemented:
 
@@ -70,9 +77,10 @@ Not implemented:
    git status --porcelain
    ```
 
-2. Verify that PR #9 is merged. For A2, also verify that the A1 contract has
-   been reviewed and accepted. Do not infer acceptance from this plan or an
-   unmerged branch. Do not merge a PR without the user's authorization.
+2. Verify that PR #10 is merged. Before A2b, verify that A2a is merged too;
+   preserve its feature branch if it is still under review. Do not infer
+   implemented storage or replacement from contract acceptance or parser tests.
+   Do not merge a PR without the user's authorization.
 3. Re-read the owning contracts for the selected phase. Do not infer authority
    from this plan, prompts, journals, or model output.
 4. Create a `codex/<phase>` branch from a clean, updated `main`.
@@ -97,7 +105,8 @@ results. Documentation-only increments need local Markdown link/fragment and
 whitespace checks, plus the applicable review and analysis checks in
 [docs/repository-checks.md](docs/repository-checks.md). That guide describes CI
 services; the repository has no standalone documentation checker. Record the
-checks that actually ran. Application tests are not applicable to A1.
+checks that actually ran. Application tests were not applicable to A1; A2a
+requires the Cargo checks and targeted `replacement_records` integration tests.
 
 A mock or compile-only result does not establish native containment, live
 provider compatibility, or release filesystem support.
@@ -110,18 +119,27 @@ The read-only preview is evidence, not an apply operation. Replacement needs a
 separate reviewed contract before any overwrite is enabled. Split this phase
 at that review boundary:
 
-- **A1 (current increment):** propose the contract and ADR, define the platform
-  gates and acceptance cases, and update the owning guides. Keep runtime
-  behaviour and capabilities unchanged. This increment needs contract review;
-  it does not complete Phase A.
-- **A2 (next after acceptance):** implement and verify the accepted contract.
+- **A1 (merged as PR #10):** accepted contract and ADR, platform gates, and
+  acceptance cases. It completed contract review, not Phase A.
+- **A2:** implement and verify the accepted contract in bounded increments.
   Review platform wrappers and storage compatibility before enabling a trusted
   CLI apply command. An unqualified backend must refuse replacement. Do not
   treat passing existing read/create tests as replacement evidence. The first
   recovery surface is inspection and acknowledgement. Explicit restore remains
   a later feature with its own current-content and checkpoint tests.
 
-Contract decisions proposed in A1:
+  - **A2a (current):** read-only byte-input initialization/ledger validation.
+    Preserve recorded uncertainty and test malformed, incomplete, and bounded
+    histories. No native storage, writer, CLI, or admission change.
+  - **A2b (next after A2a merges):** protected native store and initialization,
+    manifest/payload validation, aggregate quota, reserved-capacity durable
+    append, existing-only inspection, and fault/reopen tests. Integrate live
+    admission only when native storage and missing-state rules are enforceable.
+  - **A2c:** native replacement, metadata preservation, durable checkpoints,
+    commit uncertainty, and trusted CLI apply/acknowledgement after backend
+    qualification. An unavailable backend must continue to refuse replacement.
+
+Contract decisions accepted in A1:
 
 - The expected-content precondition (digest and size) and what happens when the
   target changes before or during the operation.
@@ -135,7 +153,7 @@ Contract decisions proposed in A1:
 - Whether the first apply command is trusted CLI only. It must not become a
   model tool before approval, containment, and policy review exist.
 
-The [proposed replacement contract](docs/file-access.md#proposed-replacement-contract)
+The [accepted replacement contract](docs/file-access.md#replacement-contract)
 owns the selected limits, state transitions, and recovery rules. The native
 primitive and durability gates there remain implementation prerequisites.
 
