@@ -241,7 +241,8 @@ cannot grant permissions. See [context management](docs/context-management.md) a
 
 Start with the [documentation index](docs/README.md). Contributors and coding
 agents must follow the [coding rules](docs/coding-rules.md) before code or test
-work.
+work. The [bundled skill source catalog](skills/README.md) contains packages
+for the planned skills manager; runtime loading and enablement are not implemented.
 
 ## Contributing
 

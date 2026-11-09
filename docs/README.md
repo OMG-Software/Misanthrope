@@ -32,6 +32,7 @@ remaining product contracts.
 | [System prompt draft](../prompts/system.md) | Versioned initial base instructions for the coding assistant |
 | [Context management](context-management.md) | Token-based compaction, cache classes, invalidation, and efficiency measures |
 | [Skills](skills.md) | Settings, package validation, enablement, loading, and controlled scripts |
+| [Bundled skill sources](../skills/README.md) | Source-only packages and provenance; runtime loading remains planned |
 | [MCP support](mcp.md) | Server connections, transports, credentials, capabilities, and tool authorization |
 | [Session storage](session-storage.md) | JSONL layout/schema, durable journals, archive/restore, and safe resume |
 | [Memories](memories.md) | User-selected project/global scope, management, retrieval, and lifecycle |

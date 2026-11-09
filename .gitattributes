@@ -1,1 +1,4 @@
 prompts/system.md text eol=lf
+
+# Keep bundled skill source digests stable across Windows and Linux checkouts.
+skills/**/SKILL.md text eol=lf
