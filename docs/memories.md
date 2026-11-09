@@ -37,7 +37,7 @@ validated project association. Copies, forks, nested projects, and repositories
 with matching remotes must not acquire each other's memories automatically.
 A moved or replaced project root requires its normal identity/access validation.
 
-Global means this local user's Misanthrope installation. It does not imply
+Global means this local user's OrangeCode installation. It does not imply
 sharing with other users or automatic synchronization to devices, organizations,
 or provider memory services. Selected memories may enter a currently permitted
 model request, including after a provider/account change, only under the current

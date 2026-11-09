@@ -1,10 +1,11 @@
 # Security coding rules
 
-These rules define requirements for each implemented boundary. The first CLI
-prototype has bounded prompt/provider/journal checks and rejects model-requested
-tools. It has no execution sandbox, filesystem tool broker, or permission UI.
-It now has trusted workspace settings and audited configuration checks. Those
-checks always deny execution and do not replace per-target authorization. See
+These rules define requirements for each implemented boundary. The CLI prototype
+has bounded prompt/provider/journal checks and rejects model-requested tools.
+It has trusted workspace settings and a bounded native file broker for manual
+commands. It has no execution sandbox, model-dispatched file tools, or permission
+UI. Configuration diagnostics always deny execution and do not replace per-target
+authorization. See
 [workspace settings](workspace-permissions.md) and [current limits](development.md). Apply these rules with the
 [coding rules](coding-rules.md) and [testing standards](testing-standards.md).
 
@@ -71,6 +72,14 @@ checks always deny execution and do not replace per-target authorization. See
   original content and version before replacing a file or applying a patch.
 - Make recovery preserve unrelated changes. A checkpoint must not restore over
   later user work without detecting it.
+
+The v0.3.0 native file broker currently exposes bounded read, list,
+exclusive-create, and single-directory creation through trusted CLI commands.
+Its checks do not isolate hostile same-user processes or provide process
+containment. Model file tools remain disabled; capability output keeps
+`workspace_file_tools` false. Do not treat journal metadata or enabled
+preferences as authority. Follow the [workspace file-access contract](file-access.md)
+for current native operations, failure states, and explicit recovery.
 
 ## Process and sandbox boundary
 

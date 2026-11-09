@@ -5,16 +5,19 @@ Use these standards with the [coding rules](coding-rules.md) and
 
 ## Current state
 
-The pinned Cargo workspace has three crates: `misanthrope-core`,
-`misanthrope-cli`, and `misanthrope-platform`. It includes deterministic core,
+The pinned Cargo workspace has three crates: `orangecode-core`,
+`orangecode-cli`, and `orangecode-platform`. It includes deterministic core,
 CLI, and platform tests. The core includes configuration-only workspace records,
 permission preferences, and a local settings/audit journal. Directory identity
 checks require a native file ID and directory creation time. On Linux, capture
 fails when the filesystem does not provide birth-time metadata. Windows reads a
-128-bit file ID from an open handle. These checks are configuration metadata
-only. No desktop interface, file broker, process runner, or execution sandbox
-exists. See [workspace permissions](workspace-permissions.md) for their scope
-and current limits. [Repository review and analysis](repository-checks.md) have
+128-bit file ID from an open handle. Identity records alone are configuration
+metadata. The v0.3.0 core also authorizes a bounded native file broker, exposed
+only through trusted CLI commands. Broker operations add live handle checks and
+use a separate file-operation journal. They do not provide model tool dispatch,
+a process runner, or an execution sandbox. See [workspace permissions](workspace-permissions.md)
+and the [workspace file-access contract](file-access.md) for their scope and
+current limits. [Repository review and analysis](repository-checks.md) have
 separate workflows.
 
 The directory-record unit tests cover native path encoding, record JSON shape,
@@ -23,11 +26,14 @@ observations. They also cover missing creation-time metadata and reject opening
 a FIFO as a directory. Control-store tests cover strict journal replay, stale
 revision rejection without a write, workspace ID reuse and replacement, moved
 or stale directory rejection, bindings, audit records, and lock contention.
-CLI workflow tests bound subprocess waits and captured stream reads, and assert the
-exact number of durable `policy_checked` events in the tested workflow. They
-exercise configuration commands and confirm that policy checks remain
-configuration-only. These tests do not qualify filesystem support or runtime
-containment.
+CLI workflow tests bound subprocess waits and captured stream reads, and assert
+the exact number of durable `policy_checked` events in the tested workflow.
+They exercise configuration commands and confirm that policy checks remain
+configuration-only. File broker tests cover bounded reads, listings, exclusive
+creation, scope denials, path/link checks, collisions, audit privacy, and
+uncertain-create recovery. Public integration tests exercise these operations
+through the broker API; core unit tests inject the uncertain outcome. These
+tests do not qualify release filesystem support or runtime containment.
 
 Use the locked Cargo commands below. They are also configured in
 `.github/workflows/rust.yml` for Ubuntu 24.04 and Windows Server 2025. A CI
@@ -70,10 +76,12 @@ tests for documentation-only work.
 - Bound every waiting integration test. A timeout is a failure, not a skip.
 - Cross-compilation and mocks cannot establish operating-system containment.
   Run actual filesystem, process-tree, IPC, and network tests on both Windows
-  and Linux before claiming those properties. The workspace identity tests are
-  configuration checks only. The [workspace permission contract](workspace-permissions.md)
-  defines their scope and the additional platform and filesystem checks needed;
-  they do not qualify runtime containment.
+  and Linux before claiming those properties. Workspace identity tests are
+  configuration checks only. The native broker adds bounded filesystem
+  operations but does not qualify release filesystem support or runtime
+  containment. The [workspace permission contract](workspace-permissions.md)
+  and [file-access contract](file-access.md) define their scopes and remaining
+  platform checks.
 
 ## Required boundary coverage
 
@@ -83,7 +91,7 @@ As the relevant components are implemented, include:
 | --- | --- |
 | Permissions | Allowed/denied requests, stale grants, scope mismatch, revocation; workspace registration and directory replacement |
 | Workspace identity | Native paths, stable directory IDs after child writes, ancestor/sibling checks, missing creation-time metadata failure |
-| Files | Traversal, native paths, symlinks/junctions, hard links, path-swap races |
+| Files | Bounded read/list/create/mkdir, policy scope, traversal, native paths, symlinks/junctions, hard links, special files, collisions, uncertain creation, audit privacy, and path-swap races |
 | Processes | Descendant escape attempts, limits, cleanup, startup failure |
 | Networking | Disabled egress, host-local access, redirects, provider routing |
 | Providers | Partial/malformed streams, duplicate calls, interruption, retries |
@@ -189,3 +197,18 @@ execution. Do not treat a clean report from an aborted tool as a pass.
 - [Cargo test targets and doc tests](https://doc.rust-lang.org/cargo/commands/cargo-test.html)
 - [Cargo features](https://doc.rust-lang.org/cargo/reference/features.html)
 - [Clippy in CI](https://doc.rust-lang.org/clippy/continuous_integration/)
+
+## File-broker review regressions
+
+Run the Linux pinned-read path-swap regression with its channel checkpoint;
+static pre-operation replacement tests do not exercise that interval.
+The Linux removed-entry and real permission-refusal tests must also execute.
+The permission fixture expects an unprivileged user whose directory mode checks
+are enforced; privilege bypass is a failure, not a silent skip.
+
+The review regression target checks that successful and capacity-refused file
+requests leave settings bytes unchanged and that permission revocation still
+succeeds. Archive tests cover raw-byte preservation, full logs, unresolved-state
+refusal, destination collisions, directory-sync faults, read-only inspection,
+and continuation with a fresh active log. The CLI workflow checks recovery
+commands after a development-root change.

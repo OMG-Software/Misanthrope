@@ -45,7 +45,7 @@ does not retry. It sends no tools and rejects tool-call responses. The adapter
 does not discover models, start the LM Studio service, download models, or
 configure that service.
 
-The CLI accepts an optional `MISANTHROPE_LM_TOKEN` in its own process
+The CLI accepts an optional `ORANGECODE_LM_TOKEN` in its own process
 environment. The core keeps the resulting authorization header in memory and
 does not add the token to a request manifest. There is no OS credential service
 or token settings UI. This is a prototype-only developer input. Task execution
@@ -110,16 +110,16 @@ from the documented local/open-source model.
 ### Claude
 
 Anthropic documents subscription login for its own Claude Code product.
-That does not by itself establish permission for Misanthrope to expose the same
+That does not by itself establish permission for OrangeCode to expose the same
 login or usage allowance.
 [Claude Code authentication](https://code.claude.com/docs/en/authentication)
 
 The Agent SDK documentation currently requires prior Anthropic approval for a
 third-party product to offer claude.ai login or subscription usage limits.
-No such approval has been established for Misanthrope.
+No such approval has been established for OrangeCode.
 [Agent SDK integration restriction](https://code.claude.com/docs/en/agent-sdk/overview)
 
-Obtain approval or an explicit supported integration route covering Misanthrope
+Obtain approval or an explicit supported integration route covering OrangeCode
 before calling this feature available. A CLI or SDK wrapper alone is not
 evidence of that approval. Keep the requirement open and the blocker visible;
 a separately billed Anthropic API connection remains a different profile.
@@ -151,7 +151,7 @@ label. Resolve the loaded model's safe context budget or require a validated
 profile. Malformed tool-like text remains text; do not execute it heuristically.
 [Tool use](https://lmstudio.ai/docs/developer/openai-compat/tools)
 
-Keep local session history and portable compaction in Misanthrope. Do not assume
+Keep local session history and portable compaction in OrangeCode. Do not assume
 that provider-native caching, state, or compaction has the OpenAI API contract.
 Do not submit provider-managed Remote MCP or hosted execution tools through this
 profile. Route MCP through the [core-owned clients](mcp.md); a provider's own tool
@@ -200,7 +200,7 @@ For release, keep access tokens, refresh tokens, API keys, login codes, and
 verifier values in the trusted authentication service. Store durable credentials
 in protected OS storage. Do not silently fall back to plaintext when that store
 is unavailable; offer an explicit memory-only session if appropriate. The
-prototype's `MISANTHROPE_LM_TOKEN` process-environment input does not meet this
+prototype's `ORANGECODE_LM_TOKEN` process-environment input does not meet this
 credential-service requirement and must not be treated as its replacement.
 
 Expose opaque connection identifiers and safe account labels to the UI. For
@@ -213,14 +213,14 @@ from its own process environment and does not place that value in the journal.
 The direct model adapter does not gain filesystem or command permissions.
 A future approved provider-runtime integration needs its own reviewed
 credential and execution boundary. Its built-in tools must remain constrained
-by Misanthrope's effective policy and OS containment.
+by OrangeCode's effective policy and OS containment.
 
 ## Acceptance evidence
 
 Before claiming subscription support for either provider, verify on Windows
 and Linux:
 
-1. A documented or approved integration route applies to Misanthrope.
+1. A documented or approved integration route applies to OrangeCode.
 2. A fresh account connection completes through the supported user flow.
 3. Plan consent and model access are validated independently from identity.
 4. A bounded, user-authorized request completes using the subscription path.

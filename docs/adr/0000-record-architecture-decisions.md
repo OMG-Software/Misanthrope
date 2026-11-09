@@ -5,7 +5,7 @@
 
 ## Context
 
-Misanthrope is starting with design and contribution rules before implementation.
+OrangeCode is starting with design and contribution rules before implementation.
 Future contributors need the reasons behind lasting constraints. Discussion and
 commit history alone are difficult to use as an active design reference.
 

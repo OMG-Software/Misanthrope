@@ -1,8 +1,10 @@
 # Project documentation
 
-Misanthrope has a first Rust CLI prototype for local chat and JSONL sessions.
-The guides distinguish implemented behaviour from the remaining product
-contracts. The execution sandbox and coding tools are not implemented.
+OrangeCode has a Rust CLI prototype for local chat, JSONL sessions, and a
+bounded native workspace file broker. The broker is available only through
+trusted operator commands. Model tool dispatch and the execution sandbox are
+not implemented. The guides distinguish implemented behaviour from the
+remaining product contracts.
 
 ## Start here
 
@@ -24,6 +26,7 @@ contracts. The execution sandbox and coding tools are not implemented.
 | [Platform support](platform-support.md) | Windows/Linux targets and the evidence needed for support |
 | [Provider authentication](provider-authentication.md) | Required subscription/API profiles, provider evidence, and readiness gates |
 | [Workspace settings](workspace-permissions.md) | Implemented workspace IDs, configuration-only permissions, revisions, audit, and remaining gates |
+| [Workspace file access](file-access.md) | Current bounded native file broker, trusted CLI interface, journal, platform limits, and recovery |
 | [Development tools](development-tools.md) | Installed/managed toolchains, runtime grants, outputs, caches, and qualification |
 | [Agent instructions](agent-instructions.md) | Product priorities, visible SYSTEM prompt, user additions, and request manifests |
 | [System prompt draft](../prompts/system.md) | Versioned initial base instructions for the coding assistant |
@@ -46,6 +49,7 @@ contracts. The execution sandbox and coding tools are not implemented.
 | A test convention or verification command | Testing standards |
 | Repository analysis, CI workflows, or branch rules | Repository checks and relevant testing/security guidance |
 | Workspace identity, settings, revisions, or policy audit | Workspace settings, session storage, security rules, and relevant tests |
+| Workspace file broker, native file boundary, or uncertain creation | Workspace file access, platform support, security rules, session storage, and relevant tests |
 | A supported platform or prerequisite | Platform support |
 | Provider login, subscription entitlement, or billing | Provider authentication and security rules |
 | Tool discovery, runtime access, build environments, or build/package caches | Development tools and platform support |
@@ -73,5 +77,7 @@ Repository review and analysis are configured in the repository-checks guide.
 The Rust workflow adds formatting, strict Clippy, unit/integration tests, and
 separate documentation tests on Windows and Linux. The development guide owns
 the current commands and limits. There is no frontend or execution backend yet.
+The limited file broker does not provide general model tools or process
+containment.
 Dependency security audits, native containment qualification, and release checks
 still need their own implementation and evidence.

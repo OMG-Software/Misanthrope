@@ -6,6 +6,17 @@ Changes are recorded here before a release version is assigned.
 
 ### Fixed
 
+- Keep operational file checks out of the settings journal so file traffic and
+  audit-cap refusals cannot exhaust capacity needed for permission changes.
+- Add explicit, no-replace operation-journal exports and read-only archive
+  inspection; preserve raw bytes and refuse unresolved logs.
+- Reject unusable workspace scopes during registration/binding, classify invalid
+  target paths as request errors, and report unchecked broker availability honestly.
+- Continue Linux listings when entries disappear and distinguish definite mkdir
+  permission refusals from uncertain mutations. Add synchronized pinned-read,
+  bounded-consumption, archive-fault, CLI recovery, and capacity regressions.
+- Clarify recovery prerequisites, export/privacy limits, and credentials in names.
+
 - Reject stale saved workspace paths before reusing registrations, and reject
   moved application storage before interpreting overlap checks.
 - Open Unix workspace selections as directories so named pipes cannot hold the
@@ -29,6 +40,22 @@ Changes are recorded here before a release version is assigned.
 - Add review regression tests and clarify smoke-check, coverage, and CLI examples.
 
 ### Added
+
+- OrangeCode application namespace across Rust crates, CLI, token environment
+  variable, default data directory, session filenames, repository links, and
+  Sonar project configuration. Existing private data is not moved automatically.
+- Compiled prompt version 0.1.3 with the renamed identity and an updated digest
+  regression check; explicit prototype data-transition instructions.
+
+- Rust 0.3.0 native workspace file broker with bounded reads/listings, exclusive
+  new-file/directory creation, current binding checks, and handle-relative
+  Linux/Windows enforcement. Existing entries cannot be replaced or deleted.
+- Separate bounded operation intent/outcome journal, read withholding on audit
+  failure, explicit uncertainty acknowledgement, and no action replay.
+- Trusted file CLI commands, native traversal/link/mount and collision tests,
+  audit failure/recovery coverage, and an ADR for native file-access boundaries.
+  Model tool dispatch and command execution remain disabled. Windows directory
+  flag compatibility is an explicit release qualification requirement.
 
 - Rust 0.2.0 workspace settings core: explicit development root, persistent
   directory-backed workspace IDs, permission preferences, revision checks, and

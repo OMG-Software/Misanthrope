@@ -585,43 +585,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "misanthrope-cli"
-version = "0.2.0"
-dependencies = [
- "clap",
- "directories",
- "misanthrope-core",
- "serde",
- "serde_json",
- "tempfile",
- "uuid",
-]
-
-[[package]]
-name = "misanthrope-core"
-version = "0.2.0"
-dependencies = [
- "libc",
- "misanthrope-platform",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror",
- "time",
- "uuid",
-]
-
-[[package]]
-name = "misanthrope-platform"
-version = "0.2.0"
-dependencies = [
- "tempfile",
- "windows-sys",
-]
-
-[[package]]
 name = "num-conv"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -644,6 +607,44 @@ name = "option-ext"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
+
+[[package]]
+name = "orangecode-cli"
+version = "0.3.0"
+dependencies = [
+ "clap",
+ "directories",
+ "orangecode-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
+name = "orangecode-core"
+version = "0.3.0"
+dependencies = [
+ "libc",
+ "orangecode-platform",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "time",
+ "uuid",
+]
+
+[[package]]
+name = "orangecode-platform"
+version = "0.3.0"
+dependencies = [
+ "rustix",
+ "tempfile",
+ "windows-sys",
+]
 
 [[package]]
 name = "percent-encoding"

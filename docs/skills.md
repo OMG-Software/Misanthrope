@@ -38,7 +38,7 @@ and a Markdown body. Validate the specification's required name and description,
 field types/limits, naming rules, and directory-name match. Scripts, references,
 and assets are optional. Preserve license and compatibility metadata.
 
-Misanthrope may reject unsafe or unsupported packages even when their metadata
+OrangeCode may reject unsafe or unsupported packages even when their metadata
 is format-valid. Bound file count, total bytes, individual file sizes, parser
 nesting, reference depth, and resource loading. Reject duplicate or ambiguous
 metadata keys and unsafe YAML types. Do not fetch remote references implicitly.

@@ -1,18 +1,20 @@
-# Misanthrope
+# OrangeCode
 
 **A Rust coding-assistant prototype for Windows and Linux.**
 
-Misanthrope aims to connect language models to controlled development tools.
-The current code is an early Rust core and command-line prototype. A desktop
-interface, workspace tools, Git workflows, and an execution sandbox remain
-planned.
+OrangeCode aims to connect language models to controlled development tools.
+The current code is an early Rust core and command-line prototype. A bounded
+native workspace file broker is available through trusted CLI commands. Model
+tool dispatch, a desktop interface, Git workflows, and an execution sandbox
+remain planned.
 
 > **Status: early prototype, not release-ready.** The Rust CLI can inspect the
 > compiled prompt, report implemented capabilities, manage JSONL sessions and
-> workspace permission preferences, and
-> send one non-streaming chat request to an explicitly selected local LM Studio
-> model. It cannot read or edit workspace files or run commands. No execution
-> sandbox is implemented.
+> workspace permission preferences, perform bounded workspace reads/listings,
+> create new files/directories through the trusted CLI, and send one
+> non-streaming chat request to an explicitly selected local LM Studio model.
+> Chat still has no file tools. Existing files cannot be replaced or deleted,
+> commands cannot be run, and no execution sandbox is implemented.
 
 ## Goals
 
@@ -27,14 +29,17 @@ Security takes priority when an optimization would weaken these boundaries.
 
 ## Current prototype
 
-The workspace contains three Rust crates: `misanthrope-core`, `misanthrope-cli`,
-and `misanthrope-platform`. The CLI command is `misanthrope`. It provides:
+The workspace contains three Rust crates: `orangecode-core`, `orangecode-cli`,
+and `orangecode-platform`. The CLI command is `orangecode`. It provides:
 
 - `prompt`: print the compiled, read-only base prompt, version, and SHA-256 digest.
 - `capabilities`: report what this prototype implements and rejects.
 - `workspace`: configure the development root, register stable workspace IDs,
   change read/write/execute/task-network preferences, and inspect audited policy
   checks. These checks describe configuration only; execution stays disabled.
+- `file`: use bounded native reads, listings, exclusive new-file creation, and
+  single-directory creation through explicit workspace/session CLI selections.
+  These trusted operator commands do not provide model tool definitions.
 - `session`: create, inspect, archive, restore, and explicitly interrupt an
   abandoned turn in a JSONL journal.
 - `chat`: send one user turn to an already-running LM Studio server at a literal
@@ -48,12 +53,15 @@ refuses to chat with an archived session or one with an incomplete prior turn;
 it does not replay recorded actions. An abandoned turn must be inspected and
 marked interrupted before chat can continue.
 
-The platform crate checks opened journal handles and captures native directory
-identity for workspace registration. These checks do not protect parent paths
-or contain a process. Workspace settings and audit records are implemented;
-filesystem enforcement, process/network confinement, Git, MCP, and memories
-remain planned. See the [workspace settings contract](docs/workspace-permissions.md). See the
-[development guide](docs/development.md) for setup and command details.
+The platform crate checks opened journal handles, captures native directory
+identity for workspace registration, and implements handle-relative file
+operations. The broker applies the current registered workspace checks, but it
+does not isolate hostile same-user processes or contain a process. Existing
+file replacement, deletion, and model-dispatched file tools remain unavailable.
+Process/network confinement, Git, MCP, and memories remain planned. See the
+[workspace settings contract](docs/workspace-permissions.md), the
+[workspace file-access guide](docs/file-access.md), and the [development
+guide](docs/development.md) for limits and command details.
 
 The current CLI has no operating-system credential service. Its optional local
 server token input remains prototype wiring; it is not a release credential
@@ -64,8 +72,8 @@ To build and run the prototype with the pinned Rust toolchain:
 
 ```sh
 cargo build --workspace --locked
-cargo run --locked -p misanthrope-cli -- capabilities
-cargo run --locked -p misanthrope-cli -- prompt
+cargo run --locked -p orangecode-cli -- capabilities
+cargo run --locked -p orangecode-cli -- prompt
 ```
 
 To send a test request, start LM Studio and load a model yourself. Replace
@@ -73,7 +81,7 @@ YOUR_MODEL_ID with that model's ID and CONTEXT_TOKENS with its validated numeric
 context capacity before running this command:
 
 ```sh
-cargo run --locked -p misanthrope-cli -- chat --workspace . --model "YOUR_MODEL_ID" --context-tokens CONTEXT_TOKENS "Say hello in one sentence."
+cargo run --locked -p orangecode-cli -- chat --workspace . --model "YOUR_MODEL_ID" --context-tokens CONTEXT_TOKENS "Say hello in one sentence."
 ```
 
 The endpoint defaults to `http://127.0.0.1:1234/v1`. The required context value
@@ -100,8 +108,9 @@ check the server's configuration before sending sensitive text.
   host development data. Sessions will normally have read and write access to
   their active workspace within that root. Other host folders will be denied
   by default.
-- **Sandboxed tools:** File operations, terminals, and background tasks governed
-  by the same permission policy and enforced with operating-system controls.
+- **Sandboxed tools:** Extend the current bounded trusted-CLI file broker with
+  model-authorized file tools, terminals, and background tasks governed by the
+  same permission policy and enforced with operating-system controls.
 - **Git workflows:** Status, diffs, staging, commits, branches, worktrees, fetch,
   pull, and push, with controlled remote access and credential handling.
 - **Development panels:** Terminal tabs, background task status and logs, and
@@ -172,7 +181,7 @@ keys will stay out of frontend state, repository files, and task environments.
 
 ## Development tools
 
-Misanthrope must work with projects in multiple languages. It will support
+OrangeCode must work with projects in multiple languages. It will support
 user-selected installed tools and managed toolchain environments through a
 generic sandboxed runner. Tool profiles will include the required executable,
 runtime, library, and SDK resources, plus scoped writable build outputs, caches,
@@ -184,7 +193,7 @@ Toolchain access does not grant access to unrelated host data. See
 
 ## Permission and sandbox design
 
-Misanthrope will own its permission policy and sandbox lifecycle. The design will
+OrangeCode will own its permission policy and sandbox lifecycle. The design will
 use operating-system isolation to enforce restrictions on files, networking,
 processes, and host services.
 
@@ -223,7 +232,7 @@ cannot grant permissions. See [context management](docs/context-management.md) a
 5. Expand provider adapters and add streaming and core-authorized tool workflows.
 6. Add visible instructions, token accounting, compaction, safe caching, skills,
    and project/global memories with boundary tests and efficiency measurements.
-7. Add scoped file tools, sandboxed terminals, background tasks, and MCP clients.
+7. Add model-scoped file tools, sandboxed terminals, background tasks, and MCP clients.
 8. Add mediated Git workflows, diff review, checkpoints, and crash recovery.
 9. Verify the full workflow on both platforms and prepare installers and
    documentation.
@@ -237,7 +246,7 @@ work.
 ## Contributing
 
 The project is in its early prototype stage. Use
-[GitHub Issues](https://github.com/OMG-Software/Misanthrope/issues) to discuss
+[GitHub Issues](https://github.com/OMG-Software/OrangeCode/issues) to discuss
 requirements, design proposals, and gaps in the plan.
 
 See the [development guide](docs/development.md) for the current prototype
@@ -252,4 +261,4 @@ configured scope, credential setup, and current limitations.
 
 ## License
 
-Misanthrope is licensed under the [Apache License 2.0](LICENSE).
+OrangeCode is licensed under the [Apache License 2.0](LICENSE).

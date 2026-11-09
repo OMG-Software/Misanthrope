@@ -6,7 +6,7 @@
 ## Context
 
 The user requires session archiving and JSONL persistence at
-sessions/year/month/date/misanthrope-time-guid.jsonl. Persistence must preserve
+sessions/year/month/date/orangecode-time-guid.jsonl. Persistence must preserve
 history across compaction, crashes, archive/restore, and provider changes without
 replaying side effects or restoring obsolete permissions.
 
@@ -31,7 +31,7 @@ Revalidate current settings on resume; historical records are not authorization.
 - Local-time paths can change meaning around timezone/daylight-saving changes.
   Use UTC for storage and local time for display where useful.
 - Copying another product's internal event schema creates an unverified
-  compatibility dependency. Define Misanthrope's own schema and version it.
+  compatibility dependency. Define OrangeCode's own schema and version it.
 - Replaying recorded actions on resume risks duplicate mutations and stale
   approvals. Reconstruct context and reconcile state without executing history.
 
