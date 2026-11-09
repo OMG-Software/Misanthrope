@@ -378,6 +378,8 @@ mod tests {
     #[test]
     fn readonly_open_rejects_a_fifo_without_blocking() {
         use std::process::Command;
+        use std::sync::mpsc;
+        use std::time::Duration;
 
         let directory = tempfile::tempdir().expect("private temporary directory");
         let fifo = directory.path().join("fifo");
@@ -389,8 +391,17 @@ mod tests {
                 .success()
         );
 
-        let error = super::open_regular_file_readonly(&fifo)
-            .expect_err("fifo must be rejected without blocking");
+        let (sender, receiver) = mpsc::channel();
+        let path = fifo.clone();
+        std::thread::spawn(move || {
+            // The receiver may have already failed after its timeout.
+            let _ = sender.send(super::open_regular_file_readonly(&path));
+        });
+        let result = receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("FIFO open must not block");
+
+        let error = result.expect_err("fifo must be rejected without blocking");
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     }
 

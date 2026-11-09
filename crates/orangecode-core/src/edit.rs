@@ -90,7 +90,8 @@ pub enum ProposedReadError {
 ///
 /// The source is opened read-only without following a final symlink or Windows
 /// reparse point. It must remain a regular file and retain its initial length
-/// for the whole read. This is trusted operator input, not workspace authority.
+/// and modification time for the whole read. This is trusted operator input,
+/// not workspace authority.
 pub fn read_proposed_file(path: &Path, limit: usize) -> Result<Vec<u8>, ProposedReadError> {
     if limit == 0 {
         return Err(ProposedReadError::TooLarge);
@@ -100,7 +101,9 @@ pub fn read_proposed_file(path: &Path, limit: usize) -> Result<Vec<u8>, Proposed
         std::io::ErrorKind::Unsupported => ProposedReadError::Unsupported,
         _ => ProposedReadError::Io,
     })?;
-    let initial_len = file.metadata().map_err(|_| ProposedReadError::Io)?.len();
+    let initial_metadata = file.metadata().map_err(|_| ProposedReadError::Io)?;
+    let initial_len = initial_metadata.len();
+    let initial_modified = initial_metadata.modified().ok();
     let limit = u64::try_from(limit).map_err(|_| ProposedReadError::TooLarge)?;
     if initial_len > limit {
         return Err(ProposedReadError::TooLarge);
@@ -114,8 +117,10 @@ pub fn read_proposed_file(path: &Path, limit: usize) -> Result<Vec<u8>, Proposed
     if u64::try_from(bytes.len()).map_err(|_| ProposedReadError::TooLarge)? > limit {
         return Err(ProposedReadError::TooLarge);
     }
+    let final_metadata = file.metadata().map_err(|_| ProposedReadError::Io)?;
     if u64::try_from(bytes.len()).map_err(|_| ProposedReadError::TooLarge)? != initial_len
-        || file.metadata().map_err(|_| ProposedReadError::Io)?.len() != initial_len
+        || final_metadata.len() != initial_len
+        || final_metadata.modified().ok() != initial_modified
     {
         return Err(ProposedReadError::ChangedDuringRead);
     }
@@ -201,7 +206,15 @@ fn diff(current: &str, proposed: &str) -> (String, bool) {
         .saturating_add(CONTEXT_LINES)
         .min(current_lines.len());
 
+    let suffix_context = context_end.saturating_sub(current_lines.len() - suffix);
+    let prefix_context = prefix - context_start;
+    let current_count = prefix_context + current_middle.len() + suffix_context;
+    let proposed_count = prefix_context + proposed_middle.len() + suffix_context;
+    let line = context_start.saturating_add(1);
     let mut output = String::from(DIFF_HEADER);
+    output.push_str(&format!(
+        "@@ -{line},{current_count} +{line},{proposed_count} @@\n"
+    ));
     let mut truncated = false;
     for line in &current_lines[context_start..prefix] {
         if !append_line(&mut output, line, ' ') {
@@ -282,10 +295,17 @@ mod tests {
         assert!(!preview.truncated);
         assert_eq!(preview.current_bytes, 14);
         assert_eq!(preview.proposed_bytes, 14);
-        assert_eq!(preview.current_sha256.len(), 64);
+        assert_eq!(
+            preview.current_sha256,
+            "b6285c57e8797db5d4c51c80d6f11938afda9b11c6a003549709189e9b4b92a2"
+        );
+        assert_eq!(
+            preview.proposed_sha256,
+            "b2ef07f1e2b1b58edd8a1b35c5472177f5f1fa1ff74cad1c04cc776029511139"
+        );
         assert_eq!(
             preview.diff,
-            "--- current\n+++ proposed\n one\n-two\n+TWO\n three\n"
+            "--- current\n+++ proposed\n@@ -1,3 +1,3 @@\n one\n-two\n+TWO\n three\n"
         );
     }
 
@@ -302,15 +322,21 @@ mod tests {
     #[test]
     fn insertions_deletions_and_missing_final_newlines_are_visible() {
         let inserted = preview(b"a\n", b"a\nb\n", target()).expect("insertion");
-        assert_eq!(inserted.diff, "--- current\n+++ proposed\n a\n+b\n");
+        assert_eq!(
+            inserted.diff,
+            "--- current\n+++ proposed\n@@ -1,1 +1,2 @@\n a\n+b\n"
+        );
 
         let deleted = preview(b"a\nb\n", b"a\n", target()).expect("deletion");
-        assert_eq!(deleted.diff, "--- current\n+++ proposed\n a\n-b\n");
+        assert_eq!(
+            deleted.diff,
+            "--- current\n+++ proposed\n@@ -1,2 +1,1 @@\n a\n-b\n"
+        );
 
         let no_final_newline = preview(b"a\nb", b"a\nB", target()).expect("no final newline");
         assert_eq!(
             no_final_newline.diff,
-            "--- current\n+++ proposed\n a\n-b\n\\ No newline at end of file\n+B\n\\ No newline at end of file\n"
+            "--- current\n+++ proposed\n@@ -1,2 +1,2 @@\n a\n-b\n\\ No newline at end of file\n+B\n\\ No newline at end of file\n"
         );
     }
 
@@ -321,7 +347,7 @@ mod tests {
         assert!(preview.changed);
         assert_eq!(
             preview.diff,
-            "--- current\n+++ proposed\n-a\n\\ No newline at end of file\n+a\n"
+            "--- current\n+++ proposed\n@@ -1,1 +1,1 @@\n-a\n\\ No newline at end of file\n+a\n"
         );
     }
 
@@ -330,7 +356,10 @@ mod tests {
         let preview = preview(b"a\r\n", b"a\n", target()).expect("CRLF change");
 
         assert!(preview.changed);
-        assert_eq!(preview.diff, "--- current\n+++ proposed\n-a\r\n+a\n");
+        assert_eq!(
+            preview.diff,
+            "--- current\n+++ proposed\n@@ -1,1 +1,1 @@\n-a\r\n+a\n"
+        );
     }
 
     #[test]

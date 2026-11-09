@@ -133,13 +133,14 @@ through the broker (creating the normal read operation record), and reads the
 complete proposed content from a trusted operator-selected local regular file.
 The proposed source is opened read-only without following a final link; Windows
 reparse points, devices, and non-regular handles are rejected. The preview also
-rejects non-UTF-8 content, either side above 1 MiB, and more than 65,536 lines
-per side.
+rejects non-UTF-8 content and either side above 1 MiB. When a diff is needed it
+rejects more than 65,536 lines per side; identical content may exceed that line
+count if it fits the byte bound.
 
 The result contains the lossless target, exact current and proposed SHA-256
-digests and byte counts, a changed flag, and a bounded single-hunk diff. The
-hunk is built around the common line prefix and suffix; it is not a minimal
-diff. The diff is limited to 64 KiB and carries a truncated flag. A missing
+digests and byte counts, a changed flag, and a bounded single-hunk diff with
+current and proposed line ranges. The hunk is built around the common line
+prefix and suffix; it is not a minimal diff. The diff is limited to 64 KiB and carries a truncated flag. A missing
 final newline is marked with the standard `\ No newline at end of file` line.
 Previewing does not replace, delete, checkpoint, or otherwise mutate any
 workspace entry, and it creates no proposal or checkpoint record. It is not a

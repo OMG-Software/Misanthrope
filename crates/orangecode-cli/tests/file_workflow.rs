@@ -447,7 +447,7 @@ fn cli_previews_a_bounded_diff_without_modifying_the_workspace() {
     assert_eq!(diff["truncated"], false);
     assert_eq!(
         diff["diff"],
-        "--- current\n+++ proposed\n one\n-two\n+TWO\n three\n"
+        "--- current\n+++ proposed\n@@ -1,3 +1,3 @@\n one\n-two\n+TWO\n three\n"
     );
     assert_eq!(
         fs::read(fixture.workspace.join("note.txt")).expect("workspace file"),

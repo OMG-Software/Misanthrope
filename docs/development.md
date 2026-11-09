@@ -119,8 +119,8 @@ through the broker, reads the complete proposed content from the trusted
 operator-selected local file, and returns a bounded single-hunk diff with exact
 digests and sizes. The proposed source is opened read-only without following a
 final link; Windows reparse, device, and non-regular handles are rejected. It
-accepts only UTF-8 content, limits each side to 1 MiB and 65,536 lines, and
-limits the rendered diff to 64 KiB. It never writes to the workspace, creates no
+accepts only UTF-8 content, limits each side to 1 MiB and, when a diff is
+needed, 65,536 lines, and limits the rendered diff to 64 KiB. It never writes to the workspace, creates no
 checkpoint, and is not a replacement operation. The preview is a snapshot of the
 bytes read; a later replacement must recheck the content identity. File-operation intents and outcomes use
 a separate private `file-operations-v1.jsonl`; the `control-v1` settings journal
@@ -265,7 +265,7 @@ planned. See the complete [session contract](session-storage.md).
 | Tool call arguments in a session event | 4 KiB |
 | Read file size per call | 15 KiB maximum, 8 KiB default |
 | Edit preview content | 1 MiB per side |
-| Edit preview lines | 65,536 per side |
+| Edit preview lines | 65,536 per side when changed |
 | Edit preview diff | 64 KiB |
 | Source-labelled tool message | 16 KiB |
 | Tool rounds per turn | 4 |

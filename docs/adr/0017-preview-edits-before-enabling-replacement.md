@@ -60,9 +60,10 @@ owns the existing-creation and non-CAS replacement limitation.
 
 ## Consequences
 
-Operators can review exact byte changes and digests without granting write
-authority. The preview is not a minimal diff and can show a larger changed
-region than a line-optimal algorithm. The line cap rejects pathologically
+Operators can review the bounded diff and exact digests without granting write
+authority. A truncated diff can omit changes, including proposed lines. The
+preview is not a minimal diff and can show a larger changed region than a
+line-optimal algorithm. The line cap rejects pathologically
 line-dense files rather than allocating an unbounded line index. The preview
 does not detect an independent edit made after the broker read, and it does not
 provide checkpoints or recovery. Actual
