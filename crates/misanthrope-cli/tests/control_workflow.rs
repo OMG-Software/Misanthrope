@@ -1,121 +1,21 @@
+mod support;
+
 use serde_json::{Value, json};
-use std::fs::{self, File};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::fs;
+use std::io::{self, Write};
 use std::path::Path;
-use std::process::{Child, Command, ExitStatus, Output, Stdio};
+use std::process::Command;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tempfile::TempDir;
 use uuid::Uuid;
 
-const CLI_DEADLINE: Duration = Duration::from_secs(10);
-const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
-const MAX_CAPTURE_BYTES: u64 = 1024 * 1024;
-const HANG_FIXTURE_ENV: &str = "MISANTHROPE_CONTROL_WORKFLOW_HANG_FIXTURE";
-
-struct BoundedOutput {
-    output: Output,
-    timed_out: bool,
-}
-
-/// Run a child with a deadline and bounded output reads.
-///
-/// Temporary files avoid a full output pipe blocking the child. Reads are capped at
-/// 1 MiB after exit; temporary-file disk growth is not capped. The caller gets the
-/// status and both streams only after the child has exited or been killed and reaped.
-fn run_with_deadline(mut command: Command, timeout: Duration) -> io::Result<BoundedOutput> {
-    let stdout_file = tempfile::tempfile()?;
-    let stderr_file = tempfile::tempfile()?;
-    let mut stdout_reader = stdout_file.try_clone()?;
-    let mut stderr_reader = stderr_file.try_clone()?;
-    command
-        .stdout(Stdio::from(stdout_file))
-        .stderr(Stdio::from(stderr_file));
-    let deadline = Instant::now().checked_add(timeout).ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "process timeout is too large")
-    })?;
-    let mut child = command.spawn()?;
-    let mut timed_out = false;
-
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break child.wait()?,
-            Ok(None) => {
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                if remaining.is_zero() {
-                    timed_out = true;
-                    break terminate_and_reap(&mut child)?;
-                }
-                thread::sleep(remaining.min(PROCESS_POLL_INTERVAL));
-            }
-            Err(error) => {
-                return match terminate_and_reap(&mut child) {
-                    Ok(_) => Err(error),
-                    Err(cleanup_error) => Err(cleanup_error),
-                };
-            }
-        }
-    };
-
-    Ok(BoundedOutput {
-        output: Output {
-            status,
-            stdout: read_capture(&mut stdout_reader)?,
-            stderr: read_capture(&mut stderr_reader)?,
-        },
-        timed_out,
-    })
-}
-
-/// Kill a running child and wait for its exit status before returning.
-fn terminate_and_reap(child: &mut Child) -> io::Result<ExitStatus> {
-    match child.kill() {
-        Ok(()) => child.wait(),
-        Err(kill_error) => match child.try_wait()? {
-            Some(_) => child.wait(),
-            None => Err(kill_error),
-        },
-    }
-}
-
-/// Read at most the configured capture limit from an exited child output file.
-fn read_capture(file: &mut File) -> io::Result<Vec<u8>> {
-    if file.metadata()?.len() > MAX_CAPTURE_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "child output exceeds the 1 MiB capture limit",
-        ));
-    }
-    file.seek(SeekFrom::Start(0))?;
-    let mut bytes = Vec::new();
-    file.take(MAX_CAPTURE_BYTES + 1).read_to_end(&mut bytes)?;
-    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_CAPTURE_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "child output exceeds the 1 MiB capture limit",
-        ));
-    }
-    Ok(bytes)
-}
-
-/// Run the CLI with the suite deadline and retain both output streams for assertions.
-fn run_cli(data_root: &Path, args: &[&str]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_misanthrope"));
-    command
-        .env_remove("MISANTHROPE_LM_TOKEN")
-        .env_remove(HANG_FIXTURE_ENV)
-        .arg("--data-dir")
-        .arg(data_root)
-        .args(args);
-    let result = run_with_deadline(command, CLI_DEADLINE).expect("run Misanthrope CLI");
-    assert!(
-        !result.timed_out,
-        "CLI exceeded its 10-second deadline: stdout={} stderr={}",
-        String::from_utf8_lossy(&result.output.stdout),
-        String::from_utf8_lossy(&result.output.stderr)
-    );
-    result.output
-}
+#[cfg(unix)]
+use support::CLI_DEADLINE;
+use support::{
+    HANG_FIXTURE_ENV, assert_control_error, assert_success, json_output, path_arg, run_cli,
+    run_with_deadline,
+};
 
 /// Park only when the timeout regression launches this test in a child process.
 #[test]
@@ -155,29 +55,6 @@ fn process_deadline_kills_and_reaps_a_hung_child() {
         "the killed child must report a non-success exit"
     );
 }
-fn json_output(output: &Output) -> Value {
-    serde_json::from_slice(&output.stdout).expect("CLI stdout is JSON")
-}
-
-fn assert_success(output: &Output) {
-    assert!(
-        output.status.success(),
-        "CLI failed: stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-fn assert_control_error(output: &Output) {
-    assert!(!output.status.success(), "command unexpectedly succeeded");
-    let error: Value = serde_json::from_slice(&output.stderr).expect("CLI error is JSON");
-    assert_eq!(error["error"]["code"], "control");
-}
-
-fn path_arg(path: &Path) -> &str {
-    path.to_str().expect("temporary paths are Unicode")
-}
-
 fn set_root(data_root: &Path, development_root: &Path) -> Value {
     let output = run_cli(
         data_root,
