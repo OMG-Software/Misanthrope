@@ -4,6 +4,7 @@
 //! handles. Diagnostic policy results and serialized metadata are never grants.
 
 mod checkpoint;
+mod replacement;
 
 use std::io;
 use std::path::{Path, PathBuf};

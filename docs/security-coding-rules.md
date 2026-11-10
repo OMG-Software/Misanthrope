@@ -76,16 +76,16 @@ authorization. See
 - A read-only edit preview compares bytes read through the broker with trusted
   operator-selected proposed content. It is untrusted evidence, not a write
   grant. Its digest is a snapshot, not a conflict-free replacement token. The
-  preview must not write, checkpoint, or imply that replacement is enabled.
+  preview must not write, checkpoint, or promise that apply can proceed.
   Open a trusted proposed source without following a final link and reject
   reparse, device, or non-regular handles before reading it.
 - The [accepted replacement contract](file-access.md#replacement-contract)
-  defines implementation gates, not an enabled write path. The core's read-only
+  defines gates for the trusted apply path. The core's read-only
   record inspectors validate claims in supplied bytes only. Its native Linux
   checkpoint store checks actual opened objects, owner/mode, scope, payloads,
   and manifests before admission. A recorded ready,
   prepared, commit, outcome, or acknowledgement cannot prove a native effect,
-  authorize access, or trigger replay. Future apply must require fresh
+  authorize access, or trigger replay. Apply requires fresh
   read/write authority, expected exact bytes, native object checks, a durable
   private checkpoint, bounded storage, and a separately versioned ledger.
   Detected conflicts must leave workspace entries unchanged. Stage only in
@@ -105,6 +105,13 @@ authorization. See
   Windows private storage must refuse until ACL and directory persistence are
   qualified; the older journal helper's Windows directory-sync no-op is not a
   checkpoint durability primitive.
+- Linux apply must retain the source and both parents, check the same ext4
+  mount, preserve supported owner/group/mode, and refuse unsupported metadata.
+  Verify the stage before syncing commit intent. Recheck the native objects and
+  live authority before one rename attempt. Sync the published file and both
+  changed parents before success. An error after intent preserves uncertainty;
+  no replay, retry, stage cleanup, or rollback is authorized. The stop-writers
+  flag acknowledges a caller responsibility. It provides no isolation.
 
 The v0.3.0 native file broker currently exposes bounded read, list,
 exclusive-create, and single-directory creation through trusted CLI commands.

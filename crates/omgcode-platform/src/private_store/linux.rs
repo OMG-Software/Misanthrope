@@ -7,10 +7,15 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use rustix::fs::{AtFlags, Dir, Mode, OFlags, ResolveFlags, mkdirat, open, openat2, statat};
+use rustix::fs::{
+    AtFlags, Dir, Mode, OFlags, ResolveFlags, StatxAttributes, StatxFlags, mkdirat, open, openat2,
+    statat, statx,
+};
 use rustix::io::Errno;
 
 use crate::{DirectoryIdentity, directory_identity};
+
+mod ext4;
 
 /// Check privacy on the opened file before returning its device/inode identity.
 /// This never reopens a path or takes ownership from the caller.
@@ -25,6 +30,51 @@ pub(super) fn file_identity(file: &File) -> io::Result<super::PrivateFileIdentit
         volume: metadata.dev(),
         file_id: u128::from(metadata.ino()).to_le_bytes(),
     })
+}
+
+/// Validate supported replacement metadata on the same retained file handle.
+pub(super) fn stage_metadata(file: &File) -> io::Result<super::StageMetadata> {
+    let metadata = file.metadata()?;
+    if !metadata.is_file()
+        || metadata.nlink() != 1
+        || metadata.uid() != rustix::process::geteuid().as_raw()
+        || metadata.mode() & 0o7000 != 0
+        || rustix::fs::flistxattr_query(file)? != 0
+    {
+        return Err(invalid(
+            "replacement stage has unsupported type or metadata",
+        ));
+    }
+    validate_replacement_attributes(file)?;
+    Ok(super::StageMetadata {
+        identity: super::PrivateFileIdentity {
+            volume: metadata.dev(),
+            file_id: u128::from(metadata.ino()).to_le_bytes(),
+        },
+        owner: metadata.uid(),
+        group: metadata.gid(),
+        mode: metadata.mode() & 0o777,
+    })
+}
+
+pub(crate) fn validate_replacement_attributes(file: &File) -> io::Result<()> {
+    let status = statx(file, "", AtFlags::EMPTY_PATH, StatxFlags::ALL)?;
+    let known = StatxAttributes::COMPRESSED
+        | StatxAttributes::IMMUTABLE
+        | StatxAttributes::APPEND
+        | StatxAttributes::NODUMP
+        | StatxAttributes::ENCRYPTED
+        | StatxAttributes::AUTOMOUNT
+        | StatxAttributes::MOUNT_ROOT
+        | StatxAttributes::VERITY
+        | StatxAttributes::DAX;
+    if !status.stx_attributes.is_empty() || !(status.stx_attributes_mask & !known).is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "file has unsupported statx attributes",
+        ));
+    }
+    ext4::validate_file_attributes(file)
 }
 
 /// A retained private directory. Owned handles close on drop.
@@ -206,6 +256,38 @@ impl PrivateDirectory {
         self.file.sync_all()
     }
 
+    /// Open the fixed replacement-stage name without creating or following it.
+    pub fn open_stage(&self) -> io::Result<File> {
+        let parent = self.validate()?;
+        let pinned = native_open(
+            &self.file,
+            Path::new("stage"),
+            OFlags::PATH | OFlags::CLOEXEC,
+            Mode::empty(),
+            child_flags(),
+        )?;
+        let initial = pinned.metadata()?;
+        if !initial.is_file() || initial.nlink() != 1 || initial.dev() != parent.dev() {
+            return Err(invalid(
+                "replacement stage is not a local regular single-link file",
+            ));
+        }
+        let descriptor_path = PathBuf::from(format!("/proc/self/fd/{}", pinned.as_raw_fd()));
+        let reopened = OpenOptions::new().read(true).open(descriptor_path)?;
+        let before = file_identity_snapshot(&pinned)?;
+        let after = file_identity_snapshot(&reopened)?;
+        if before != after {
+            return Err(invalid("replacement stage changed during reopen"));
+        }
+        super::stage_metadata(&reopened)?;
+        Ok(reopened)
+    }
+
+    /// Borrow the retained native directory handle inside the platform crate.
+    pub(crate) fn native_file(&self) -> &File {
+        &self.file
+    }
+
     /// Recheck this retained directory's type and effective-user-only mode.
     fn validate(&self) -> io::Result<Metadata> {
         let metadata = self.file.metadata()?;
@@ -214,6 +296,11 @@ impl PrivateDirectory {
         }
         Ok(metadata)
     }
+}
+
+fn file_identity_snapshot(file: &File) -> io::Result<(u64, u64, u64)> {
+    let metadata = file.metadata()?;
+    Ok((metadata.dev(), metadata.ino(), metadata.nlink()))
 }
 
 /// Exact permission and ownership checks also reject special mode bits.

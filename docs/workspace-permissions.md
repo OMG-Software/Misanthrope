@@ -70,7 +70,9 @@ bindings stale. The core turn runtime opens the control store, obtains a fresh
 binding, and releases the settings lock for every tool operation instead of
 retaining one across model rounds; it never reconstructs a binding from journal
 metadata. The read-only `file diff` preview also requires the read preference.
-It is not a write grant, and existing-file replacement remains disabled. Evaluation rejects store, session, workspace, revision, expiry,
+It is not a write grant. Trusted Linux ext4 apply separately checks live read
+and write preferences and the native replacement requirements. Evaluation
+rejects store, session, workspace, revision, expiry,
 availability, and flag mismatches before reporting configuration eligibility.
 Checks append audit events without changing the settings revision.
 

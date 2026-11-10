@@ -251,7 +251,18 @@ The tests use actual temporary files. They do not simulate physical power loss,
 foreign-user attacks, privileged bind mounts, or qualify a release filesystem.
 No A2b test demonstrates native replacement or metadata publication.
 
-Before enabling native replacement, implement the
+Phase A2c adds native Linux ext4 publication and CLI acceptance tests. Exercise
+exact content and metadata, a new inode, retained checkpoints, final target and
+stage checks, non-CAS interleavings, authority refusal, and one native attempt.
+Test failures at the commit, verification, file sync, parent sync, and terminal
+append boundaries. Reopen actual files to distinguish unchanged targets,
+published targets, complete visible outcomes, and malformed ledger tails.
+Windows tests confirm an unsupported apply leaves storage and targets unchanged.
+Use ext4 for Linux temporary targets and private storage. The native cross-mount
+case also uses a disposable directory under `/dev/shm` on tmpfs. Tests do not
+establish physical power-loss behavior or Windows publication.
+
+Before enabling another native replacement backend, implement the
 [accepted replacement contract](file-access.md#replacement-contract)
 and run the remaining acceptance cases on native Windows and Linux. Use private,
 disposable files. Use barriers or injected failures at the actual stage/check/
@@ -260,7 +271,7 @@ commit/sync boundaries; sleeps and pre-operation path swaps are insufficient.
 | Boundary | Required evidence |
 | --- | --- |
 | Admission | Missing/expired/stale bindings, wrong session/workspace, read/write denial, changed policy, full logs, and quotas refuse replacement. Settings and permission revocation remain usable. |
-| Preconditions | Stale digest, stale size, and a different entry identity at the final check conflict, including swaps with equal bytes. Reject invalid UTF-8 and unsafe proposed-source objects. Equal proposed bytes cause no replacement or checkpoint. Check exact line endings and byte counts. |
+| Preconditions | Stale digest, stale size, and a changed entry observed before commit intent cause a controlled conflict, including swaps with equal bytes. A mismatch after intent stops the attempt and stays unresolved. Reject invalid UTF-8 and unsafe proposed-source objects. Equal proposed bytes cause no replacement or checkpoint. Check exact line endings and byte counts. |
 | Concurrent change | In-place writes and entry swaps with mismatches observable at the final check produce conflicts and leave workspace entries unchanged by the broker. Preserve the independent edit. An A-to-B-to-A write can go undetected when all checked metadata matches again. Exercise that case and changes after the check; report the documented non-CAS limit rather than asserting isolation. |
 | Native objects | Links, junctions/reparse points, hard links, devices, mount crossings, invalid native paths, unsupported metadata, and cross-filesystem staging refuse replacement. Verify stage and parent substitution checks. |
 | Checkpoints | Exact prior/proposed bytes and digests, exclusive-name collisions, private modes/ACLs, 1 MiB payload bounds, 64 KiB manifests, 64 entries, aggregate 64 MiB quota, and bounded unknown-layout refusal. Count incomplete artifacts; do not evict evidence. |

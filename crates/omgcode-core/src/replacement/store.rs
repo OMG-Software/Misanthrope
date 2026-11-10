@@ -9,14 +9,14 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use omgcode_platform::broker::FileCapture;
-use omgcode_platform::private_store::{PrivateDirectory, file_identity};
+use omgcode_platform::private_store::{PrivateDirectory, file_identity, stage_metadata};
 use serde::Serialize;
 use thiserror::Error;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
-use super::manifest::{MAX_MANIFEST, Manifest, descriptor};
+use super::manifest::{MAX_MANIFEST, Manifest, SecurityMetadata, descriptor};
 use super::replay::{ArtifactNames, Envelope, InitializationAction, LedgerAction};
 use super::{
     InitializationPhase, RecordedArtifact, RecordedReplacement, ReplacementProgress,
@@ -26,6 +26,9 @@ use crate::control::{ControlError, ControlStore};
 use crate::files::FileTarget;
 use crate::workspace::DirectoryRecord;
 
+mod publication;
+pub use publication::ReplacementReceipt;
+
 const ANCHOR: &str = "replacement-init-v1.jsonl";
 const DIRECTORY: &str = "replacement-v1";
 const LEDGER: &str = "ledger.jsonl";
@@ -34,9 +37,9 @@ const MAX_RECORD: usize = 64 * 1024;
 const MAX_EVENTS: usize = 4096;
 const MAX_PAYLOAD: usize = 1024 * 1024;
 const MAX_STORAGE: u64 = 64 * 1024 * 1024;
-// Two 2-KiB terminal records exceed the actual longest v1 finish/ack pair.
-// Admission also leaves four future stage/commit/finish/ack event slots.
-const RECOVERY_BYTES: usize = 4096;
+// Each remaining v1 stage, commit, finish, or acknowledgement record fits 1 KiB.
+const TAIL_RECORD_BYTES: usize = 1024;
+const RECOVERY_BYTES: usize = 4 * TAIL_RECORD_BYTES;
 const FUTURE_STAGE_BYTES: u64 = 1024 * 1024;
 
 /// A controlled checkpoint error. No error authorizes cleanup or retry.
@@ -57,8 +60,8 @@ pub enum CheckpointError {
     /// Required objects, layout, or metadata are invalid; nothing is repaired.
     #[error("invalid checkpoint storage: {0}")]
     Invalid(&'static str),
-    /// Expected content no longer matches the captured current bytes.
-    #[error("checkpoint content conflicts with the expected digest or size")]
+    /// The target differs from the expected content, identity, or metadata.
+    #[error("checkpoint target conflicts with expected content, identity, or metadata")]
     Conflict,
     /// No different content was requested; no checkpoint needs to be created.
     #[error("checkpoint content is unchanged")]
@@ -82,7 +85,7 @@ pub enum CheckpointError {
     #[error("checkpoint writer is poisoned")]
     Poisoned,
     /// Private evidence may exist. Reopen for inspection; do not retry or delete.
-    #[error("checkpoint preparation is uncertain for operation {operation_id:?}: {source}")]
+    #[error("checkpoint operation is uncertain for operation {operation_id:?}: {source}")]
     Uncertain {
         /// None denotes initialization, before an operation was admitted.
         operation_id: Option<Uuid>,
@@ -124,7 +127,7 @@ pub struct CheckpointReceipt {
     pub original: RecordedArtifact,
     /// Exact proposed-byte descriptor, not the file contents.
     pub proposed: RecordedArtifact,
-    /// Always false in this increment.
+    /// Always false for preparation without publication.
     pub applied: bool,
 }
 
@@ -342,6 +345,9 @@ impl Faults {
                 "ready_sync" => "ready_partial_write",
                 "intent_sync" => "intent_partial_write",
                 "prepared_sync" => "prepared_partial_write",
+                "stage_prepared_sync" => "stage_prepared_partial_write",
+                "commit_intent_sync" => "commit_intent_partial_write",
+                "publication_outcome_sync" => "publication_outcome_partial_write",
                 "ack_sync" => "ack_partial_write",
                 _ => "unselected_partial_write",
             };
@@ -365,7 +371,7 @@ impl Store {
     pub(crate) fn open_or_initialize(
         control: &ControlStore,
         volume: u64,
-        before_mutation: impl FnOnce() -> Result<(), CheckpointError>,
+        before_mutation: impl FnOnce(&PrivateDirectory) -> Result<(), CheckpointError>,
     ) -> Result<Self, CheckpointError> {
         let (expected, control_id) = context(control)?;
         let root = open_root(&expected)?;
@@ -375,12 +381,14 @@ impl Store {
             ));
         }
         if state_present(&expected.live_path()?)? {
-            return Self::open_ready(root, control_id, true);
+            let store = Self::open_ready(root, control_id, true)?;
+            before_mutation(&store.root)?;
+            return Ok(store);
         }
         // Probe required parent synchronization before creating the first
         // anchor. This is not a power-loss qualification of the filesystem.
         root.sync()?;
-        before_mutation()?;
+        before_mutation(&root)?;
         Self::initialize(root, control_id, Faults::default()).map_err(|source| {
             CheckpointError::Uncertain {
                 operation_id: None,
@@ -616,16 +624,7 @@ impl Store {
                 RECOVERY_BYTES,
                 "prepared_sync",
             )?;
-            self.used = inventory(
-                &self.root,
-                &self.directory,
-                &self.snapshot,
-                self._anchor
-                    .metadata()?
-                    .len()
-                    .try_into()
-                    .map_err(|_| CheckpointError::Limit)?,
-            )?;
+            self.refresh_usage()?;
             Ok(CheckpointReceipt {
                 operation_id,
                 original,
@@ -640,6 +639,13 @@ impl Store {
                 source: Box::new(source),
             }
         })
+    }
+
+    fn refresh_usage(&mut self) -> Result<(), CheckpointError> {
+        let anchor_bytes =
+            usize::try_from(self._anchor.metadata()?.len()).map_err(|_| CheckpointError::Limit)?;
+        self.used = inventory(&self.root, &self.directory, &self.snapshot, anchor_bytes)?;
+        Ok(())
     }
 
     /// Create one exclusive artifact, sync its bytes and parent, then count it.
@@ -764,7 +770,19 @@ fn encode<A: Serialize>(
 /// Read a private single-link file with a streaming cap and final length check.
 /// Checks use this same handle; they do not promise isolation from same-user writes.
 fn read_bounded(file: &mut File, limit: usize) -> Result<Vec<u8>, CheckpointError> {
-    file_identity(file)?;
+    read_checked(file, limit, |file| file_identity(file).map(|_| ()))
+}
+
+fn read_stage(file: &mut File) -> Result<Vec<u8>, CheckpointError> {
+    read_checked(file, MAX_PAYLOAD, |file| stage_metadata(file).map(|_| ()))
+}
+
+fn read_checked(
+    file: &mut File,
+    limit: usize,
+    validate: impl Fn(&File) -> io::Result<()>,
+) -> Result<Vec<u8>, CheckpointError> {
+    validate(file)?;
     let maximum = u64::try_from(limit).map_err(|_| CheckpointError::Limit)?;
     if file.metadata()?.len() > maximum {
         return Err(CheckpointError::Limit);
@@ -777,7 +795,7 @@ fn read_bounded(file: &mut File, limit: usize) -> Result<Vec<u8>, CheckpointErro
     if bytes.len() > limit {
         return Err(CheckpointError::Limit);
     }
-    file_identity(file)?;
+    validate(file)?;
     if file.metadata()?.len() != u64::try_from(bytes.len()).map_err(|_| CheckpointError::Limit)? {
         return Err(CheckpointError::Invalid(
             "private file changed while reading",
@@ -833,33 +851,36 @@ fn inventory(
             } else {
                 return Err(CheckpointError::Invalid("unknown checkpoint artifact"));
             };
-            let file = entry.open_file(&filename, false)?;
+            let file = if filename == OsStr::new("stage") {
+                entry.open_stage()?
+            } else {
+                entry.open_file(&filename, false)?
+            };
             let length = file.metadata()?.len();
             if length > u64::try_from(limit).map_err(|_| CheckpointError::Limit)? {
                 return Err(CheckpointError::Limit);
             }
             add_usage(&mut used, length)?;
         }
-        if operation.progress != ReplacementProgress::Intent {
+        let security = if operation.progress != ReplacementProgress::Intent {
             let reference = operation
                 .manifest
                 .as_ref()
                 .ok_or(CheckpointError::Invalid("missing manifest reference"))?;
-            validate_prepared(&entry, operation, snapshot.scope, volume, reference)?;
-        }
+            Some(validate_prepared(
+                &entry,
+                operation,
+                snapshot.scope,
+                volume,
+                reference,
+            )?)
+        } else {
+            None
+        };
         if let Some(identity) = &operation.stage_identity {
             if entry.exists(OsStr::new("stage"))? {
-                let mut file = entry.open_file(OsStr::new("stage"), false)?;
-                let actual = file_identity(&file)?;
-                let bytes = read_bounded(&mut file, MAX_PAYLOAD)?;
-                if actual.volume != identity.volume
-                    || actual.file_id != identity.file_id
-                    || descriptor(&bytes)? != operation.proposed
-                {
-                    return Err(CheckpointError::Invalid(
-                        "staging file no longer matches its record",
-                    ));
-                }
+                let security = security.ok_or(CheckpointError::Invalid("stage lacks manifest"))?;
+                validate_stage(&entry, identity, &operation.proposed, security)?;
             } else if operation.progress != ReplacementProgress::CommitIntended {
                 return Err(CheckpointError::Invalid("recorded stage is missing"));
             }
@@ -890,13 +911,13 @@ fn validate_prepared(
     scope: ReplacementScope,
     volume: u64,
     reference: &RecordedArtifact,
-) -> Result<(), CheckpointError> {
+) -> Result<SecurityMetadata, CheckpointError> {
     let mut manifest = entry.open_file(OsStr::new("manifest.json"), false)?;
     let manifest_bytes = read_bounded(&mut manifest, MAX_MANIFEST)?;
     if descriptor(&manifest_bytes)? != *reference {
         return Err(CheckpointError::Invalid("manifest digest or size differs"));
     }
-    Manifest::validate(&manifest_bytes, scope, operation, volume)?;
+    let security = Manifest::validate(&manifest_bytes, scope, operation, volume)?;
     for (name, expected) in [
         ("original", &operation.expected),
         ("proposed", &operation.proposed),
@@ -909,7 +930,30 @@ fn validate_prepared(
             ));
         }
     }
-    Ok(())
+    Ok(security)
+}
+
+/// Validate the exact retained stage against its identity and source metadata.
+fn validate_stage(
+    entry: &PrivateDirectory,
+    identity: &super::RecordedFileIdentity,
+    proposed: &RecordedArtifact,
+    security: SecurityMetadata,
+) -> Result<u64, CheckpointError> {
+    let mut file = entry.open_stage()?;
+    let bytes = read_stage(&mut file)?;
+    let actual = stage_metadata(&file)?;
+    let content = descriptor(&bytes)?;
+    if actual.identity.volume != identity.volume
+        || actual.identity.file_id != identity.file_id
+        || !security.matches_stage(&actual)
+        || content != *proposed
+    {
+        return Err(CheckpointError::Invalid(
+            "staging file no longer matches its record",
+        ));
+    }
+    Ok(content.bytes)
 }
 
 fn lock(file: &File) -> Result<(), CheckpointError> {
@@ -1065,7 +1109,7 @@ mod tests {
             assert!(inspect(&fixture.control).is_err());
             assert!(check_admission(&fixture.control).is_err());
             assert!(
-                Store::open_or_initialize(&fixture.control, fixture.capture().volume, || Ok(()))
+                Store::open_or_initialize(&fixture.control, fixture.capture().volume, |_| Ok(()))
                     .is_err()
             );
             assert_eq!(
@@ -1222,7 +1266,7 @@ mod tests {
             let before = fs::read(&path).ok();
             assert!(inspect(&fixture.control).is_err());
             assert!(
-                Store::open_or_initialize(&fixture.control, fixture.capture().volume, || Ok(()))
+                Store::open_or_initialize(&fixture.control, fixture.capture().volume, |_| Ok(()))
                     .is_err()
             );
             assert_eq!(fs::read(&path).ok(), before);
@@ -1232,7 +1276,7 @@ mod tests {
     #[test]
     fn late_authority_and_filesystem_checks_precede_initialization() {
         let fixture = Fixture::new();
-        let denied = Store::open_or_initialize(&fixture.control, fixture.capture().volume, || {
+        let denied = Store::open_or_initialize(&fixture.control, fixture.capture().volume, |_| {
             Err(CheckpointError::Invalid("authority changed after setup"))
         });
         assert!(denied.is_err());
@@ -1243,7 +1287,7 @@ mod tests {
             .volume
             .checked_add(1)
             .expect("fixture device range");
-        assert!(Store::open_or_initialize(&fixture.control, foreign_volume, || Ok(())).is_err());
+        assert!(Store::open_or_initialize(&fixture.control, foreign_volume, |_| Ok(())).is_err());
         assert!(!fixture.data.join(ANCHOR).exists());
     }
 
@@ -1315,10 +1359,12 @@ mod tests {
                 timestamp: "9999-12-31T23:59:59.999999999Z".to_owned(),
                 action,
             };
-            total += serde_json::to_vec(&envelope)
+            let length = serde_json::to_vec(&envelope)
                 .expect("worst-case tail")
                 .len()
                 + 1;
+            assert!(length <= TAIL_RECORD_BYTES);
+            total += length;
         }
         assert!(total < RECOVERY_BYTES);
     }

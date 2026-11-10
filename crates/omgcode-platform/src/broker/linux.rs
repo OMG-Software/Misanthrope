@@ -21,6 +21,8 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+pub(super) mod replacement;
+
 const OPEN_RETRIES: usize = 4;
 fn root_resolve() -> ResolveFlags {
     ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS

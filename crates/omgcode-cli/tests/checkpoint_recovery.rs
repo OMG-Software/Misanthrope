@@ -186,11 +186,11 @@ fn unused_checkpoint_inspection_and_refused_acknowledgement_create_no_storage() 
 }
 
 #[test]
-/// Rejects unsupported preparation, apply, and restore routes without side effects.
-fn checkpoint_recovery_commands_do_not_add_prepare_apply_or_restore_routes() {
+/// Rejects unsupported preparation and restore routes without side effects.
+fn checkpoint_recovery_commands_do_not_add_prepare_or_restore_routes() {
     let fixture = Fixture::new();
     let before = child_names(&fixture.data);
-    for command in ["prepare", "apply", "restore"] {
+    for command in ["prepare", "restore"] {
         let output = run_cli(
             &fixture.data,
             &["file", command, path_arg(&fixture.workspace)],

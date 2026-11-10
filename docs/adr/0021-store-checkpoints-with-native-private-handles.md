@@ -88,6 +88,9 @@ Phase A2c must resolve its native publication gates before trusted CLI apply.
 Restore remains later work. Checkpoints do not provide process or workspace
 isolation, and complete same-user erasure remains undetectable by this layout.
 
+[ADR-0022](0022-publish-one-verified-stage-on-linux-ext4.md) adds the Linux ext4
+publication path while retaining the standalone preparation and recovery rules.
+
 ## References
 
 - [Replacement contract and implemented A2b scope](../file-access.md#implemented-checkpoint-storage-phase-a2b)

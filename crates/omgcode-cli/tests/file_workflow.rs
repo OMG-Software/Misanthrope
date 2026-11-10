@@ -246,7 +246,10 @@ fn cli_creates_lists_reads_and_audits_files_without_recording_contents() {
         capabilities["exclusive_file_creation"],
         expected_availability
     );
-    assert_eq!(capabilities["existing_file_replacement"], false);
+    assert_eq!(
+        capabilities["existing_file_replacement"],
+        cfg!(target_os = "linux")
+    );
     assert_eq!(capabilities["edit_previews"], native_broker_implemented);
     assert_eq!(capabilities["workspace_file_tools"], false);
 }

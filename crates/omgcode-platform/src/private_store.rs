@@ -4,7 +4,7 @@
 //! private ACL and directory persistence requirements have been qualified.
 
 #[cfg(target_os = "linux")]
-mod linux;
+pub(crate) mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::PrivateDirectory;
 
@@ -18,6 +18,19 @@ pub struct PrivateFileIdentity {
     pub file_id: [u8; 16],
 }
 
+/// Metadata that the Linux replacement stage can preserve without ACL or xattr support.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StageMetadata {
+    /// Identity of the already-open, regular, single-link file.
+    pub identity: PrivateFileIdentity,
+    /// File owner ID.
+    pub owner: u32,
+    /// File group ID.
+    pub group: u32,
+    /// Ordinary permission bits only.
+    pub mode: u32,
+}
+
 /// Inspect the same private file handle whose bytes the caller reads or hashes.
 /// Linux requires a regular, single-link, current-user-owned mode0600 file.
 /// Other platforms refuse before I/O. No pathname lookup or reopen occurs.
@@ -25,6 +38,20 @@ pub fn file_identity(file: &std::fs::File) -> std::io::Result<PrivateFileIdentit
     #[cfg(target_os = "linux")]
     {
         linux::file_identity(file)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = file;
+        Err(unsupported())
+    }
+}
+
+/// Inspect supported replacement-stage metadata from the same open file handle.
+/// This Linux-only contract rejects xattrs, special mode bits, and file attrs.
+pub fn stage_metadata(file: &std::fs::File) -> std::io::Result<StageMetadata> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::stage_metadata(file)
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -72,6 +99,10 @@ impl PrivateDirectory {
     }
     /// Refuse unsupported private file opening.
     pub fn open_file(&self, _name: &OsStr, _writable: bool) -> io::Result<File> {
+        Err(unsupported())
+    }
+    /// Refuse unsupported stage inspection before file access.
+    pub fn open_stage(&self) -> io::Result<File> {
         Err(unsupported())
     }
     /// Refuse unsupported private file creation.
