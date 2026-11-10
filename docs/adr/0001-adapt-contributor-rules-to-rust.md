@@ -7,8 +7,10 @@
 
 The project owner uses established C++ rules in Merovingian and requested a Rust
 adaptation. Their design and verification goals apply, but several language and
-platform conventions do not. OMGCode also has a different security boundary:
-it runs model-directed development tools on Windows and Linux.
+platform conventions do not. OMGCode also needs a different security boundary:
+it is intended to run model-directed development tools on Windows and Linux.
+Model-dispatched tools, process execution, and an execution sandbox remain
+unimplemented in the prototype.
 
 ## Decision
 

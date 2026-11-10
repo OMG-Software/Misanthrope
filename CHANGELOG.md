@@ -96,7 +96,7 @@ Changes are recorded here before a release version is assigned.
   provenance/digest catalog, and documentation links. Runtime skill loading and
   enablement remain planned.
 
-- OMGCode application namespace across Rust crates, CLI, token environment
+- OrangeCode application namespace across Rust crates, CLI, token environment
   variable, default data directory, session filenames, repository links, and
   Sonar project configuration. Existing private data is not moved automatically.
 - Compiled prompt version 0.1.3 with the renamed identity and an updated digest
