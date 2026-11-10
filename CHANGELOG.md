@@ -15,6 +15,11 @@ Changes are recorded here before a release version is assigned.
 
 ### Fixed
 
+- Use a typed checkpoint inspection state while preserving its JSON values.
+  Clarify that checkpoint admission cannot detect complete erasure of both
+  checkpoint paths. Document persistence helper contracts and the acceptance
+  scenarios for checkpoint storage and recovery.
+
 - Harden the core turn/tool runtime: reserve assembled-prompt capacity and
   enforce the selected tool-message limit before recording results, retain
   interim assistant text in follow-up history, preserve original policy

@@ -19,6 +19,11 @@ impl FileBroker<'_> {
     /// file as its bytes. Unsupported backends refuse before checkpoint I/O.
     /// Prepared state remains pending until trusted acknowledgement; this is
     /// not an apply token. No payload bytes appear in the returned receipt.
+    ///
+    /// Each payload is at most 1 MiB. Storage retains at most 64 intents and
+    /// 64 MiB of managed file bytes, with capacity reserved before artifacts.
+    /// A write or sync error can leave uncertain private evidence. Reopen for
+    /// inspection; do not automatically retry or remove that evidence.
     pub fn checkpoint_prepare(
         &mut self,
         binding: &SessionBinding,
@@ -85,17 +90,24 @@ impl FileBroker<'_> {
 
     /// Inspect existing protected metadata without creating files or opening any
     /// workspace target. No checkpoint contents are returned.
+    /// Invalid records or missing required artifacts return an error without
+    /// repair. A complete initializing anchor reports incomplete initialization.
     pub fn checkpoint_inspect(&mut self) -> Result<CheckpointInspection, FileError> {
         Ok(store::inspect(self.control)?)
     }
 
     /// Acknowledge one unresolved operation in existing storage. This does not
     /// assert replacement success, restore bytes, delete evidence, or grant access.
+    /// Only the current pending operation ID is accepted. The acknowledgement
+    /// is appended and synced; a write or sync failure can be uncertain and must
+    /// be inspected on reopen without automatic retry.
     pub fn checkpoint_acknowledge(&mut self, operation_id: Uuid) -> Result<(), FileError> {
         Ok(store::acknowledge(self.control, operation_id)?)
     }
 }
 
+/// Require both permissions from the same live binding while control is locked.
+/// Reuse at mutation boundaries so setup time cannot make an old check a grant.
 fn check_permissions(
     control: &crate::control::ControlStore,
     binding: &SessionBinding,

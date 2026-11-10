@@ -12,6 +12,8 @@ use rustix::io::Errno;
 
 use crate::{DirectoryIdentity, directory_identity};
 
+/// Check privacy on the opened file before returning its device/inode identity.
+/// This never reopens a path or takes ownership from the caller.
 pub(super) fn file_identity(file: &File) -> io::Result<super::PrivateFileIdentity> {
     let metadata = file.metadata()?;
     if !metadata.is_file() || metadata.nlink() != 1 || !private_mode(&metadata, 0o600) {
@@ -112,6 +114,8 @@ impl PrivateDirectory {
         self.open_file_with(name, writable, || Ok(()))
     }
 
+    /// Pin and validate before the test hook, then reopen that inode through procfs.
+    /// A substituted pathname cannot select the data source after pinning.
     fn open_file_with(
         &self,
         name: &OsStr,
@@ -202,6 +206,7 @@ impl PrivateDirectory {
         self.file.sync_all()
     }
 
+    /// Recheck this retained directory's type and effective-user-only mode.
     fn validate(&self) -> io::Result<Metadata> {
         let metadata = self.file.metadata()?;
         if !metadata.is_dir() || !private_mode(&metadata, 0o700) {
@@ -211,11 +216,13 @@ impl PrivateDirectory {
     }
 }
 
+/// Exact permission and ownership checks also reject special mode bits.
 fn private_mode(metadata: &Metadata, mode: u32) -> bool {
     // Safe rustix process metadata is used only to read the current effective UID.
     metadata.uid() == rustix::process::geteuid().as_raw() && metadata.mode() & 0o7777 == mode
 }
 
+/// Refuse nonregular, linked, foreign-device, or nonprivate opened files.
 fn validate_file(file: &File, device: u64) -> io::Result<Metadata> {
     let metadata = file.metadata()?;
     if !metadata.is_file()
@@ -230,6 +237,7 @@ fn validate_file(file: &File, device: u64) -> io::Result<Metadata> {
     Ok(metadata)
 }
 
+/// Accept exactly one bounded native child name, without traversal or NUL.
 fn validate_name(name: &OsStr) -> io::Result<()> {
     let bytes = name.as_bytes();
     if bytes.is_empty()
@@ -253,6 +261,8 @@ fn root_flags() -> ResolveFlags {
 fn child_flags() -> ResolveFlags {
     root_flags() | ResolveFlags::NO_XDEV
 }
+/// Require the requested openat2 controls. Unsupported kernels or flags return
+/// an explicit error; no weaker open is attempted.
 fn native_open(
     parent: &impl rustix::fd::AsFd,
     path: &Path,
