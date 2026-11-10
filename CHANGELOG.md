@@ -60,6 +60,15 @@ Changes are recorded here before a release version is assigned.
 
 ### Added
 
+- Rust 0.9.0 Phase A2c: add trusted `file apply` on Linux ext4 with an exact
+  SHA-256/size precondition and an explicit stop-writers acknowledgement. Preserve
+  supported owner/group/mode metadata, verify a synced private stage, persist
+  commit intent, then attempt one handle-relative rename. Sync the published
+  file and both parents before success. Keep unresolved evidence on failure;
+  never retry, restore, or delete it. Windows apply remains unavailable.
+  Add native publication, fault/reopen, and CLI tests. ADR-0022 records the
+  filesystem and metadata limits. Dependency versions are unchanged.
+
 - Rust 0.8.0 Phase A2b: protected Linux checkpoint preparation through the
   authorized core file broker, exact payload/manifest validation, bounded private
   storage, durable initialization and journal appends, and failure/reopen handling.

@@ -1,8 +1,9 @@
 //! Native, handle-relative workspace I/O. This is not process containment.
 //!
-//! Callers must separately authorize the operation and verify creation times.
-//! No API replaces or deletes existing files. Concurrent hostile same-user
-//! mutation of filesystem namespaces remains outside this boundary.
+//! Callers must separately authorize operations and verify creation times.
+//! Linux provides a native replacement boundary through retained handles;
+//! ordinary create operations never replace existing files. Concurrent
+//! hostile same-user mutation of filesystem namespaces remains outside this boundary.
 
 use std::ffi::OsString;
 use std::io;
@@ -13,6 +14,8 @@ use crate::DirectoryIdentity;
 
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "linux")]
+mod replacement;
 #[cfg(windows)]
 mod windows;
 
@@ -20,6 +23,9 @@ mod windows;
 use linux::NativeWorkspace;
 #[cfg(windows)]
 use windows::NativeWorkspace;
+
+#[cfg(target_os = "linux")]
+pub use replacement::{ReplacementStage, ReplacementTarget};
 
 /// Maximum bytes read or supplied to a single new-file operation.
 pub const MAX_FILE_BYTES: usize = 1024 * 1024;
@@ -286,6 +292,21 @@ impl Workspace {
                 "checkpoint source capture is unavailable",
             ))
         }
+    }
+
+    /// Prepare a retained Linux target for the native replacement protocol.
+    /// This does not authorize publication; callers must check live authority.
+    #[cfg(target_os = "linux")]
+    pub fn replacement_target(
+        &self,
+        path: &RelativePath,
+        max_bytes: usize,
+    ) -> io::Result<ReplacementTarget<'_>> {
+        require_file_target(path)?;
+        if max_bytes == 0 || max_bytes > MAX_FILE_BYTES {
+            return Err(invalid("invalid replacement capture limit"));
+        }
+        self.native.replacement_target(path, max_bytes)
     }
 
     /// Enumerate native names through a directory handle, with bounded output.

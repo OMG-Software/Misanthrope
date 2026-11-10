@@ -18,13 +18,11 @@ archive and active-turn state before starting and obtains a fresh binding before
 each call; it does not infer a live binding from journal metadata. A future CLI
 or provider integration must preserve those checks.
 
-Existing-file replacement, deletion, recursive directory creation, and action
-replay are not supported. A create operation refuses every existing entry.
-In particular, a hash check followed by rename is not atomic compare-and-swap
-against an independent editor. Replacement needs a separate reviewed conflict
-and recovery contract. The [accepted contract below](#replacement-contract)
-defines the remaining replacement gates. Phase A2b implements private checkpoint
-preparation and existing-only recovery, as described below. See
+Trusted apply can replace an existing file on Linux ext4 under the
+[replacement contract](#replacement-contract). A create operation still refuses
+every existing entry. Deletion, restore, recursive directory creation, and action
+replay are unavailable. A content check followed by rename cannot guarantee no
+lost updates against independent writers. See
 [ADR-0013](adr/0013-enforce-file-access-with-native-handles-and-exclusive-creation.md).
 
 ## Authorization
@@ -153,10 +151,8 @@ The current-side size limit is enforced by the broker and reports the broker's
 `file_io` error category. The proposed-side limit reports `edit_limit`.
 
 The preview records the bytes read at that moment. An independent editor can
-change the target after the read; the digests are a snapshot, not a lock. A
-future replacement operation must recheck the target identity and content,
-define conflict and checkpoint behaviour, and handle uncertain outcomes without
-automatic retry. Existing-file replacement remains unsupported. See
+change the target after the read. Apply has a separate identity, content,
+checkpoint, and recovery protocol. A preview grants no authority. See
 [ADR-0017](adr/0017-preview-edits-before-enabling-replacement.md).
 
 ## Replacement contract
@@ -165,8 +161,8 @@ This contract was accepted through PR #10 and
 [ADR-0018](adr/0018-define-checkpointed-replacement-before-enabling-overwrites.md).
 Phase A2a implements read-only validation of caller-supplied record bytes.
 Phase A2b adds Linux private checkpoint storage and existing-only recovery.
-Apply, restore, deletion, and native replacement remain unimplemented.
-Capability output keeps replacement disabled.
+Phase A2c adds trusted native apply on Linux ext4. Windows apply, restore,
+deletion, and model write tools remain unavailable.
 
 ### Implemented record inspection (Phase A2a)
 
@@ -274,10 +270,11 @@ changed manifests, and corrupt payloads. It revalidates existing payload bytes
 on every ready-store admission and inspection. This can read up to the 64 MiB
 store bound per request; this deliberate cost avoids trusting cached evidence.
 
-Preparation stops at `checkpoint_prepared`. It returns `applied: false`, leaves
-the target unchanged, and keeps the operation unresolved. There is no stage,
-commit, apply, restore, export, eviction, or deletion writer. The CLI has no
-preparation command. `file diff` remains a read-only preview.
+Standalone preparation stops at `checkpoint_prepared`. It returns
+`applied: false`, leaves the target unchanged, and keeps the operation unresolved.
+The CLI has no standalone preparation command. Apply creates its own checkpoint
+and continues in the same authorized operation. `file diff` remains a read-only
+preview. Restore, export, eviction, and deletion are unavailable.
 
 `FileBroker::checkpoint_inspect` and `checkpoint_acknowledge` are operator
 recovery APIs. Their trusted CLI routes are:
@@ -305,6 +302,78 @@ error can be validated on reopen, without asserting that the original sync
 succeeded. A partial record is invalid and is never automatically truncated or
 repaired. The downgrade and complete-state-erasure limits below still apply.
 See [ADR-0021](adr/0021-store-checkpoints-with-native-private-handles.md).
+
+### Implemented native apply (Phase A2c)
+
+The v0.9.0 `file apply` command accepts an existing registered workspace and
+session, a lossless relative target, an exact current SHA-256 and byte count,
+and a trusted local file with the complete proposed content:
+
+```text
+omgcode --data-dir /private/omgcode-data file apply WORKSPACE_UUID notes.txt --session SESSION_UUID --content-file /private/proposed.txt --expected-sha256 CURRENT_SHA256 --expected-bytes CURRENT_BYTES --writers-stopped
+```
+
+Stop other writers before running it. The required flag acknowledges this
+operating assumption. It does not lock editors or make the rename conditional
+on the expected bytes. An edit, swap, or removal after the final check can go
+undetected. A target removed in that window can be recreated by the rename.
+The original checkpoint preserves the bytes captured by OMGCode; it cannot
+guarantee that they were the last bytes at the target. Do not use this route
+when independent writers cannot be stopped.
+
+The CLI captures the proposed file once using the preview's regular-file,
+no-final-link input check. Both byte sequences must be valid UTF-8 and at most
+1 MiB. The core checks a live binding and both permission preferences. Missing,
+linked, or unsafe targets are refused. A stale digest or size conflicts before
+checkpoint creation. Equal bytes return `changed: false`, `applied: false`,
+and no operation ID. A source read can still create its ordinary read audit.
+
+Native apply requires Linux with `openat2`, procfs, and a positive
+`statx` mount ID (available since Linux 5.8). The retained workspace parent and
+private storage must be on the same ext4 mount. Check the mount ID against a
+bounded kernel mountinfo record and probe directory sync before private work.
+Equal device numbers alone do not establish this. Mount aliases, non-ext4
+mounts, missing controls, and unsupported platforms fail closed. Existing
+read/list/create and standalone checkpoint preparation retain their earlier
+requirements.
+
+The source must be owned by the effective user. Apply preserves owner, group,
+and ordinary permission bits. It refuses extended attributes, including access
+ACLs, labels, and capabilities, special mode bits, and unpreserved inode flags,
+project IDs, or extent hints. Kernel allocation layout, inode ID, and times can
+change. An attribute query failure prevents publication. There is no fallback
+that copies default permissions onto the target.
+
+Apply retains the target and both parent handles across the bounded operation.
+It syncs the original and proposed checkpoint payloads, manifest, and prepared
+record before staging. The exclusive `stage` file remains under a mode-0700
+operation directory even after its permissions match the target. Write, set
+metadata, sync, and verify the stage before recording `stage_prepared`. Reserve
+its maximum bytes and the whole remaining ledger tail before artifacts.
+
+Compare the live parent, target identity, original bytes, and required metadata
+with the retained evidence. Also verify the stage's identity, bytes, and
+metadata. A detected target conflict before commit intent records a conflict
+and leaves the independent change intact. The private files remain retained.
+After syncing `commit_intended`, recheck the native objects again and check live
+authority immediately before one handle-relative `renameat2` call. Verify the
+published object and absence of the stage name. Sync the published file and
+both changed parents, then sync a success outcome. The receipt contains exact
+descriptors and an operation ID, with `applied: true` only after those steps.
+
+An error after intent can leave the target unchanged or published. The writer
+returns uncertainty with the operation ID and preserves the visible history.
+It does not retry or restore. Inspect the actual target out of band and run
+`file checkpoints` to inspect retained metadata. It never opens the workspace
+from historical records. While an operation is unresolved, new broker work is
+blocked. Acknowledgement clears only the matching blocker. A complete outcome
+can be visible after a sync failure; that does not turn the earlier caller
+result into success. Partial or corrupt records still fail closed.
+
+Native verification covers the ordered sync calls and fault/reopen behavior on
+Ubuntu 24.04 under WSL, kernel 6.6.87.2, on ext4 with `data=ordered`.
+This does not qualify physical power-loss behavior or a release filesystem
+matrix. See [ADR-0022](adr/0022-publish-one-verified-stage-on-linux-ext4.md).
 
 ### Admission and conflict checks
 
@@ -336,9 +405,10 @@ Capture at most 1 MiB of current bytes and calculate their digest and size.
 They must match the request. Use those same captured bytes for the checkpoint;
 do not copy the target again by pathname. Recheck the current entry's identity,
 digest, size, and required metadata immediately before the native replacement.
-Any mismatch observed before commit must return a controlled conflict without
-replacing the target. Private preparation artifacts can remain and must be
-recorded.
+A target mismatch observed before recording commit intent returns a controlled
+conflict without replacing the target. Private preparation artifacts remain
+recorded. A mismatch in the check after commit intent stops the native attempt
+and leaves the operation unresolved under the version-1 ledger contract.
 Identical current and proposed bytes need no replacement or checkpoint.
 
 These checks are **not atomic compare-and-swap**. An independent editor can
@@ -408,7 +478,7 @@ initialization journal. That unused state must allow existing read/list/create
 operations without provisioning replacement storage. Ordinary file admission
 must not create a replacement ledger just because it is absent.
 
-The current library preparation API, or a future trusted apply, may provision
+The library preparation API or trusted apply may provision
 storage under the control writer lock,
 after authorization, private-storage, same-filesystem, and capacity checks.
 Use a separate `<data-dir>/replacement-init-v1.jsonl` anchor, outside the
@@ -458,8 +528,9 @@ Required ordering:
    the staging identity before the native commit attempt; an interrupted
    staging creation is unresolved, not permission to delete that name.
 4. Recheck the expected current entry and stage, including single-link status,
-   identity, bytes, and required metadata. Record commit intent durably, then
-   perform one reviewed native replacement. Never truncate the current inode.
+   identity, bytes, and required metadata. Record commit intent durably. Repeat
+   the native checks and check live authority before one reviewed native
+   replacement. Never truncate the current inode.
 5. Verify the published object and bytes, sync the required file/directory
    state, and persist the terminal outcome before reporting success. A later
    external edit is still possible. Success describes the completed operation,
@@ -483,11 +554,12 @@ is made. Replay and archive/restore must never execute a recorded replacement.
 
 ### Native backend gates
 
-The following are implementation directions, not qualified backends:
+Linux ext4 is the implemented prototype. Windows remains an unqualified
+implementation direction:
 
 | Backend | Required primitive and review gate |
 | --- | --- |
-| Linux | Retain rooted parent handles and use a same-filesystem `renameat2` replacement from the private stage. The rename is atomic namespace publication, not an expected-content check. Verify `fsync` for checkpoint files, checkpoint directories, the staged file, and both rename parents in the required order. |
+| Linux | Require one ext4 mount and retained rooted parent handles. Use one `renameat2` replacement from the private stage. Sync checkpoint files, checkpoint directories, the staged/published file, and both rename parents in the required order. The rename changes the namespace atomically; it cannot check expected content. |
 | Windows | Review a retained-source-handle rename with a retained target-parent handle through `FILE_RENAME_INFORMATION`, using replace-if-exists semantics. Verify access/share requirements, target-open conflicts, reparse controls, metadata handling, failure states, and directory-entry persistence. Resolve the existing directory-option contract gap for this operation. |
 
 The [Linux rename contract](https://man7.org/linux/man-pages/man2/rename.2.html)

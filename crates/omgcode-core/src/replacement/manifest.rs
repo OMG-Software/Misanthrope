@@ -1,6 +1,7 @@
 //! Exact, bounded checkpoint manifests. They never authorize workspace access.
 
 use omgcode_platform::broker::FileCapture;
+use omgcode_platform::private_store::StageMetadata;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -29,10 +30,18 @@ pub(super) struct Manifest {
     security: SecurityMetadata,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(tag = "platform", rename_all = "snake_case", deny_unknown_fields)]
-enum SecurityMetadata {
+pub(super) enum SecurityMetadata {
     Linux { owner: u32, group: u32, mode: u32 },
+}
+
+impl SecurityMetadata {
+    /// Match the metadata that the new inode must preserve from the captured source.
+    pub(super) fn matches_stage(self, stage: &StageMetadata) -> bool {
+        let Self::Linux { owner, group, mode } = self;
+        (owner, group, mode) == (stage.owner, stage.group, stage.mode)
+    }
 }
 
 impl Manifest {
@@ -83,7 +92,7 @@ impl Manifest {
         scope: ReplacementScope,
         operation: &RecordedReplacement,
         volume: u64,
-    ) -> Result<(), CheckpointError> {
+    ) -> Result<SecurityMetadata, CheckpointError> {
         if bytes.len() > MAX_MANIFEST {
             return Err(CheckpointError::Limit);
         }
@@ -108,7 +117,7 @@ impl Manifest {
                 "manifest does not match its recorded operation",
             ));
         }
-        Ok(())
+        Ok(manifest.security)
     }
 }
 

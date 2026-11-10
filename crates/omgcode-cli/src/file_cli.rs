@@ -7,6 +7,8 @@ use omgcode_core::control::ControlStore;
 use omgcode_core::edit::{self, EditError};
 use omgcode_core::files::{FileBroker, FileError, FileTarget};
 use omgcode_core::policy::WorkspaceId;
+#[cfg(target_os = "linux")]
+use omgcode_core::replacement::RecordedArtifact;
 use serde_json::json;
 use uuid::Uuid;
 
@@ -65,6 +67,29 @@ pub(crate) enum FileCommand {
         /// Maximum accepted size of either side of the comparison.
         #[arg(long, default_value_t = edit::MAX_EDIT_CONTENT_BYTES)]
         max_bytes: usize,
+    },
+    /// Replace one existing file after checkpointing its exact prior bytes.
+    ///
+    /// Stop every other writer before this operation. The expected digest and
+    /// native replacement do not provide atomic compare-and-swap and cannot
+    /// prevent concurrent edits or guarantee that every such edit is saved.
+    Apply {
+        #[command(flatten)]
+        scope: Scope,
+        /// Existing workspace-relative regular file to replace.
+        path: PathBuf,
+        /// Trusted local file containing the complete proposed UTF-8 content.
+        #[arg(long)]
+        content_file: PathBuf,
+        /// Expected SHA-256 of the current file's exact bytes.
+        #[arg(long)]
+        expected_sha256: String,
+        /// Expected byte count of the current file.
+        #[arg(long)]
+        expected_bytes: u64,
+        /// Acknowledge that all other writers are stopped. This does not provide CAS.
+        #[arg(long, required = true, action = clap::ArgAction::SetTrue)]
+        writers_stopped: bool,
     },
     /// Inspect validated private file-operation metadata and pending recovery.
     Audit {
@@ -170,6 +195,42 @@ pub(crate) fn run(command: FileCommand, data_root: &Path) -> Result<(), CliError
             print_json(
                 &edit::preview(&current.bytes, &proposed, current.target).map_err(edit_error)?,
             )
+        }
+        FileCommand::Apply {
+            scope,
+            path,
+            content_file,
+            expected_sha256,
+            expected_bytes,
+            writers_stopped: _,
+        } => {
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = (scope, path, content_file, expected_sha256, expected_bytes);
+                Err(CliError::new(
+                    "file_unsupported",
+                    "File replacement is available only on Linux",
+                ))
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let binding = control
+                    .bind_session(scope.session, scope.workspace)
+                    .map_err(|error| CliError::new("control", error.to_string()))?;
+                let target = target(scope, path);
+                let proposed =
+                    edit::read_proposed_file(&content_file, edit::MAX_EDIT_CONTENT_BYTES)
+                        .map_err(proposed_error)?;
+                let expected = RecordedArtifact {
+                    bytes: expected_bytes,
+                    sha256: expected_sha256,
+                };
+                print_json(
+                    &FileBroker::new(&mut control)
+                        .apply_replacement(&binding, &target, &expected, &proposed)
+                        .map_err(file_error)?,
+                )
+            }
         }
         FileCommand::Audit { limit, archive } => {
             let mut broker = FileBroker::new(&mut control);

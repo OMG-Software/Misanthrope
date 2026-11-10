@@ -1,19 +1,20 @@
 # Build and run the core prototype
 
-OMGCode 0.8.0 is a developer CLI prototype with workspace permission
+OMGCode 0.9.0 is a developer CLI prototype with workspace permission
 settings and bounded native file operations through trusted operator commands.
 It can send a text conversation to an explicitly selected local LM Studio model
 and save that conversation. It can read/list files, exclusively create new
 files/directories, and preview a bounded diff against trusted proposed content
 in a registered workspace. The core also has a bounded turn/tool runtime for
-library callers and tests, but no CLI command exposes it. The CLI cannot replace
-or delete existing files, run commands, use Git, or connect to MCP servers.
+library callers and tests, but no CLI command exposes it. Trusted CLI apply can
+replace an existing file on Linux ext4. The CLI cannot restore or delete files,
+run commands, use Git, or connect to MCP servers.
 CLI/provider model tool dispatch and an execution sandbox are not implemented.
 
 The core's byte-input replacement inspectors remain read-only. Its file broker
 also provides Linux-only `checkpoint_prepare` with fresh read/write authority.
 Private initialization, exact manifest/payload validation, bounded retention,
-and synced journal appends are implemented. No CLI command prepares or applies a
+and synced journal appends are implemented. No CLI command creates a standalone
 checkpoint. The CLI provides existing-only inspection and acknowledgement:
 
 ```text
@@ -24,10 +25,24 @@ omgcode --data-dir /private/omgcode-data file acknowledge-checkpoint OPERATION_U
 These commands require existing workspace settings, but no workspace/session
 selection. Inspection never initializes storage and returns metadata only.
 Acknowledgement never applies, restores, deletes, retries, or grants access.
-A prepared checkpoint intentionally remains unresolved until acknowledged.
-Windows can report unused state but refuses present checkpoint storage and
-preparation before checkpoint I/O. See the
+A standalone prepared checkpoint remains unresolved until acknowledged.
+Windows can report unused state but refuses present checkpoint storage,
+preparation, and apply. See the
 [checkpoint storage contract](file-access.md#implemented-checkpoint-storage-phase-a2b).
+
+For a trusted apply, stop all independent writers before starting. Use the
+preview's current SHA-256 and exact byte count as the precondition. Supply the
+complete proposed content from a local file:
+
+```text
+omgcode --data-dir /private/omgcode-data file apply WORKSPACE_UUID notes.txt --session SESSION_UUID --content-file /private/proposed.txt --expected-sha256 CURRENT_SHA256 --expected-bytes CURRENT_BYTES --writers-stopped
+```
+
+The flag confirms an operating assumption. It does not lock external editors
+or make the rename conditional on the expected bytes. A reported uncertainty
+requires inspection of the target and retained checkpoint evidence before
+acknowledgement or any new apply. See the
+[native apply contract](file-access.md#implemented-native-apply-phase-a2c).
 
 ## Build
 
@@ -108,14 +123,16 @@ folder/session tree remain future work.
 
 ## Workspace files
 
-Scoped file commands (`read`, `list`, `create`, `mkdir`, and `diff`) require
+Scoped file commands (`read`, `list`, `create`, `mkdir`, `diff`, and `apply`) require
 existing workspace settings, a configured development root, a registered
 workspace ID, and an explicit session UUID. They do not initialize settings,
 infer a root, or treat a journal's workspace metadata as a grant. `read`, `list`,
 and `diff` require the read preference. `create` and `mkdir` require the write
-preference. Execute remains disabled. The `audit` and `acknowledge` recovery commands require only
-existing workspace settings. They do not require a configured root, workspace
-registration, or session selection. Chat advertises no file tools.
+preference. `apply` requires both preferences and a supported native mount.
+Execute remains disabled. The `audit`, `acknowledge`, `checkpoints`, and
+`acknowledge-checkpoint` recovery commands require existing workspace settings.
+They do not require a configured root, workspace registration, or session
+selection. Chat advertises no file tools.
 
 Capability JSON separates implementation from availability. On Linux and
 Windows, `workspace_file_broker_implemented` is `true`, while
@@ -124,8 +141,9 @@ other platforms, all three values are `false`. The CLI does not probe the ambien
 filesystem for capability reporting. A command checks settings, scope, policy,
 and native requirements when it runs. These values do not promise that an
 operation can proceed. `edit_previews` is `true` on Linux and Windows for the
-trusted CLI preview. `existing_file_replacement` and `workspace_file_tools`
-remain `false`.
+trusted CLI preview. `existing_file_replacement` is `true` on Linux to indicate
+implementation, and `false` elsewhere. The CLI does not probe the mount, metadata,
+or permissions for that flag. `workspace_file_tools` remains `false`.
 
 ```text
 omgcode --data-dir C:\omgcode-data file read WORKSPACE_ID --session SESSION_UUID src\main.rs --max-bytes 65536

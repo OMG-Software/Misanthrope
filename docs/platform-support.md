@@ -22,6 +22,7 @@ containment.
 | Model file tools | Disabled; `workspace_file_tools` remains false |
 | Linux broker prerequisites | Linux 5.6 or later for required `openat2`; `/proc/self/fd` must be available for pinned-file reads; unsupported features fail closed |
 | Checkpoint preparation/storage | Linux-only core API; openat2/procfs, current-user mode0700 directories/mode0600 files, native birth-time metadata and real file/directory sync required; Windows unavailable |
+| Trusted apply | Linux ext4 prototype only; positive statx mount ID (Linux 5.8 or later), same mount, supported file metadata, and file/parent sync required; Windows unavailable |
 | macOS | Outside the first-release target |
 
 ## Support requirements
@@ -48,11 +49,13 @@ containment.
 - Resolve the Windows directory-option contract gap described in the
   [file-access guide](file-access.md) before qualifying a Windows backend.
   A successful native test run does not settle an omission in the API contract.
-- Existing-file replacement remains unavailable. The
+- Trusted Linux ext4 apply is available when its native checks pass. The
   [accepted replacement gates](file-access.md#native-backend-gates) require
   private staging on the target filesystem, reviewed handle-relative
   publication, security-metadata preservation, and checkpoint/directory
-  persistence evidence. Current read/create tests do not qualify those paths.
+  persistence evidence. Native apply tests exercise one rename and ordered
+  syncs on the tested mount. They do not qualify a release filesystem matrix
+  or physical power-loss behavior.
   In particular, Windows per-user checkpoint ACLs and directory-entry durability
   must be established before enabling that backend; there is no weaker fallback.
 - Phase A2b uses retained private directory handles on Linux. Selecting the
@@ -66,7 +69,10 @@ containment.
   mode bits from the same pinned file. Checkpoint preparation refuses extended
   attributes (including access ACLs/labels/capabilities) and special mode bits;
   it does not silently drop them. Ordinary broker reads retain their prior
-  scope. Native commit/metadata preservation remains Phase A2c work.
+  scope. Apply adds same-mount checks, requires a source owned by the effective
+  user, and verifies exact owner/group/mode on the stage and published file.
+  It refuses unpreserved inode flags, project IDs, and extent hints. Kernel
+  allocation layout may differ.
 - Workspace registration also records a configuration-time directory identity.
   Linux uses the live handle's device and inode values. It also requires a
   creation time from the filesystem (`statx` birth time, `btime`); if the kernel
@@ -78,9 +84,10 @@ containment.
   prevent every path-swap race, or contain processes. Filesystem support for
   creation-time metadata is not release-qualified.
 - The core and CLI crates forbid unsafe Rust. The platform crate keeps Windows
-  FFI in narrow journal and broker handle wrappers. Linux uses Rustix safe
-  wrappers for the required native operations. This is not a general permission
-  to add unsafe code outside a reviewed platform boundary.
+  FFI in narrow journal and broker wrappers. Linux uses safe Rustix calls for
+  publication and a narrow read-only `FS_IOC_FSGETXATTR` wrapper for metadata
+  that safe Rustix calls do not expose. This does not permit unsafe code outside
+  the reviewed platform boundary.
 - Treat WSL as Linux execution on a Windows host. A WSL test does not verify
   native Windows process containment.
 - Review a virtual-machine backend as a separate design if native containment

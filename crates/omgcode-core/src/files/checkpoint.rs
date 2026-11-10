@@ -1,6 +1,6 @@
 //! Authorized private preparation and existing-only operator recovery.
 
-use omgcode_platform::broker;
+use omgcode_platform::broker::{self, FileCapture, RelativePath};
 use uuid::Uuid;
 
 use super::{FileBroker, FileError, FileOperation, FileOutcome, FileTarget, validate_target};
@@ -31,20 +31,7 @@ impl FileBroker<'_> {
         expected: &RecordedArtifact,
         proposed: &[u8],
     ) -> Result<CheckpointReceipt, FileError> {
-        if proposed.len() > broker::MAX_FILE_BYTES
-            || expected.bytes > 1024 * 1024
-            || expected.sha256.len() != 64
-            || !expected
-                .sha256
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-            || std::str::from_utf8(proposed).is_err()
-        {
-            return Err(FileError::Invalid(
-                "checkpoint requires bounded UTF-8 and an exact SHA-256/size precondition",
-            ));
-        }
-        let path = validate_target(target, false)?;
+        let path = validate_request(target, expected, proposed)?;
         check_permissions(self.control, binding, target)?;
         if !cfg!(target_os = "linux") {
             return Err(CheckpointError::Io(std::io::Error::new(
@@ -66,22 +53,13 @@ impl FileBroker<'_> {
         // Lock order is control, then one subordinate journal at a time. The
         // read outcome is durable before the checkpoint anchor can be locked.
         drop(audit);
-        if u64::try_from(capture.bytes.len())
-            .map_err(|_| FileError::Invalid("capture size overflow"))?
-            != expected.bytes
-            || sha256_hex(&capture.bytes) != expected.sha256
-        {
-            return Err(CheckpointError::Conflict.into());
-        }
-        if std::str::from_utf8(&capture.bytes).is_err() {
-            return Err(FileError::Invalid("checkpoint source is not UTF-8"));
-        }
+        validate_capture(&capture, expected)?;
         if capture.bytes == proposed {
             return Err(CheckpointError::Unchanged.into());
         }
         // Root setup precedes the callback; initialization cannot start from an
         // old authorization result. The control writer remains borrowed here.
-        let mut store = Store::open_or_initialize(self.control, capture.volume, || {
+        let mut store = Store::open_or_initialize(self.control, capture.volume, |_| {
             check_permissions(self.control, binding, target)
         })?;
         check_permissions(self.control, binding, target)?;
@@ -108,7 +86,7 @@ impl FileBroker<'_> {
 
 /// Require both permissions from the same live binding while control is locked.
 /// Reuse at mutation boundaries so setup time cannot make an old check a grant.
-fn check_permissions(
+pub(super) fn check_permissions(
     control: &crate::control::ControlStore,
     binding: &SessionBinding,
     target: &FileTarget,
@@ -125,6 +103,46 @@ fn check_permissions(
         if !decision.configured_allowed() {
             return Err(CheckpointError::Denied(decision.reason()));
         }
+    }
+    Ok(())
+}
+
+/// Check the complete proposed bytes and exact precondition before opening a target.
+pub(super) fn validate_request(
+    target: &FileTarget,
+    expected: &RecordedArtifact,
+    proposed: &[u8],
+) -> Result<RelativePath, FileError> {
+    if proposed.len() > broker::MAX_FILE_BYTES
+        || expected.bytes > 1024 * 1024
+        || expected.sha256.len() != 64
+        || !expected
+            .sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || std::str::from_utf8(proposed).is_err()
+    {
+        return Err(FileError::Invalid(
+            "checkpoint requires bounded UTF-8 and an exact SHA-256/size precondition",
+        ));
+    }
+    validate_target(target, false)
+}
+
+/// Compare the bytes from the retained source before creating private evidence.
+pub(super) fn validate_capture(
+    capture: &FileCapture,
+    expected: &RecordedArtifact,
+) -> Result<(), FileError> {
+    if u64::try_from(capture.bytes.len())
+        .map_err(|_| FileError::Invalid("capture size overflow"))?
+        != expected.bytes
+        || sha256_hex(&capture.bytes) != expected.sha256
+    {
+        return Err(CheckpointError::Conflict.into());
+    }
+    if std::str::from_utf8(&capture.bytes).is_err() {
+        return Err(FileError::Invalid("checkpoint source is not UTF-8"));
     }
     Ok(())
 }

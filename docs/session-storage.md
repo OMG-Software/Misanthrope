@@ -9,7 +9,9 @@ recovery UI.
 
 The [accepted replacement contract](file-access.md#replacement-contract)
 uses a separate versioned ledger and private checkpoint store. Phase A2b adds
-protected Linux storage and its writer. The existing strict file-operation-v1,
+protected Linux storage and its writer. Phase A2c records stage, commit intent,
+and outcome for trusted Linux ext4 apply in that same replacement ledger.
+The existing strict file-operation-v1,
 control-v1, and session schemas are unchanged. Checkpoint contents are never
 stored in conversation events or returned by ordinary checkpoint inspection.
 Session replay, archive, and restore cannot authorize or replay replacement.

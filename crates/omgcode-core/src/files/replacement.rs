@@ -1,0 +1,142 @@
+//! Authorized, single-attempt replacement of an existing workspace file.
+
+use std::io;
+
+#[cfg(target_os = "linux")]
+use omgcode_platform::broker;
+
+#[cfg(target_os = "linux")]
+use super::checkpoint::{check_permissions, validate_capture, validate_request};
+use super::{FileBroker, FileError, FileTarget};
+#[cfg(target_os = "linux")]
+use super::{FileOperation, FileOutcome};
+#[cfg(target_os = "linux")]
+use crate::policy::Operation;
+use crate::policy::SessionBinding;
+#[cfg(target_os = "linux")]
+use crate::replacement::store::Store;
+use crate::replacement::{CheckpointError, RecordedArtifact, ReplacementReceipt};
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests;
+
+impl FileBroker<'_> {
+    /// Apply complete UTF-8 content against an exact size and SHA-256 precondition.
+    ///
+    /// A trusted caller must stop independent writers. The final check and rename
+    /// are separate operations; this API cannot guarantee no lost updates. It
+    /// requires a live binding and both read and write preferences. Unsupported
+    /// platforms, mounts, or metadata fail closed. No recorded history is replayed.
+    ///
+    /// A write, commit, verification, or sync failure can leave private evidence
+    /// and a changed target. Inspect the operation before any further decision.
+    /// This method never retries a commit, restores bytes, or removes evidence.
+    pub fn apply_replacement(
+        &mut self,
+        binding: &SessionBinding,
+        target: &FileTarget,
+        expected: &RecordedArtifact,
+        proposed: &[u8],
+    ) -> Result<ReplacementReceipt, FileError> {
+        #[cfg(target_os = "linux")]
+        {
+            self.apply_with_preparation_hook(binding, target, expected, proposed, |_| {})
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (binding, target, expected, proposed);
+            Err(CheckpointError::Io(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "native replacement is not qualified on this platform",
+            ))
+            .into())
+        }
+    }
+
+    /// The test hook runs after checkpoint sync and before staging. Production
+    /// uses a no-op. The control writer remains held for the entire operation.
+    #[cfg(target_os = "linux")]
+    fn apply_with_preparation_hook(
+        &mut self,
+        binding: &SessionBinding,
+        target: &FileTarget,
+        expected: &RecordedArtifact,
+        proposed: &[u8],
+        after_preparation: impl FnOnce(&mut Store),
+    ) -> Result<ReplacementReceipt, FileError> {
+        let path = validate_request(target, expected, proposed)?;
+        check_permissions(self.control, binding, target)?;
+        let (workspace, mut audit, read_id) =
+            self.begin(binding, target, &path, FileOperation::Read, Operation::Read)?;
+        let native = match workspace.replacement_target(&path, broker::MAX_FILE_BYTES) {
+            Ok(target) => target,
+            Err(source) => {
+                audit.finish(read_id, FileOutcome::Failed)?;
+                return Err(FileError::Native(source));
+            }
+        };
+        audit.finish(read_id, FileOutcome::Succeeded)?;
+        // Control, then at most one subordinate journal. The workspace and its
+        // retained target stay alive after the legacy read journal closes.
+        drop(audit);
+
+        let capture = native.capture();
+        validate_capture(capture, expected)?;
+        if capture.bytes == proposed {
+            return Ok(ReplacementReceipt {
+                operation_id: None,
+                original: expected.clone(),
+                proposed: expected.clone(),
+                changed: false,
+                applied: false,
+            });
+        }
+
+        let mut store = Store::open_or_initialize(self.control, capture.volume, |root| {
+            native.check_storage(root)?;
+            check_permissions(self.control, binding, target)
+        })?;
+        check_permissions(self.control, binding, target)?;
+        let prepared = store.prepare(target, self.control.revision(), capture, proposed)?;
+        let operation_id = prepared.operation_id;
+        after_preparation(&mut store);
+
+        let mut stage = store.with_publication_evidence(operation_id, |store| {
+            check_permissions(self.control, binding, target)?;
+            let directory = store.stage_directory(operation_id)?;
+            let stage = native.prepare_stage(directory, proposed)?;
+            store.record_stage(operation_id, stage.identity()?)?;
+            Ok(stage)
+        })?;
+        let same_target =
+            store.with_publication_evidence(operation_id, |_| Ok(native.recheck(&stage)?))?;
+        if !same_target {
+            store.with_publication_evidence(operation_id, |store| {
+                store.finish_conflict(operation_id)
+            })?;
+            return Err(CheckpointError::Conflict.into());
+        }
+
+        store.with_publication_evidence(operation_id, |store| {
+            check_permissions(self.control, binding, target)?;
+            store.record_commit_intent(operation_id)?;
+            // Sync can consume the binding lifetime. A denial here remains
+            // unresolved under the v1 commit-intent contract; no rename follows.
+            check_permissions(self.control, binding, target)?;
+            store.publication_boundary("before_native_commit")?;
+            native.commit(&mut stage, || {
+                check_permissions(self.control, binding, target).map_err(io::Error::other)
+            })?;
+            store.publication_boundary("after_native_commit")?;
+            store.finish_publication_success(operation_id)
+        })?;
+
+        Ok(ReplacementReceipt {
+            operation_id: Some(operation_id),
+            original: prepared.original,
+            proposed: prepared.proposed,
+            changed: true,
+            applied: true,
+        })
+    }
+}

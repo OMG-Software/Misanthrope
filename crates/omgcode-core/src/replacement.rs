@@ -1,13 +1,15 @@
 //! Replacement records and protected private checkpoint storage.
 //!
 //! The byte-input inspectors remain read-only. FileBroker checkpoint methods
-//! add protected Linux storage and existing-only recovery. Neither path replaces
-//! a workspace file, restores content, or executes a recorded action.
+//! add protected Linux storage and existing-only recovery. The authorized apply
+//! path publishes one staged file; these records never restore or replay work.
 
 mod manifest;
 mod replay;
 pub(crate) mod store;
-pub use store::{CheckpointError, CheckpointInspection, CheckpointReceipt, CheckpointState};
+pub use store::{
+    CheckpointError, CheckpointInspection, CheckpointReceipt, CheckpointState, ReplacementReceipt,
+};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;

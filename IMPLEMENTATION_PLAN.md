@@ -28,8 +28,10 @@ This is a resume guide, not a replacement for the owning contracts in
 - **PR #12** merged at `9e616a3`: the OMGCode rename, version 0.7.0.
 - **PR #13** merged at `22040d5`: **Phase A2b**, version **0.8.0**, with
   protected Linux checkpoint storage and existing-only CLI recovery.
-- This branch, `codex/checkpoint-review-fixes`, addresses PR #13 review comments.
-  Verify that its follow-up PR is merged before A2c starts.
+- **PR #14** merged at `b3829db`: typed checkpoint inspection state and
+  A2b review fixes, with no JSON or storage format change.
+- This branch, `codex/native-replacement`, implements **Phase A2c** on that
+  baseline, version **0.9.0**. It adds trusted Linux ext4 apply.
 
 Implemented today:
 
@@ -62,10 +64,14 @@ Implemented today:
 - Existing-only `file checkpoints` and `file acknowledge-checkpoint` recovery.
   Inspection returns metadata. Acknowledgement clears a blocker without success,
   repair, permission changes, or replay. Windows checkpoint storage is unsupported.
+- Trusted `file apply` on Linux ext4: exact precondition, stopped-writers
+  acknowledgement, private stage, durable commit intent, one native rename,
+  and verified sync/outcome ordering. See [ADR-0022](docs/adr/0022-publish-one-verified-stage-on-linux-ext4.md).
 
 Not implemented:
 
-- Existing-file replacement, apply, restore, deletion, and CLI checkpoint preparation.
+- Windows apply, apply on other Linux filesystems, restore, deletion, and
+  standalone CLI checkpoint preparation.
 - CLI or real-provider model tool dispatch.
 - Process execution, execution containment, Git, MCP, runtime skills, memories,
   desktop/UI panels, compaction, or caches.
@@ -85,10 +91,9 @@ Not implemented:
    git status --porcelain
    ```
 
-2. Verify that the preceding phase's PR is merged. A1, A2a, and the rename are
-   merged, as is A2b in PR #13. Before A2c, verify the review-fix follow-up PR.
-   Preserve its feature branch while it is under review. Do not infer
-   replacement from checkpoint storage tests.
+2. Verify that the preceding phase's PR is merged. A2b and its review fixes
+   are merged as PRs #13 and #14. Verify the A2c PR before starting another
+   increment. Preserve its feature branch while it is under review.
    Do not merge a PR without the user's authorization.
 3. Re-read the owning contracts for the selected phase. Do not infer authority
    from this plan, prompts, journals, or model output.
@@ -129,6 +134,19 @@ The final provider fixtures did not time out. Earlier baseline timeout evidence
 is retained; no assertion or timeout was weakened. These local results do not
 establish remote CI status or native replacement qualification.
 
+A2c started from the verified `b3829db` merge. The unchanged baseline passed
+266 Linux and 235 Windows tests, plus one doc test on each host. Windows needed
+workspace-local `TEMP` and `TMP` and an execution context that permits native
+hard links and archival operations. Keep the original access-denied results;
+do not weaken assertions to make a restricted run pass.
+
+A2c final verification passed formatting, Clippy, serial all-target tests,
+and doc tests with Rust 1.99.1. Linux ran 293 tests and one doc test. Native
+Windows ran 237 tests and one doc test. Each final command exited zero; no tests
+failed, were ignored, or were filtered. Linux apply ran on ext4 under WSL
+with a separate tmpfs mount for the cross-mount refusal case. See the
+[native apply limits](docs/file-access.md#implemented-native-apply-phase-a2c).
+
 A mock or compile-only result does not establish native containment, live
 provider compatibility, or release filesystem support.
 
@@ -158,10 +176,10 @@ at that review boundary:
     admission with native storage and existing-only missing-state rules.
     Library-only preparation stops unresolved; CLI inspection/acknowledgement
     does not apply an edit. See [ADR-0021](docs/adr/0021-store-checkpoints-with-native-private-handles.md).
-  - **A2c (after the A2b review fixes merge):** native replacement, metadata
-    preservation,
-    commit uncertainty, and trusted CLI apply after backend
-    qualification. An unavailable backend must continue to refuse replacement.
+  - **A2c (current branch):** trusted Linux ext4 apply with exact supported
+    metadata, durable intent, native publication, and uncertain-outcome recovery.
+    Other filesystems and Windows refuse apply. Release filesystem and power-loss
+    qualification, Windows ACLs, and restore remain open.
 
 Contract decisions accepted in A1:
 
