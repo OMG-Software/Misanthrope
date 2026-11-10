@@ -1,6 +1,6 @@
 # Build and run the core prototype
 
-OMGCode 0.7.0 is a developer CLI prototype with workspace permission
+OMGCode 0.8.0 is a developer CLI prototype with workspace permission
 settings and bounded native file operations through trusted operator commands.
 It can send a text conversation to an explicitly selected local LM Studio model
 and save that conversation. It can read/list files, exclusively create new
@@ -10,11 +10,24 @@ library callers and tests, but no CLI command exposes it. The CLI cannot replace
 or delete existing files, run commands, use Git, or connect to MCP servers.
 CLI/provider model tool dispatch and an execution sandbox are not implemented.
 
-The core's `replacement` module validates caller-supplied initialization and
-replacement-ledger bytes. These read-only library APIs create no storage,
-validate no native checkpoint, and change no broker admission. They are not
-CLI apply or recovery commands. See the
-[record inspection contract](file-access.md#implemented-record-inspection-phase-a2a).
+The core's byte-input replacement inspectors remain read-only. Its file broker
+also provides Linux-only `checkpoint_prepare` with fresh read/write authority.
+Private initialization, exact manifest/payload validation, bounded retention,
+and synced journal appends are implemented. No CLI command prepares or applies a
+checkpoint. The CLI provides existing-only inspection and acknowledgement:
+
+```text
+omgcode --data-dir /private/omgcode-data file checkpoints
+omgcode --data-dir /private/omgcode-data file acknowledge-checkpoint OPERATION_UUID
+```
+
+These commands require existing workspace settings, but no workspace/session
+selection. Inspection never initializes storage and returns metadata only.
+Acknowledgement never applies, restores, deletes, retries, or grants access.
+A prepared checkpoint intentionally remains unresolved until acknowledged.
+Windows can report unused state but refuses present checkpoint storage and
+preparation before checkpoint I/O. See the
+[checkpoint storage contract](file-access.md#implemented-checkpoint-storage-phase-a2b).
 
 ## Build
 

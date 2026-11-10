@@ -238,6 +238,19 @@ scope/UUID/UTC validation, strict JSON, descriptors, raw native paths, and exact
 byte/count bounds. A separate executable doc example checks the initialization
 API. They do not test native checkpoint persistence or workspace replacement.
 
+Phase A2b adds native Linux private-store and pinned source-capture tests,
+core `checkpoint_storage` integration tests, CLI `checkpoint_recovery` tests,
+and instance-local fault injection in the private writer. They cover exact
+bytes and modes, source metadata restrictions, strict inventory, malformed or
+missing artifacts, live authority, unchanged targets, reserved tail capacity,
+64 retained intents, actual-file aggregate quota, initialization interruptions,
+partial writes, sync uncertainty, acknowledgement, and existing-only reopen.
+Windows tests verify refusal without checkpoint mutation and unused-state
+inspection. Recovery output excludes payloads and offers no apply/restore route.
+The tests use actual temporary files. They do not simulate physical power loss,
+foreign-user attacks, privileged bind mounts, or qualify a release filesystem.
+No A2b test demonstrates native replacement or metadata publication.
+
 Before enabling native replacement, implement the
 [accepted replacement contract](file-access.md#replacement-contract)
 and run the remaining acceptance cases on native Windows and Linux. Use private,

@@ -23,7 +23,8 @@ replay are not supported. A create operation refuses every existing entry.
 In particular, a hash check followed by rename is not atomic compare-and-swap
 against an independent editor. Replacement needs a separate reviewed conflict
 and recovery contract. The [accepted contract below](#replacement-contract)
-defines the remaining implementation gates; it enables no operation. See
+defines the remaining replacement gates. Phase A2b implements private checkpoint
+preparation and existing-only recovery, as described below. See
 [ADR-0013](adr/0013-enforce-file-access-with-native-handles-and-exclusive-creation.md).
 
 ## Authorization
@@ -162,17 +163,18 @@ automatic retry. Existing-file replacement remains unsupported. See
 
 This contract was accepted through PR #10 and
 [ADR-0018](adr/0018-define-checkpointed-replacement-before-enabling-overwrites.md).
-Phase A2a implements only read-only validation of caller-supplied record bytes,
-described below. Native checkpoint storage, apply, and replacement-recovery
-commands remain unimplemented. Capability output keeps replacement disabled.
+Phase A2a implements read-only validation of caller-supplied record bytes.
+Phase A2b adds Linux private checkpoint storage and existing-only recovery.
+Apply, restore, deletion, and native replacement remain unimplemented.
+Capability output keeps replacement disabled.
 
 ### Implemented record inspection (Phase A2a)
 
 The v0.6.0 core `replacement` module provides `inspect_initialization` and
 `inspect_ledger`. Both accept byte slices and expected store IDs. They return
 recorded evidence only. They open no file, initialize no directory, append no
-event, check no live policy, and execute no action. The CLI and broker do not
-call them yet. Current file admission is unchanged. They cannot distinguish
+event, check no live policy, and execute no action. The A2b storage layer now
+uses them when opening and appending journals. Alone, they cannot distinguish
 missing storage from an unused installation because they do not observe disk.
 An empty byte slice or incomplete final record is invalid input, rather than
 an unused state.
@@ -224,6 +226,85 @@ every unfinished or uncertain operation. After commit intent, this first format
 accepts only success, uncertainty, or acknowledgement; a later backend-specific
 clean-failure case needs a reviewed format extension. See
 [ADR-0019](adr/0019-validate-replacement-records-before-native-storage.md).
+
+### Implemented checkpoint storage (Phase A2b)
+
+The v0.8.0 core `FileBroker::checkpoint_prepare` API accepts a live binding,
+a relative target, the expected current digest and size, and complete proposed
+UTF-8 bytes. It checks fresh read and write preferences. The native broker
+captures the source bytes, file identity, owner, group, and mode through the
+same pinned file. It refuses extended attributes and special mode bits for
+checkpoint capture; ordinary reads keep their existing behavior. Stale expected
+bytes, invalid UTF-8, oversized input, and unchanged content create no checkpoint.
+The capture is not an atomic filesystem snapshot.
+
+Preparation is available only on Linux. Private directories must belong to the
+current effective user and have mode 0700. Files must be regular, single-link,
+owned by that user, and mode 0600. The implementation checks opened objects,
+not only requested creation modes. It retains directory handles, checks the
+registered data-root identity and creation time, and uses `openat2` without
+symlink or magic-link traversal. Selecting the trusted data root can cross a
+mount; child traversal cannot. Generated procfs reopening requires procfs and
+verifies the retained file identity again. There is no weaker path fallback.
+Windows refuses checkpoint storage before mutation because a private ACL and
+directory persistence backend is not implemented. No automatic chmod or ACL
+repair occurs.
+
+The source and private root must have the same device identifier before
+initialization. This check does not qualify a later rename across mount aliases.
+Native publication, security-metadata preservation, filesystem support, and
+power-loss durability still need A2c evidence. Successful sync calls and injected
+failure tests do not establish physical power-loss behavior.
+
+First use writes the bounded initialization anchor and ledger in the order
+specified below. Every checkpoint has an exclusive UUID directory with
+`original`, `proposed`, and `manifest.json`. The strict manifest binds store,
+operation, session, workspace, revision, lossless target, source identity,
+supported security metadata, and exact payload sizes and digests. Payloads and
+manifest are synced, reopened, and verified before `checkpoint_prepared` is
+appended and synced. The ledger writer validates the candidate history before
+append and checks that existing bytes still match. A write or sync error poisons
+that writer and reports uncertainty. It does not retry or remove artifacts.
+
+Admission reserves worst-case payload, manifest, staging, and recovery-ledger
+capacity before creating operation artifacts. It counts every retained intent,
+including acknowledged attempts, and all managed file lengths. A bounded
+inventory rejects unknown entries, unsafe objects, missing required files,
+changed manifests, and corrupt payloads. It revalidates existing payload bytes
+on every ready-store admission and inspection. This can read up to the 64 MiB
+store bound per request; this deliberate cost avoids trusting cached evidence.
+
+Preparation stops at `checkpoint_prepared`. It returns `applied: false`, leaves
+the target unchanged, and keeps the operation unresolved. There is no stage,
+commit, apply, restore, export, eviction, or deletion writer. The CLI has no
+preparation command. `file diff` remains a read-only preview.
+
+`FileBroker::checkpoint_inspect` and `checkpoint_acknowledge` are operator
+recovery APIs. Their trusted CLI routes are:
+
+```text
+omgcode --data-dir /private/omgcode-data file checkpoints
+omgcode --data-dir /private/omgcode-data file acknowledge-checkpoint OPERATION_UUID
+```
+
+These routes require an existing control store. They never provision checkpoint
+storage or require a live workspace binding. Inspection returns metadata and
+recorded progress, never payload contents. Acknowledgement clears only the
+matching recorded blocker. It does not report success, change permissions,
+repair storage, or replay work. Settings changes remain available at admission
+caps. Legacy operation-log rotation does not remove checkpoint evidence.
+
+When both checkpoint paths are absent, ordinary file operations remain usable
+without provisioning storage, including an older mode-0755 data directory.
+Preparation requires the private root checks above. Once either path exists,
+file admission validates the state before opening or extending the legacy
+operation log. Incomplete initialization or a pending operation blocks new file
+operations. Missing, foreign, corrupt, or unsupported state fails closed.
+Recovery opens existing objects only. A complete record visible after a sync
+error can be validated on reopen, without asserting that the original sync
+succeeded. A partial record is invalid and is never automatically truncated or
+repaired. The downgrade and complete-state-erasure limits below still apply.
+See [ADR-0021](adr/0021-store-checkpoints-with-native-private-handles.md).
 
 ### Admission and conflict checks
 
@@ -327,7 +408,8 @@ initialization journal. That unused state must allow existing read/list/create
 operations without provisioning replacement storage. Ordinary file admission
 must not create a replacement ledger just because it is absent.
 
-The first trusted apply may provision storage under the control writer lock,
+The current library preparation API, or a future trusted apply, may provision
+storage under the control writer lock,
 after authorization, private-storage, same-filesystem, and capacity checks.
 Use a separate `<data-dir>/replacement-init-v1.jsonl` anchor, outside the
 replacement directory.

@@ -21,6 +21,7 @@ containment.
 | Workspace file broker | Bounded read/list/exclusive-create/single-directory creation through trusted CLI commands; release filesystem support is not qualified |
 | Model file tools | Disabled; `workspace_file_tools` remains false |
 | Linux broker prerequisites | Linux 5.6 or later for required `openat2`; `/proc/self/fd` must be available for pinned-file reads; unsupported features fail closed |
+| Checkpoint preparation/storage | Linux-only core API; openat2/procfs, current-user mode0700 directories/mode0600 files, native birth-time metadata and real file/directory sync required; Windows unavailable |
 | macOS | Outside the first-release target |
 
 ## Support requirements
@@ -54,6 +55,18 @@ containment.
   persistence evidence. Current read/create tests do not qualify those paths.
   In particular, Windows per-user checkpoint ACLs and directory-entry durability
   must be established before enabling that backend; there is no weaker fallback.
+- Phase A2b uses retained private directory handles on Linux. Selecting the
+  trusted data root permits mount crossings while refusing symbolic/magic links;
+  all child resolution additionally refuses mount crossings. Owned directories
+  and files must have exact modes 0700 and 0600. Private files are pinned and
+  type/owner/link checked before procfs reopening. The opened root identity and
+  creation time must match the control registration. A shared device ID is a
+  preparation check, not qualification of publication across mount aliases.
+- Linux source capture records bytes, device/inode, owner, group, and ordinary
+  mode bits from the same pinned file. Checkpoint preparation refuses extended
+  attributes (including access ACLs/labels/capabilities) and special mode bits;
+  it does not silently drop them. Ordinary broker reads retain their prior
+  scope. Native commit/metadata preservation remains Phase A2c work.
 - Workspace registration also records a configuration-time directory identity.
   Linux uses the live handle's device and inode values. It also requires a
   creation time from the filesystem (`statx` birth time, `btime`); if the kernel

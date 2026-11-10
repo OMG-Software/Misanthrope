@@ -3,8 +3,8 @@
 use std::collections::HashSet;
 
 use omgcode_platform::broker::RelativePath;
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, UtcOffset};
 use uuid::{Uuid, Variant, Version};
@@ -25,47 +25,47 @@ const MAX_OPERATIONS: usize = 64;
 const MAX_PAYLOAD_BYTES: u64 = 1024 * 1024;
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct Envelope<A> {
-    schema_version: u32,
-    control_store_id: Uuid,
-    replacement_store_id: Uuid,
-    event_id: Uuid,
-    sequence: u64,
-    timestamp: String,
-    action: A,
+pub(super) struct Envelope<A> {
+    pub(super) schema_version: u32,
+    pub(super) control_store_id: Uuid,
+    pub(super) replacement_store_id: Uuid,
+    pub(super) event_id: Uuid,
+    pub(super) sequence: u64,
+    pub(super) timestamp: String,
+    pub(super) action: A,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(
     tag = "type",
     content = "payload",
     rename_all = "snake_case",
     deny_unknown_fields
 )]
-enum InitializationAction {
+pub(super) enum InitializationAction {
     Initializing,
     Ready,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct ArtifactNames {
-    original: String,
-    proposed: String,
-    manifest: String,
-    stage: String,
+pub(super) struct ArtifactNames {
+    pub(super) original: String,
+    pub(super) proposed: String,
+    pub(super) manifest: String,
+    pub(super) stage: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(
     tag = "type",
     content = "payload",
     rename_all = "snake_case",
     deny_unknown_fields
 )]
-enum LedgerAction {
+pub(super) enum LedgerAction {
     Created,
     ReplacementStarted {
         operation_id: Uuid,

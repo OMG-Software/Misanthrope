@@ -3,6 +3,8 @@
 //! Each operation uses a live binding, current policy and native directory
 //! handles. Diagnostic policy results and serialized metadata are never grants.
 
+mod checkpoint;
+
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -31,6 +33,9 @@ pub struct FileTarget {
 /// A broker failure. An uncertain create must be inspected before acknowledgement.
 #[derive(Debug, Error)]
 pub enum FileError {
+    /// Protected checkpoint storage failed or contains unresolved evidence.
+    #[error("{0}")]
+    Checkpoint(#[from] crate::replacement::CheckpointError),
     /// Trusted configuration or its journal could not be validated.
     #[error("workspace control failed: {0}")]
     Control(#[from] ControlError),
@@ -411,6 +416,7 @@ impl<'a> FileBroker<'a> {
         if !decision.configured_allowed() {
             return Err(FileError::Denied(decision.reason()));
         }
+        crate::replacement::store::check_admission(self.control)?;
         let scope = self.control.file_scope(target.workspace_id)?;
         let root_path = scope.root.live_path().map_err(FileError::Native)?;
         let workspace_path = scope.workspace.live_path().map_err(FileError::Native)?;

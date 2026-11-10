@@ -1,12 +1,15 @@
-//! Read-only validation of version-1 replacement records.
+//! Replacement records and protected private checkpoint storage.
 //!
-//! These functions inspect caller-supplied bytes. They do not open files,
-//! provision storage, verify checkpoint contents or durability, change broker
-//! admission, or execute recorded work. A recorded state never grants authority.
+//! The byte-input inspectors remain read-only. FileBroker checkpoint methods
+//! add protected Linux storage and existing-only recovery. Neither path replaces
+//! a workspace file, restores content, or executes a recorded action.
 
+mod manifest;
 mod replay;
+pub(crate) mod store;
+pub use store::{CheckpointError, CheckpointInspection, CheckpointReceipt};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -82,7 +85,8 @@ pub struct InitializationSnapshot {
 }
 
 /// Furthest recorded preparation/commit step. This is historical evidence only.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ReplacementProgress {
     /// Intent exists; no prepared checkpoint has been recorded.
     Intent,
@@ -95,7 +99,7 @@ pub enum ReplacementProgress {
 }
 
 /// Recorded terminal result. This enum cannot establish a native side effect.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReplacementOutcome {
     /// Completion was recorded after commit intent.
@@ -109,7 +113,7 @@ pub enum ReplacementOutcome {
 }
 
 /// A bounded size/digest claim, not proof of the bytes of any file.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecordedArtifact {
     /// Claimed exact byte count. The parser applies the relevant resource cap.
@@ -119,7 +123,7 @@ pub struct RecordedArtifact {
 }
 
 /// Fixed-width native identity metadata, not an opened object or access grant.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecordedFileIdentity {
     /// Claimed native volume identifier.
@@ -130,7 +134,7 @@ pub struct RecordedFileIdentity {
 
 /// One retained operation's recorded claims. These fields are untrusted data;
 /// constructing or changing a copy cannot affect storage or grant authority.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct RecordedReplacement {
     /// Unique operation ID, also the fixed UUID-named private entry locator.
     pub operation_id: Uuid,

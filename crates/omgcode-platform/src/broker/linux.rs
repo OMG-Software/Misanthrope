@@ -105,6 +105,27 @@ impl NativeWorkspace {
         max_bytes: usize,
         after_validation: impl FnOnce() -> io::Result<()>,
     ) -> io::Result<Vec<u8>> {
+        self.capture_with_checkpoint(path, max_bytes, false, after_validation)
+            .map(|capture| capture.bytes)
+    }
+
+    /// Capture security metadata only for checkpoint preparation, from the same
+    /// pinned file as its payload. Ordinary reads keep their existing scope.
+    pub(super) fn capture(
+        &self,
+        path: &RelativePath,
+        max_bytes: usize,
+    ) -> io::Result<super::FileCapture> {
+        self.capture_with_checkpoint(path, max_bytes, true, || Ok(()))
+    }
+
+    fn capture_with_checkpoint(
+        &self,
+        path: &RelativePath,
+        max_bytes: usize,
+        require_checkpoint_metadata: bool,
+        after_validation: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<super::FileCapture> {
         if path.is_empty() || max_bytes == 0 || max_bytes > super::MAX_FILE_BYTES {
             return Err(invalid_input("invalid bounded file read"));
         }
@@ -136,6 +157,9 @@ impl NativeWorkspace {
         if !initial.same_object_and_version(reopened) {
             return Err(changed_during_operation());
         }
+        if require_checkpoint_metadata {
+            validate_checkpoint_metadata(&readable, reopened)?;
+        }
 
         let take_limit = u64::try_from(max_bytes)
             .ok()
@@ -154,7 +178,17 @@ impl NativeWorkspace {
         if !reopened.same_object_and_version(after) {
             return Err(changed_during_operation());
         }
-        Ok(bytes)
+        if require_checkpoint_metadata {
+            validate_checkpoint_metadata(&readable, after)?;
+        }
+        Ok(super::FileCapture {
+            bytes,
+            volume: after.device,
+            file_id: u128::from(after.inode).to_le_bytes(),
+            owner: after.owner,
+            group: after.group,
+            mode: after.mode & 0o777,
+        })
     }
 
     /// Enumerate native names from an opened directory with bounded output.
@@ -444,6 +478,9 @@ struct FileSnapshot {
     modified_nanos: i64,
     changed_seconds: i64,
     changed_nanos: i64,
+    owner: u32,
+    group: u32,
+    mode: u32,
 }
 
 impl FileSnapshot {
@@ -456,6 +493,9 @@ impl FileSnapshot {
             && self.modified_nanos == other.modified_nanos
             && self.changed_seconds == other.changed_seconds
             && self.changed_nanos == other.changed_nanos
+            && self.owner == other.owner
+            && self.group == other.group
+            && self.mode == other.mode
     }
 }
 
@@ -475,7 +515,22 @@ fn regular_single_link_snapshot(file: &File) -> io::Result<FileSnapshot> {
         modified_nanos: metadata.mtime_nsec(),
         changed_seconds: metadata.ctime(),
         changed_nanos: metadata.ctime_nsec(),
+        owner: metadata.uid(),
+        group: metadata.gid(),
+        mode: metadata.mode(),
     })
+}
+
+/// The first checkpoint backend records owner/group/mode only. Refuse rather
+/// than silently dropping access ACLs, labels, capabilities, or other xattrs.
+fn validate_checkpoint_metadata(file: &File, snapshot: FileSnapshot) -> io::Result<()> {
+    if snapshot.mode & 0o7000 != 0 || rustix::fs::flistxattr_query(file)? != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "checkpoint capture requires ordinary permission bits and no extended attributes",
+        ));
+    }
+    Ok(())
 }
 
 fn path_or_dot(path: &RelativePath) -> PathBuf {
@@ -624,6 +679,71 @@ mod tests {
         let disk = fs::read(temporary.path().join("root/workspace/file.txt"))
             .expect("read created disk file");
         assert_eq!(disk, b"hello");
+    }
+
+    #[test]
+    fn checkpoint_capture_binds_bytes_identity_and_security_to_the_same_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let (temporary, workspace) = workspace();
+        let path = temporary.path().join("root/workspace/capture.txt");
+        fs::write(&path, b"exact source\r\n").expect("source");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).expect("source mode");
+        let metadata = fs::metadata(&path).expect("expected metadata");
+        let capture = workspace
+            .capture(&relative("capture.txt"), 1024)
+            .expect("native capture");
+        assert_eq!(capture.bytes, b"exact source\r\n");
+        assert_eq!(capture.volume, metadata.dev());
+        assert_eq!(capture.file_id, u128::from(metadata.ino()).to_le_bytes());
+        assert_eq!(capture.owner, metadata.uid());
+        assert_eq!(capture.group, metadata.gid());
+        assert_eq!(capture.mode, 0o640);
+        assert_eq!(fs::read(path).expect("source unchanged"), capture.bytes);
+    }
+
+    #[test]
+    fn checkpoint_capture_refuses_unqualified_extended_attributes_and_special_modes() {
+        use rustix::fs::{XattrFlags, setxattr};
+        use std::os::unix::fs::PermissionsExt;
+        let (temporary, workspace) = workspace();
+        let base = temporary.path().join("root/workspace");
+        let attributed = base.join("attributed");
+        fs::write(&attributed, b"source").expect("attributed source");
+        setxattr(
+            &attributed,
+            "user.omgcode-test",
+            b"retained metadata",
+            XattrFlags::empty(),
+        )
+        .expect("native xattr fixture");
+        assert_eq!(
+            workspace
+                .capture(&relative("attributed"), 1024)
+                .expect_err("xattr preservation is not qualified")
+                .kind(),
+            io::ErrorKind::Unsupported
+        );
+        assert_eq!(
+            workspace
+                .read(&relative("attributed"), 1024)
+                .expect("ordinary reads remain supported"),
+            b"source"
+        );
+        let special = base.join("special");
+        fs::write(&special, b"source").expect("special mode source");
+        fs::set_permissions(&special, fs::Permissions::from_mode(0o4600))
+            .expect("special bit fixture");
+        assert_eq!(
+            workspace
+                .capture(&relative("special"), 1024)
+                .expect_err("special bits are not qualified")
+                .kind(),
+            io::ErrorKind::Unsupported
+        );
+        assert_eq!(
+            fs::metadata(special).expect("mode unchanged").mode() & 0o7777,
+            0o4600
+        );
     }
 
     #[test]

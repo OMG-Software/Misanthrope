@@ -8,10 +8,10 @@ prototype does not provide a session UI, search index, task execution, or
 recovery UI.
 
 The [accepted replacement contract](file-access.md#replacement-contract)
-uses a separate versioned ledger and private checkpoint store. The core can
-validate supplied replacement-record bytes, but native storage and its writer
-are not implemented. They must not add replacement variants to the existing strict
-file-operation-v1 log or store checkpoint contents in conversation events.
+uses a separate versioned ledger and private checkpoint store. Phase A2b adds
+protected Linux storage and its writer. The existing strict file-operation-v1,
+control-v1, and session schemas are unchanged. Checkpoint contents are never
+stored in conversation events or returned by ordinary checkpoint inspection.
 Session replay, archive, and restore cannot authorize or replay replacement.
 
 ## Implemented prototype (v0.4.0)
