@@ -128,11 +128,23 @@ pub struct CheckpointReceipt {
     pub applied: bool,
 }
 
+/// Observed protected-storage phase. No variant grants authority.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckpointState {
+    /// Neither checkpoint path exists; complete erasure is indistinguishable.
+    Unused,
+    /// The anchor records initialization without a complete ready transition.
+    Initializing,
+    /// The ready anchor, ledger, and required artifacts passed validation.
+    Ready,
+}
+
 /// Existing-only metadata inspection. Payload bytes never appear in this view.
 #[derive(Debug, Serialize)]
 pub struct CheckpointInspection {
-    /// unused, initializing, or ready; no variant grants authority.
-    pub state: &'static str,
+    /// Observed storage phase; no variant grants authority.
+    pub state: CheckpointState,
     /// Current control-store identity.
     pub control_store_id: Uuid,
     /// Replacement-store identity, when an anchor exists.
@@ -163,6 +175,8 @@ fn context(control: &ControlStore) -> Result<(DirectoryRecord, Uuid), Checkpoint
     Ok(control.replacement_context()?)
 }
 
+/// Bind a private native root to the registered object, including creation time.
+/// A matching path alone cannot substitute another application-data directory.
 fn open_root(expected: &DirectoryRecord) -> Result<PrivateDirectory, CheckpointError> {
     let root = PrivateDirectory::open(&expected.live_path()?)?;
     if root.identity()? != expected.native_identity() || !expected.matches_created(root.created()?)
@@ -174,9 +188,11 @@ fn open_root(expected: &DirectoryRecord) -> Result<PrivateDirectory, CheckpointE
     Ok(root)
 }
 
+/// Validate existing evidence before the caller opens the legacy operation log.
+/// Incomplete initialization and pending work block admission, not settings.
 pub(crate) fn check_admission(control: &ControlStore) -> Result<(), CheckpointError> {
     let view = inspect(control)?;
-    if view.state == "initializing" {
+    if view.state == CheckpointState::Initializing {
         return Err(CheckpointError::Invalid(
             "initialization is incomplete; inspect existing storage",
         ));
@@ -187,11 +203,14 @@ pub(crate) fn check_admission(control: &ControlStore) -> Result<(), CheckpointEr
     Ok(())
 }
 
+/// Inspect under the caller's control lock and a retained exclusive anchor lock.
+/// Absence never provisions storage; initializing state permits only a bounded
+/// partial inventory, while ready state requires full artifact validation.
 pub(crate) fn inspect(control: &ControlStore) -> Result<CheckpointInspection, CheckpointError> {
     let (expected, control_id) = context(control)?;
     if !state_present(&expected.live_path()?)? {
         return Ok(CheckpointInspection {
-            state: "unused",
+            state: CheckpointState::Unused,
             control_store_id: control_id,
             replacement_store_id: None,
             pending: None,
@@ -226,7 +245,7 @@ pub(crate) fn inspect(control: &ControlStore) -> Result<CheckpointInspection, Ch
             }
         }
         return Ok(CheckpointInspection {
-            state: "initializing",
+            state: CheckpointState::Initializing,
             control_store_id: control_id,
             replacement_store_id: Some(initialization.scope.replacement_store_id()),
             pending: None,
@@ -238,6 +257,8 @@ pub(crate) fn inspect(control: &ControlStore) -> Result<CheckpointInspection, Ch
     Ok(store.view())
 }
 
+/// Open existing private storage writable only to append an acknowledgement.
+/// Invalid evidence is not repaired and workspace authority is not reconstructed.
 pub(crate) fn acknowledge(
     control: &ControlStore,
     operation_id: Uuid,
@@ -250,6 +271,8 @@ pub(crate) fn acknowledge(
     record_acknowledgement(&mut store, operation_id)
 }
 
+/// Clear only the current blocker, preserving progress and any recorded outcome.
+/// A poisoned append is uncertain even if a complete record becomes visible.
 fn record_acknowledgement(store: &mut Store, operation_id: Uuid) -> Result<(), CheckpointError> {
     if store
         .snapshot
@@ -298,6 +321,7 @@ struct Faults {
 }
 
 impl Faults {
+    /// Fail once at a named instance-local persistence boundary.
     fn check(&mut self, _point: &str) -> io::Result<()> {
         #[cfg(test)]
         if self.at == Some(_point) {
@@ -307,6 +331,8 @@ impl Faults {
         Ok(())
     }
 
+    /// Inject a partial record only in tests; production writes the exact bytes.
+    /// Preserve the written prefix when reporting failure so reopen sees reality.
     fn write(&mut self, file: &mut File, bytes: &[u8], _point: &str) -> io::Result<()> {
         #[cfg(test)]
         {
@@ -333,6 +359,9 @@ impl Faults {
 }
 
 impl Store {
+    /// Select existing storage or initialize once under the caller's control lock.
+    /// Check the source device and sync support before creation, then require
+    /// the caller's final authority check. Initialization errors preserve evidence.
     pub(crate) fn open_or_initialize(
         control: &ControlStore,
         volume: u64,
@@ -360,6 +389,8 @@ impl Store {
         })
     }
 
+    /// Persist initializing, ledger header, then ready through exclusive names.
+    /// Each transition syncs its files and parents; no error path removes them.
     fn initialize(
         root: PrivateDirectory,
         control_id: Uuid,
@@ -417,6 +448,8 @@ impl Store {
         })
     }
 
+    /// Acquire the anchor lock before opening dependent handles. Incomplete or
+    /// missing initialization is never interpreted as permission to start over.
     fn open_ready(
         root: PrivateDirectory,
         control_id: Uuid,
@@ -434,6 +467,8 @@ impl Store {
         Self::from_opened(root, anchor, anchor_bytes, initialization.scope, writable)
     }
 
+    /// Retain the locked anchor while decoding the ledger and validating files.
+    /// Existing-only opens prevent a missing referenced ledger becoming empty.
     fn from_opened(
         root: PrivateDirectory,
         anchor: File,
@@ -461,7 +496,7 @@ impl Store {
 
     fn view(&self) -> CheckpointInspection {
         CheckpointInspection {
-            state: "ready",
+            state: CheckpointState::Ready,
             control_store_id: self.snapshot.scope.control_store_id(),
             replacement_store_id: Some(self.snapshot.scope.replacement_store_id()),
             pending: self
@@ -473,6 +508,9 @@ impl Store {
         }
     }
 
+    /// Reserve the full future storage tail before recording intent and artifacts.
+    /// Stop unresolved after verified preparation; any error after intent starts
+    /// poisons this writer and reports uncertainty without workspace publication.
     pub(crate) fn prepare(
         &mut self,
         target: &FileTarget,
@@ -604,6 +642,8 @@ impl Store {
         })
     }
 
+    /// Create one exclusive artifact, sync its bytes and parent, then count it.
+    /// A failure may leave partial data and must not trigger deletion or retry.
     fn write_payload(
         &mut self,
         entry: &PrivateDirectory,
@@ -622,6 +662,9 @@ impl Store {
         Ok(())
     }
 
+    /// Replay and bound the candidate history before changing the existing ledger.
+    /// Compare retained bytes again, sync the append, then publish memory. Failed
+    /// writes or syncs poison the writer; callers must inspect evidence on reopen.
     fn append(
         &mut self,
         action: LedgerAction,
@@ -692,6 +735,8 @@ impl Store {
     }
 }
 
+/// Encode one bounded LF-terminated v1 record with fresh event identity and UTC.
+/// The append path separately validates its action against the preceding history.
 fn encode<A: Serialize>(
     scope: ReplacementScope,
     sequence: usize,
@@ -716,6 +761,8 @@ fn encode<A: Serialize>(
     Ok(bytes)
 }
 
+/// Read a private single-link file with a streaming cap and final length check.
+/// Checks use this same handle; they do not promise isolation from same-user writes.
 fn read_bounded(file: &mut File, limit: usize) -> Result<Vec<u8>, CheckpointError> {
     file_identity(file)?;
     let maximum = u64::try_from(limit).map_err(|_| CheckpointError::Limit)?;
@@ -739,6 +786,9 @@ fn read_bounded(file: &mut File, limit: usize) -> Result<Vec<u8>, CheckpointErro
     Ok(bytes)
 }
 
+/// Count actual managed file lengths within bounded, nonrecursive enumeration.
+/// Partial intent artifacts count too. Prepared artifacts and recorded stages
+/// require exact validation; unknown names and missing required evidence refuse.
 fn inventory(
     root: &PrivateDirectory,
     directory: &PrivateDirectory,
@@ -831,6 +881,9 @@ fn inventory(
     Ok(used)
 }
 
+/// Reopen the exact manifest and payloads through the retained operation handle.
+/// Validate strict scope, sizes, digests, metadata shape, and UTF-8 without opening
+/// the workspace target or inferring that a recorded native commit occurred.
 fn validate_prepared(
     entry: &PrivateDirectory,
     operation: &RecordedReplacement,
@@ -866,6 +919,7 @@ fn lock(file: &File) -> Result<(), CheckpointError> {
     })
 }
 
+/// Count one observed file without overflow or credit for hypothetical cleanup.
 fn add_usage(used: &mut u64, amount: u64) -> Result<(), CheckpointError> {
     *used = used.checked_add(amount).ok_or(CheckpointError::Limit)?;
     if *used > MAX_STORAGE {
@@ -874,6 +928,7 @@ fn add_usage(used: &mut u64, amount: u64) -> Result<(), CheckpointError> {
     Ok(())
 }
 
+/// Refuse unless current evidence and the full reservation fit the aggregate cap.
 fn ensure_budget(used: u64, reserve: u64) -> Result<(), CheckpointError> {
     if used
         .checked_add(reserve)
@@ -969,11 +1024,14 @@ mod tests {
             if point == "initializing_partial_write" || point == "ready_partial_write" {
                 assert!(view.is_err(), "partial records cannot become ready");
             } else if point == "ready_sync" {
-                assert_eq!(view.expect("complete ready is visible").state, "ready");
+                assert_eq!(
+                    view.expect("complete ready is visible").state,
+                    CheckpointState::Ready
+                );
             } else {
                 assert_eq!(
                     view.expect("incomplete initialization evidence").state,
-                    "initializing"
+                    CheckpointState::Initializing
                 );
                 assert!(check_admission(&fixture.control).is_err());
             }

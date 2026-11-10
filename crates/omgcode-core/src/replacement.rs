@@ -7,7 +7,7 @@
 mod manifest;
 mod replay;
 pub(crate) mod store;
-pub use store::{CheckpointError, CheckpointInspection, CheckpointReceipt};
+pub use store::{CheckpointError, CheckpointInspection, CheckpointReceipt, CheckpointState};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;

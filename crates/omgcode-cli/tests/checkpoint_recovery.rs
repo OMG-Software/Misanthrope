@@ -23,6 +23,7 @@ const ORIGINAL: &[u8] = b"private_original_payload_9fb26b\n";
 #[cfg(target_os = "linux")]
 const PROPOSED: &[u8] = b"private_proposed_payload_a827d4\n";
 
+/// Owns all files used by CLI subprocesses so each test starts from isolated state.
 struct Fixture {
     _temporary: TempDir,
     data: PathBuf,
@@ -32,6 +33,7 @@ struct Fixture {
 }
 
 impl Fixture {
+    /// Creates settings, a registered workspace, permissions, and one source file.
     fn new() -> Self {
         let temporary = tempfile::tempdir().expect("private fixture root");
         let data = temporary.path().join("application-data");
@@ -70,6 +72,7 @@ impl Fixture {
         }
     }
 
+    /// Runs the public read command in a fresh process against the same settings.
     fn read(&self) -> std::process::Output {
         run_cli(
             &self.data,
@@ -85,6 +88,8 @@ impl Fixture {
     }
 
     #[cfg(target_os = "linux")]
+    /// Prepares real Linux checkpoint evidence through a live binding and returns
+    /// its operation ID; the CLI itself has no preparation command.
     fn prepare(&self) -> Uuid {
         let mut control = ControlStore::open_existing(&self.data)
             .expect("existing settings")
@@ -112,6 +117,7 @@ impl Fixture {
     }
 }
 
+/// Lists sorted immediate names so refusal checks detect storage mutation.
 fn child_names(directory: &Path) -> Vec<std::ffi::OsString> {
     let mut names = fs::read_dir(directory)
         .expect("fixture directory")
@@ -122,6 +128,7 @@ fn child_names(directory: &Path) -> Vec<std::ffi::OsString> {
 }
 
 #[test]
+/// Recovery commands must require an existing control store and must not create it.
 fn checkpoint_recovery_requires_existing_settings_without_initializing_them() {
     let temporary = tempfile::tempdir().expect("private fixture root");
     let data = temporary.path().join("absent-application-data");
@@ -138,6 +145,8 @@ fn checkpoint_recovery_requires_existing_settings_without_initializing_them() {
 }
 
 #[test]
+/// Unused inspection and wrong-ID acknowledgement preserve settings, entries,
+/// and source bytes while leaving ordinary reads available.
 fn unused_checkpoint_inspection_and_refused_acknowledgement_create_no_storage() {
     let fixture = Fixture::new();
     let before_names = child_names(&fixture.data);
@@ -177,6 +186,7 @@ fn unused_checkpoint_inspection_and_refused_acknowledgement_create_no_storage() 
 }
 
 #[test]
+/// Rejects unsupported preparation, apply, and restore routes without side effects.
 fn checkpoint_recovery_commands_do_not_add_prepare_apply_or_restore_routes() {
     let fixture = Fixture::new();
     let before = child_names(&fixture.data);
@@ -200,6 +210,8 @@ fn checkpoint_recovery_commands_do_not_add_prepare_apply_or_restore_routes() {
 
 #[cfg(target_os = "linux")]
 #[test]
+/// A pending checkpoint blocks reads; trusted acknowledgement clears only that
+/// blocker. Inspection omits both payloads; workspace and payload bytes stay unchanged.
 fn pending_checkpoint_blocks_file_reads_until_trusted_acknowledgement_without_application() {
     let fixture = Fixture::new();
     let operation_id = fixture.prepare();
@@ -279,6 +291,8 @@ fn pending_checkpoint_blocks_file_reads_until_trusted_acknowledgement_without_ap
 
 #[cfg(target_os = "linux")]
 #[test]
+/// Acknowledgement resolves checkpoint admission but does not restore permission
+/// that a separate settings update has revoked.
 fn checkpoint_acknowledgement_does_not_restore_revoked_workspace_permissions() {
     let fixture = Fixture::new();
     let operation_id = fixture.prepare();
@@ -313,6 +327,8 @@ fn checkpoint_acknowledgement_does_not_restore_revoked_workspace_permissions() {
 
 #[cfg(windows)]
 #[test]
+/// Existing unsupported storage must cause inspection and acknowledgement to
+/// fail without changing settings, entries, or the workspace source.
 fn present_checkpoint_storage_refuses_an_unqualified_backend_without_mutation() {
     let fixture = Fixture::new();
     let storage = fixture.data.join("replacement-v1");
