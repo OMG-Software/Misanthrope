@@ -4,6 +4,15 @@ Changes are recorded here before a release version is assigned.
 
 ## Unreleased
 
+### Changed
+
+- Rename the project and GitHub repository to OMGCode. Version 0.7.0 uses
+  `omgcode-*` Rust crates, the `omgcode` command, `OMGCODE_LM_TOKEN`, the OMGCode
+  application-data identity, and `omgcode-` session filenames. Prompt version
+  0.1.4 carries the new identity. Old names have no runtime aliases. Existing
+  private data stays in place; explicit transition instructions are in the
+  development guide. Keep the existing Sonar project key to retain its history.
+
 ### Fixed
 
 - Harden the core turn/tool runtime: reserve assembled-prompt capacity and
@@ -87,7 +96,7 @@ Changes are recorded here before a release version is assigned.
   provenance/digest catalog, and documentation links. Runtime skill loading and
   enablement remain planned.
 
-- OrangeCode application namespace across Rust crates, CLI, token environment
+- OMGCode application namespace across Rust crates, CLI, token environment
   variable, default data directory, session filenames, repository links, and
   Sonar project configuration. Existing private data is not moved automatically.
 - Compiled prompt version 0.1.3 with the renamed identity and an updated digest

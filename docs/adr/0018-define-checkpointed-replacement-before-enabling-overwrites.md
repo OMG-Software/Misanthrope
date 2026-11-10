@@ -21,7 +21,7 @@ outcomes therefore need explicit decisions before runtime work.
 ## Decision
 
 Accept the [replacement contract](../file-access.md#replacement-contract)
-through [PR #10](https://github.com/OMG-Software/OrangeCode/pull/10), merged on
+through [PR #10](https://github.com/OMG-Software/OMGCode/pull/10), merged on
 2026-11-09. Phase A2 implements this contract in bounded increments. Acceptance
 does not establish that native storage, replacement, or recovery is available.
 
@@ -49,7 +49,7 @@ inspection; a missing initialized ledger is never automatically recreated.
 
 Use reviewed native handle-relative publication only. Linux `renameat2` and
 Windows retained-handle rename are directions for implementation review, not
-qualified OrangeCode backends. Checkpoint persistence, security-metadata
+qualified OMGCode backends. Checkpoint persistence, security-metadata
 preservation, and Windows ACL/directory durability gates must pass before
 availability. Preserve and report uncertainty after a possible commit. Never
 retry, roll back, delete artifacts, or restore automatically. A future explicit

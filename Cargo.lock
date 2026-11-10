@@ -591,6 +591,45 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "521739c6d2bac4aa25192232afe6841231376b2b26d4d9fae5ecf8ca5772e441"
 
 [[package]]
+name = "omgcode-cli"
+version = "0.7.0"
+dependencies = [
+ "clap",
+ "directories",
+ "omgcode-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
+name = "omgcode-core"
+version = "0.7.0"
+dependencies = [
+ "libc",
+ "omgcode-platform",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "time",
+ "uuid",
+]
+
+[[package]]
+name = "omgcode-platform"
+version = "0.7.0"
+dependencies = [
+ "libc",
+ "rustix",
+ "tempfile",
+ "windows-sys",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -607,45 +646,6 @@ name = "option-ext"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
-
-[[package]]
-name = "orangecode-cli"
-version = "0.6.0"
-dependencies = [
- "clap",
- "directories",
- "orangecode-core",
- "serde",
- "serde_json",
- "tempfile",
- "uuid",
-]
-
-[[package]]
-name = "orangecode-core"
-version = "0.6.0"
-dependencies = [
- "libc",
- "orangecode-platform",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror",
- "time",
- "uuid",
-]
-
-[[package]]
-name = "orangecode-platform"
-version = "0.6.0"
-dependencies = [
- "libc",
- "rustix",
- "tempfile",
- "windows-sys",
-]
 
 [[package]]
 name = "percent-encoding"

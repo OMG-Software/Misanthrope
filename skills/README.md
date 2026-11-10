@@ -1,8 +1,8 @@
 # Bundled skill source packages
 
-This directory contains reviewable source packages for the planned OrangeCode
+This directory contains reviewable source packages for the planned OMGCode
 skills manager. It is a catalog of source files, not an active skill registry.
-OrangeCode does not yet load, register, enable, or execute these packages.
+OMGCode does not yet load, register, enable, or execute these packages.
 
 | Package | Purpose | Files |
 | --- | --- | --- |
@@ -26,7 +26,7 @@ have not been invented or added to the imported file.
 The package describes review, fix, and posting workflows. Its references to
 GitHub CLI commands, independent agents, and a built-in `/code-review` describe
 requirements for a compatible future runtime. They do not establish that
-OrangeCode implements those features.
+OMGCode implements those features.
 
 Adding this source does not enable the skill or authorize a review, a code
 change, a command, or an external post. Future import must validate and copy it

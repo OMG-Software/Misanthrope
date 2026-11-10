@@ -1,4 +1,4 @@
-# OrangeCode implementation plan
+# OMGCode implementation plan
 
 Last verified: 2026-11-09.
 
@@ -31,9 +31,9 @@ This is a resume guide, not a replacement for the owning contracts in
 
 Implemented today:
 
-- Pinned Rust 1.99.1 workspace with `orangecode-core`, `orangecode-cli`, and
-  `orangecode-platform`.
-- Compiled, versioned base prompt `0.1.3` with a visible digest.
+- Pinned Rust 1.99.1 workspace with `omgcode-core`, `omgcode-cli`, and
+  `omgcode-platform`.
+- Compiled, versioned base prompt `0.1.4` with a visible digest.
 - Workspace settings, native directory identity, process-local bindings, and a
   separate settings/audit journal.
 - Bounded native read, list, exclusive file creation, and single-directory

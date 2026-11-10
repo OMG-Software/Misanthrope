@@ -7,7 +7,7 @@
 
 The project owner uses established C++ rules in Merovingian and requested a Rust
 adaptation. Their design and verification goals apply, but several language and
-platform conventions do not. OrangeCode also has a different security boundary:
+platform conventions do not. OMGCode also has a different security boundary:
 it runs model-directed development tools on Windows and Linux.
 
 ## Decision
@@ -43,7 +43,7 @@ explicit; compiler memory-safety checks cannot establish those properties.
 
 - Copy the C++ rules literally: this would add artificial file splits, naming,
   and ownership restrictions while missing Rust task and unsafe-code risks.
-- Adopt only generic Rust style: this would omit OrangeCode's permission,
+- Adopt only generic Rust style: this would omit OMGCode's permission,
   sandbox, credential, and evidence requirements.
 - Duplicate all requirements in contributor guidance: duplicated rules can
   disagree. Mandatory links keep one authoritative source for each rule.

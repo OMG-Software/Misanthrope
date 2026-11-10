@@ -21,7 +21,7 @@ output or cache resource. Use a generic sandboxed runner; all scripts and
 descendants keep the effective restrictions. Toolchain registration cannot grant
 general host access or model-provider network permissions to tasks.
 
-OrangeCode's own Rust toolchain and the user's project toolchains are separate
+OMGCode's own Rust toolchain and the user's project toolchains are separate
 configurations. Qualify profiles on native Windows and Linux.
 
 ## Alternatives considered

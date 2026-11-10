@@ -1,8 +1,8 @@
 # Model Context Protocol support
 
 This is a planned contract. No MCP client, settings page, or compatibility tests
-exist yet. OrangeCode will act as an MCP host with Rust-owned clients for
-external servers. Exposing OrangeCode itself as an MCP server is a separate
+exist yet. OMGCode will act as an MCP host with Rust-owned clients for
+external servers. Exposing OMGCode itself as an MCP server is a separate
 future capability, not required by this initial client design.
 
 ## Initial scope
@@ -97,7 +97,7 @@ untrusted names/arguments. Handle disconnection, malformed streams, bounded
 retries, and cancellation. A network disconnect or cancellation request does
 not prove that a remote write stopped or rolled back.
 
-A remote server executes under its own service permissions. OrangeCode's
+A remote server executes under its own service permissions. OMGCode's
 development-root boundary cannot contain that server's remote filesystem or
 external effects. Disclose the selected account and delegated scope, and
 authorize calls accordingly. Do not describe a successful MCP connection as
