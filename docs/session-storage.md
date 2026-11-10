@@ -89,7 +89,7 @@ not rewritten. See [workspace settings](workspace-permissions.md).
 
 ### Core turn/tool lifecycle
 
-The `orangecode-core` `turn` module runs one bounded model/tool turn through a
+The `omgcode-core` `turn` module runs one bounded model/tool turn through a
 caller-supplied model interface. It is library and test infrastructure: no CLI
 command exposes it, `chat` advertises no tools, and every real provider adapter
 still rejects tool calls. A caller must provide an open schema-version-2
@@ -214,12 +214,12 @@ recovery limits.
 
 ## Location and file naming
 
-Save each session in its own UTF-8 JSONL file under OrangeCode's per-user
+Save each session in its own UTF-8 JSONL file under OMGCode's per-user
 application data directory, outside the development workspace:
 
 ```text
-sessions/<year>/<month>/<date>/orangecode-<time>-<guid>.jsonl
-sessions/2026/11/08/orangecode-12-34-56-789Z-7a0d3e5c-8c2b-4b9c-a6de-19f1c8d2e470.jsonl
+sessions/<year>/<month>/<date>/omgcode-<time>-<guid>.jsonl
+sessions/2026/11/08/omgcode-12-34-56-789Z-7a0d3e5c-8c2b-4b9c-a6de-19f1c8d2e470.jsonl
 ```
 
 Use the session's creation time in UTC. Year has four digits; month and date
@@ -240,7 +240,7 @@ changes title/workspace, or is archived. The date tree organizes files; the UI
 tree groups sessions by their recorded workspace identity and folder. Store
 lossless native paths where required; display text is never an authorization key.
 
-This is OrangeCode's own versioned schema with the requested date-based layout.
+This is OMGCode's own versioned schema with the requested date-based layout.
 It does not promise compatibility with ChatGPT exports or Codex internal event
 schemas. Do not read or modify another application's session directory. Any
 future importer needs its own explicit format and trust contract.
@@ -400,4 +400,4 @@ as examples only; they do not establish runtime persistence guarantees.
 [OpenAI's developer command documentation](https://learn.chatgpt.com/docs/developer-commands?surface=cli)
 describes archive/restore without deleting a saved transcript. This is a useful
 behavioural reference. The exact path, event schema, and durability requirements
-above are OrangeCode decisions, not a claimed OpenAI storage-format contract.
+above are OMGCode decisions, not a claimed OpenAI storage-format contract.

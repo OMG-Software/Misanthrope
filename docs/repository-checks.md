@@ -70,8 +70,15 @@ languages deliberately when the implementation needs them.
 
 ## SonarQube Cloud
 
-Project: [OrangeCode](https://sonarcloud.io/project/overview?id=OMG-Software_OrangeCode)
+Project: [OMGCode](https://sonarcloud.io/project/overview?id=OMG-Software_OrangeCode)
 in the `omg-software` organization.
+
+The analysis project keeps the key `OMG-Software_OrangeCode` while its configured
+display name is OMGCode. This key identifies existing analysis history; it is
+not an application namespace. A GitHub repository rename does not migrate a
+Sonar project key. Keep this key until a Sonar administrator completes and
+verifies a separate key migration. The workflow still requires a completed
+analysis on the current pull-request head after the repository rename.
 
 `.github/workflows/sonar.yml` uses CI-based analysis and
 `sonar-project.properties`. Keep Sonar Automatic Analysis disabled to avoid
@@ -85,7 +92,7 @@ To set up a personal analysis token:
 
 1. Sign in to SonarQube Cloud using the GitHub account with analysis permission.
 2. Open My account > Access Tokens > Personal Tokens.
-3. Generate a token named orangecode-github-actions with an explicit expiry.
+3. Generate a token named omgcode-github-actions with an explicit expiry.
 4. Copy it directly to GitHub Settings > Secrets and variables > Actions >
    New repository secret, with the name SONAR_TOKEN.
 

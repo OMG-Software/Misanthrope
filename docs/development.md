@@ -1,6 +1,6 @@
 # Build and run the core prototype
 
-OrangeCode 0.6.0 is a developer CLI prototype with workspace permission
+OMGCode 0.7.0 is a developer CLI prototype with workspace permission
 settings and bounded native file operations through trusted operator commands.
 It can send a text conversation to an explicitly selected local LM Studio model
 and save that conversation. It can read/list files, exclusively create new
@@ -26,20 +26,26 @@ working C linker. Run these commands from the repository root:
 ```text
 rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy
 cargo build --workspace --locked
-cargo run --locked -p orangecode-cli -- capabilities
-cargo run --locked -p orangecode-cli -- prompt
+cargo run --locked -p omgcode-cli -- capabilities
+cargo run --locked -p omgcode-cli -- prompt
 ```
 
 The repository pins Rust 1.99.1, edition 2024, for all three crates. This is also
 the declared minimum version; no older compiler is supported. Cargo.lock fixes
-the resolved dependency graph. The executable is named orangecode.
+the resolved dependency graph. The executable is named omgcode.
 
 ## Application namespace and existing prototype data
 
-The command is `orangecode`, the model-token variable is `ORANGECODE_LM_TOKEN`,
-and new session filenames start with `orangecode-`. Default private storage uses
-the OrangeCode application identity; Linux normalizes its directory name to
-`orangecode`. The application does not search for or move previous data.
+The command is `omgcode`, the model-token variable is `OMGCODE_LM_TOKEN`,
+and new session filenames start with `omgcode-`. Default private storage uses
+the OMGCode application identity; Linux normalizes its directory name to
+`omgcode`. The application does not search for or move previous data.
+
+Version 0.7.0 replaces the OrangeCode namespace. Update scripts and Rust
+dependencies to the new command and crate names. Set `OMGCODE_LM_TOKEN` in
+trusted launch configuration if authentication is required. The earlier
+`ORANGECODE_LM_TOKEN` name is no longer read. Existing private data remains in
+its original location; the new default does not import earlier settings.
 
 To keep existing workspace settings, select their original private directory
 explicitly with `--data-dir`. Do not relocate the control journal: its recorded
@@ -47,28 +53,30 @@ directory path and native identity must still match. Configure a new store
 through the trusted workspace commands if the old directory must move.
 
 To reuse a session with a different filename prefix, first close all writers
-and keep a private backup. Change only the filename prefix to `orangecode-`;
+and keep a private backup. Change only the filename prefix to `omgcode-`;
 retain the timestamp, UUID, `.jsonl` extension, and all journal bytes. Then use
 `session inspect` with its explicit path and the intended `--data-dir` before
 continuing. The JSONL schemas are unchanged. Inspection does not grant workspace
-access or replay actions. See [ADR-0014](adr/0014-use-the-renamed-application-namespace-without-automatic-migration.md).
+access or replay actions. For an earlier `orangecode-` filename, replace only
+that prefix with `omgcode-`. See
+[ADR-0020](adr/0020-rename-the-project-to-omgcode.md).
 
 ## Workspace settings
 
 Use a private application data directory outside your development root. These
 examples use Windows paths; on Linux use separate paths such as
-`/home/me/.local/share/orangecode` and `/home/me/dev`. Create the root and
+`/home/me/.local/share/omgcode` and `/home/me/dev`. Create the root and
 project directories first. Each command returns JSON. Use the current revision
 from its output for the next mutation; replace WORKSPACE_ID and SESSION_UUID
 with returned workspace ID and a UUIDv4 session selection.
 
 ```text
-orangecode --data-dir C:\orangecode-data workspace status
-orangecode --data-dir C:\orangecode-data workspace set-root C:\dev --revision 0
-orangecode --data-dir C:\orangecode-data workspace register C:\dev\project --revision 1
-orangecode --data-dir C:\orangecode-data workspace permissions WORKSPACE_ID --revision 2 --write false
-orangecode --data-dir C:\orangecode-data workspace check WORKSPACE_ID --session SESSION_UUID --operation read
-orangecode --data-dir C:\orangecode-data workspace audit --limit 20
+omgcode --data-dir C:\omgcode-data workspace status
+omgcode --data-dir C:\omgcode-data workspace set-root C:\dev --revision 0
+omgcode --data-dir C:\omgcode-data workspace register C:\dev\project --revision 1
+omgcode --data-dir C:\omgcode-data workspace permissions WORKSPACE_ID --revision 2 --write false
+omgcode --data-dir C:\omgcode-data workspace check WORKSPACE_ID --session SESSION_UUID --operation read
+omgcode --data-dir C:\omgcode-data workspace audit --limit 20
 ```
 
 `status` initializes an absent store at revision zero. `check` and `audit`
@@ -107,15 +115,15 @@ trusted CLI preview. `existing_file_replacement` and `workspace_file_tools`
 remain `false`.
 
 ```text
-orangecode --data-dir C:\orangecode-data file read WORKSPACE_ID --session SESSION_UUID src\main.rs --max-bytes 65536
-orangecode --data-dir C:\orangecode-data file list WORKSPACE_ID --session SESSION_UUID src --limit 100
-orangecode --data-dir C:\orangecode-data file create WORKSPACE_ID --session SESSION_UUID notes.txt --content "Review this file"
-orangecode --data-dir C:\orangecode-data file mkdir WORKSPACE_ID --session SESSION_UUID notes
-orangecode --data-dir C:\orangecode-data file diff WORKSPACE_ID --session SESSION_UUID src\main.rs --content-file C:\drafts\main.rs
-orangecode --data-dir C:\orangecode-data file audit --limit 20
-orangecode --data-dir C:\orangecode-data file acknowledge OPERATION_UUID
-orangecode --data-dir C:\orangecode-data file rotate --archive-dir C:\private-audit-exports
-orangecode --data-dir C:\orangecode-data file audit --archive ARCHIVE_PATH --limit 20
+omgcode --data-dir C:\omgcode-data file read WORKSPACE_ID --session SESSION_UUID src\main.rs --max-bytes 65536
+omgcode --data-dir C:\omgcode-data file list WORKSPACE_ID --session SESSION_UUID src --limit 100
+omgcode --data-dir C:\omgcode-data file create WORKSPACE_ID --session SESSION_UUID notes.txt --content "Review this file"
+omgcode --data-dir C:\omgcode-data file mkdir WORKSPACE_ID --session SESSION_UUID notes
+omgcode --data-dir C:\omgcode-data file diff WORKSPACE_ID --session SESSION_UUID src\main.rs --content-file C:\drafts\main.rs
+omgcode --data-dir C:\omgcode-data file audit --limit 20
+omgcode --data-dir C:\omgcode-data file acknowledge OPERATION_UUID
+omgcode --data-dir C:\omgcode-data file rotate --archive-dir C:\private-audit-exports
+omgcode --data-dir C:\omgcode-data file audit --archive ARCHIVE_PATH --limit 20
 ```
 
 Omit the list path to list the selected workspace root. The empty path is not
@@ -148,7 +156,7 @@ See [archive and recovery details](file-access.md#explicit-operation-journal-arc
 
 ## Core turn/tool lifecycle
 
-`orangecode_core::turn` provides a session-owned runtime for one bounded
+`omgcode_core::turn` provides a session-owned runtime for one bounded
 model/tool turn. It is not a CLI command and `chat` still advertises no tools.
 A caller supplies a model implementation, an open schema-version-2 session, the
 trusted application-data directory, and the workspace ID. The runtime:
@@ -184,7 +192,7 @@ differ from its loaded capacity. The following example uses the user's loaded
 google/gemma-4-e4b profile with a verified capacity of 131,072 tokens:
 
 ```text
-cargo run --locked -p orangecode-cli -- chat --workspace . --model google/gemma-4-e4b --context-tokens 131072 --max-output-tokens 512 "Reply with READY."
+cargo run --locked -p omgcode-cli -- chat --workspace . --model google/gemma-4-e4b --context-tokens 131072 --max-output-tokens 512 "Reply with READY."
 ```
 
 The default endpoint is http://127.0.0.1:1234/v1. Override it with --endpoint
@@ -206,7 +214,7 @@ provider fallback. A slow first inference can time out. Its remote outcome can
 be unknown, and a retry is a new explicit user action.
 
 Optional server authentication can be supplied to the trusted CLI process with
-ORANGECODE_LM_TOKEN. The CLI retains the token in memory only and sends it as a
+OMGCODE_LM_TOKEN. The CLI retains the token in memory only and sends it as a
 sensitive Authorization header. It does not save it or pass it to a child task.
 Environment-based input is a temporary prototype interface, not protected
 credential storage or a claim of memory erasure. OS-backed credentials and the
@@ -221,16 +229,16 @@ directory outside project folders, under an account-protected location. Do not
 paste credentials into messages or preferences: these inputs are saved as text.
 
 ```text
-orangecode session new --workspace . --title "Prototype test"
-orangecode session inspect <journal-path>
-orangecode chat --journal <journal-path> --model google/gemma-4-e4b --context-tokens 131072 "Continue the conversation."
-orangecode session archive <journal-path>
-orangecode session restore <journal-path>
+omgcode session new --workspace . --title "Prototype test"
+omgcode session inspect <journal-path>
+omgcode chat --journal <journal-path> --model google/gemma-4-e4b --context-tokens 131072 "Continue the conversation."
+omgcode session archive <journal-path>
+omgcode session restore <journal-path>
 ```
 
 Use the full journal path returned in the JSON output. The commands above use an
 installed executable; during development, prefix each with cargo run --locked
--p orangecode-cli -- instead of orangecode. --instructions applies to the
+-p omgcode-cli -- instead of omgcode. --instructions applies to the
 current invocation and is recorded in its manifest. Resume does not silently
 reuse earlier custom instructions or model settings. Supply them again when
 needed. The current compiled base always replaces historical base snapshots.
@@ -248,7 +256,7 @@ Archiving an active turn fails. If the CLI stopped during a turn, inspect the
 journal, then explicitly mark that turn failed before resuming or archiving:
 
 ```text
-orangecode session interrupt <journal-path>
+omgcode session interrupt <journal-path>
 ```
 
 Interrupt acquires the exclusive journal lock. It cannot interrupt another
@@ -300,9 +308,9 @@ usage events, streaming chunks, and large-output artifacts remain planned.
 
 | Crate | Responsibility |
 | --- | --- |
-| orangecode-core | Compiled prompt, bounded model adapter, session/control/file-operation journals, workspace policy, broker orchestration, bounded turn/tool lifecycle, and non-destructive edit previews |
-| orangecode-cli | Trusted operator input, one-turn text chat orchestration, bounded file and preview commands, JSON output |
-| orangecode-platform | Native journal validation, directory identity, and handle-relative workspace file operations |
+| omgcode-core | Compiled prompt, bounded model adapter, session/control/file-operation journals, workspace policy, broker orchestration, bounded turn/tool lifecycle, and non-destructive edit previews |
+| omgcode-cli | Trusted operator input, one-turn text chat orchestration, bounded file and preview commands, JSON output |
+| omgcode-platform | Native journal validation, directory identity, and handle-relative workspace file operations |
 
 Core and CLI forbid unsafe code. The platform crate denies unsafe code except
 inside its reviewed Windows handle wrappers for directory identity and native
@@ -361,7 +369,7 @@ not a full audit of transitive dependencies, unsafe code, build scripts, or
 procedural macros. No Git dependencies or downloaded execution backends are used.
 Use maintained libraries for HTTP, cryptography, and OS bindings instead of
 custom implementations. Build dependencies execute with the developer's build
-permissions, not with future OrangeCode task restrictions.
+permissions, not with future OMGCode task restrictions.
 
 ## Verification
 

@@ -6,7 +6,7 @@ request path. The settings page and scoped preference storage are not implemente
 
 ## Product priorities
 
-OrangeCode has three goals: secure operation, defence against prompt injection,
+OMGCode has three goals: secure operation, defence against prompt injection,
 and efficient use of models and development resources. Security takes priority
 when an optimization would weaken containment, authorization, or confidentiality.
 Prompt injection defence requires runtime controls as well as model guidance.
@@ -14,7 +14,7 @@ No prompt can guarantee that a model will ignore malicious instructions.
 
 ## Implemented prototype (v0.4.0)
 
-The compiled base is prompt version 0.1.3. The Rust core embeds
+The compiled base is prompt version 0.1.4. The Rust core embeds
 [`prompts/system.md`](../prompts/system.md), computes the SHA-256 digest from
 those compiled bytes, and exposes the text, version, and digest through the
 `prompt` CLI command. Each current LM Studio chat request begins with those
@@ -55,10 +55,10 @@ The SYSTEM prompt settings page must show:
 - The complete bundled base prompt, its version, and its content digest.
 - Editable user additions at application, workspace, and session scope.
 - The effective order, source, and revision of those additions.
-- A preview of OrangeCode's assembled instructions for the next request.
+- A preview of OMGCode's assembled instructions for the next request.
 - The selected provider profile and the token count or labelled estimate.
 
-The initial base text is [prompt version 0.1.3](../prompts/system.md). It is a
+The initial base text is [prompt version 0.1.4](../prompts/system.md). It is a
 reviewable draft. Compile this versioned source into the Rust application. The
 current prototype uses `include_str!` at build time. The installed application
 must use the
@@ -72,7 +72,7 @@ editable fields. Compute the displayed version/digest from the compiled resource
 Apply the same rule to any other privileged application instruction fragment.
 Do not hide application-owned instruction fragments from the user.
 
-The preview covers instructions OrangeCode controls. It cannot reveal a
+The preview covers instructions OMGCode controls. It cannot reveal a
 provider's private internal instructions. Exclude credentials from all prompt
 content. Show a separate request inspector for selected skill content, source
 references, tool definitions, and context omissions, with safe rendering.

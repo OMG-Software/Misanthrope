@@ -19,7 +19,7 @@ the connection profiles, current provider evidence, and acceptance gates.
 Use a provider-supported integration for each path. Prefer the documented
 direct ChatGPT plan flow for the local open-source application. Keep the Claude
 route visibly unresolved until approval or an explicit supported route covers
-OrangeCode. This is a readiness gate, not removal of the requirement.
+OMGCode. This is a readiness gate, not removal of the requirement.
 
 Keep billing mode explicit and prevent unapproved fallback to API charges.
 Do not import another application's credentials or assume a CLI wrapper
@@ -31,7 +31,7 @@ establishes third-party subscription permission.
 - Treat subscription credentials as ordinary API keys: this loses account,
   entitlement, consent, capability, and billing distinctions.
 - Treat another tool's login cache or CLI wrapper as approval: this provides no
-  evidence that OrangeCode is covered and obscures the credential boundary.
+  evidence that OMGCode is covered and obscures the credential boundary.
 - Drop Claude subscription support because its route is unresolved: this would
   change the owner's requirement without agreement.
 

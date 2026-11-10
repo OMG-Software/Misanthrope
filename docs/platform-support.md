@@ -33,7 +33,7 @@ containment.
   actual target OS. A successful cross-build is insufficient.
 - Keep platform implementations behind narrow Rust interfaces. Preserve the
   same policy meaning across backends; report unavailable capabilities clearly.
-- The current `orangecode-platform` crate checks an already-open journal file
+- The current `omgcode-platform` crate checks an already-open journal file
   handle for regular-file status, reparse-point status on Windows, and a single
   hard link. Its Windows implementation borrows the handle for
   `GetFileInformationByHandle`; it does not close or transfer the handle.

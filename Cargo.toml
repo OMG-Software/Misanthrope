@@ -1,14 +1,14 @@
 [workspace]
 resolver = "3"
-members = ["crates/orangecode-core", "crates/orangecode-cli", "crates/orangecode-platform"]
+members = ["crates/omgcode-core", "crates/omgcode-cli", "crates/omgcode-platform"]
 
 [workspace.package]
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 rust-version = "1.99.1"
 license = "Apache-2.0"
 
-repository = "https://github.com/OMG-Software/OrangeCode"
+repository = "https://github.com/OMG-Software/OMGCode"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

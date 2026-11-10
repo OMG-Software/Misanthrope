@@ -19,7 +19,7 @@ imply CLI or provider tool dispatch.
 
 ## Decision
 
-Add `orangecode_core::turn` as the session-owned runtime for one bounded turn.
+Add `omgcode_core::turn` as the session-owned runtime for one bounded turn.
 It requires an open journal, the trusted application-data directory, and a
 workspace ID. It opens the control store and creates a fresh process-local
 binding before every tool operation, releases the settings lock before the next

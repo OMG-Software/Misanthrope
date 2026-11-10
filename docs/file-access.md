@@ -53,7 +53,7 @@ permission-change byte budget. A previously full settings log cannot leave
 usable file access that the operator cannot revoke.
 
 The control writer remains locked throughout a synchronous bounded operation.
-Other OrangeCode settings writers cannot change its policy midway. This does
+Other OMGCode settings writers cannot change its policy midway. This does
 not isolate the application from hostile code already running as the same
 user, mutable filesystem implementations, or a host process moving an opened
 directory outside its earlier ancestry. A confined process runner remains a
@@ -265,7 +265,7 @@ change a file or directory entry after the final check. It can also write
 during capture, so a read is not a filesystem snapshot. Repeated equal hashes
 and advisory locks do not prove an exclusive edit. A write from A to B and back
 to A before the final check can go undetected when the checked identity and
-metadata also match. A checkpoint preserves the bytes captured by OrangeCode;
+metadata also match. A checkpoint preserves the bytes captured by OMGCode;
 it cannot promise to preserve every concurrent
 edit or the exact bytes displaced by the rename. The first interface must
 explain this limit and require the operator to stop other writers before
@@ -414,7 +414,7 @@ defines replacement publication, and its
 separate parent-directory synchronization for directory entries. Microsoft's
 [rename information contract](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information)
 provides destination-directory and replacement fields; this is not evidence
-that an OrangeCode wrapper or a filesystem meets all requirements above.
+that an OMGCode wrapper or a filesystem meets all requirements above.
 
 Preserve and verify the target's security metadata before publication: Unix
 owner/group, mode, and access ACL; Windows owner and access-control/protection
@@ -511,7 +511,7 @@ No archive is overwritten, deleted, scanned automatically, or replayed as work.
 
 Each export is at most 8 MiB and 4,096 events. Active application storage keeps
 its existing bound. Repeated explicit exports consume operator-selected disk
-space; OrangeCode does not impose an aggregate quota or manage their retention.
+space; OMGCode does not impose an aggregate quota or manage their retention.
 Keep exports private and outside present and future development roots. Move
 them elsewhere through the operator's normal file-management process when
 needed. Do not assume an export remains private after broadening a development

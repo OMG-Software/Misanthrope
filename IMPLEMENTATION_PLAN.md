@@ -1,6 +1,6 @@
-# OrangeCode implementation plan
+# OMGCode implementation plan
 
-Last verified: 2026-11-09.
+Last verified: 2026-11-10.
 
 This guide is part of `main` after PR #9. Read it before selecting the next
 increment. Contract acceptance and read-only record validation do not mean
@@ -24,16 +24,17 @@ This is a resume guide, not a replacement for the owning contracts in
   and the [file-access guide](docs/file-access.md#replacement-contract).
   The merge was verified through GitHub on 2026-11-09. It changed documentation
   only.
-- **Phase A2a (current increment):** read-only core inspection of caller-supplied
+- **PR #11** merged at `4da432f`: Phase A2a read-only core inspection of caller-supplied
   replacement records. Native replacement, checkpoints, and replacement recovery
   remain unimplemented. See [ADR-0019](docs/adr/0019-validate-replacement-records-before-native-storage.md).
-- The application version on this branch is **0.6.0**; merged PR #10 was 0.5.0.
+- The application version on this branch is **0.7.0** for the OMGCode rename;
+  merged PR #11 was 0.6.0 and PR #10 was 0.5.0.
 
 Implemented today:
 
-- Pinned Rust 1.99.1 workspace with `orangecode-core`, `orangecode-cli`, and
-  `orangecode-platform`.
-- Compiled, versioned base prompt `0.1.3` with a visible digest.
+- Pinned Rust 1.99.1 workspace with `omgcode-core`, `omgcode-cli`, and
+  `omgcode-platform`.
+- Compiled, versioned base prompt `0.1.4` with a visible digest.
 - Workspace settings, native directory identity, process-local bindings, and a
   separate settings/audit journal.
 - Bounded native read, list, exclusive file creation, and single-directory

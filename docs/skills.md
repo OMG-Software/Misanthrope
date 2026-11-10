@@ -9,7 +9,7 @@ They are not permission grants or trusted application extensions.
 The [source catalog](../skills/README.md) includes the user-provided
 [pull-request-review package](../skills/pull-request-review/SKILL.md).
 Its instructions are preserved as package content. It is not registered,
-enabled, or loaded by OrangeCode. The catalog records provenance and a content
+enabled, or loaded by OMGCode. The catalog records provenance and a content
 digest; it does not replace the future core-owned registry.
 
 ## Settings page and scope
@@ -46,7 +46,7 @@ and a Markdown body. Validate the specification's required name and description,
 field types/limits, naming rules, and directory-name match. Scripts, references,
 and assets are optional. Preserve license and compatibility metadata.
 
-OrangeCode may reject unsafe or unsupported packages even when their metadata
+OMGCode may reject unsafe or unsupported packages even when their metadata
 is format-valid. Bound file count, total bytes, individual file sizes, parser
 nesting, reference depth, and resource loading. Reject duplicate or ambiguous
 metadata keys and unsafe YAML types. Do not fetch remote references implicitly.

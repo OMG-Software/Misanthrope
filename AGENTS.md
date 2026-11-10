@@ -1,8 +1,8 @@
-# OrangeCode contributor guidance
+# OMGCode contributor guidance
 
 ## Project
 
-OrangeCode is an early coding-assistant prototype for Windows and Linux. The
+OMGCode is an early coding-assistant prototype for Windows and Linux. The
 repository contains a pinned Rust workspace with configuration-only workspace
 preferences, a bounded native file broker exposed through trusted CLI commands,
 and native identity checks. Follow [workspace settings](docs/workspace-permissions.md)

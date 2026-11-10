@@ -1,0 +1,26 @@
+[package]
+name = "omgcode-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Local CLI for the OMGCode coding-assistant core"
+
+[[bin]]
+name = "omgcode"
+path = "src/main.rs"
+
+[dependencies]
+omgcode-core = { path = "../omgcode-core" }
+clap.workspace = true
+directories.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

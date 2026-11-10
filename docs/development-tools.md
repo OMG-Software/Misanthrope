@@ -2,7 +2,7 @@
 
 ## Required scope
 
-OrangeCode's Rust implementation language does not limit the languages it can
+OMGCode's Rust implementation language does not limit the languages it can
 help develop. The coding assistant must be able to discover and run the tools
 a project needs, including:
 
@@ -108,7 +108,7 @@ A preview needs controlled port forwarding and an unprivileged viewer.
 
 ## Platform qualification and acceptance
 
-The pinned Rust toolchain in [coding-rules.md](coding-rules.md) builds OrangeCode
+The pinned Rust toolchain in [coding-rules.md](coding-rules.md) builds OMGCode
 itself. Toolchain profiles for user projects have their own requirements.
 
 Validate representative Rust, C/C++, Python, and JavaScript workflows on Windows

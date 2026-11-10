@@ -1,6 +1,6 @@
 # 0014: Use the renamed application namespace without automatic migration
 
-- Status: Accepted
+- Status: Superseded by [ADR-0020](0020-rename-the-project-to-omgcode.md)
 - Date: 2026-11-09
 
 ## Context
