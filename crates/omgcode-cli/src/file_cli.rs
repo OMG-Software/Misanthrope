@@ -82,6 +82,10 @@ pub(crate) enum FileCommand {
     },
     /// Record inspection of an uncertain operation, without retrying or repairing it.
     Acknowledge { operation_id: Uuid },
+    /// Inspect existing checkpoint metadata without creating storage or applying changes.
+    Checkpoints,
+    /// Record inspection of one checkpoint operation without applying or replaying it.
+    AcknowledgeCheckpoint { operation_id: Uuid },
 }
 
 /// Open existing trusted settings. No command silently chooses a development root.
@@ -187,6 +191,21 @@ pub(crate) fn run(command: FileCommand, data_root: &Path) -> Result<(), CliError
                 .map_err(file_error)?;
             print_json(&json!({"acknowledged_operation": operation_id, "replayed": false}))
         }
+        FileCommand::Checkpoints => print_json(
+            &FileBroker::new(&mut control)
+                .checkpoint_inspect()
+                .map_err(file_error)?,
+        ),
+        FileCommand::AcknowledgeCheckpoint { operation_id } => {
+            FileBroker::new(&mut control)
+                .checkpoint_acknowledge(operation_id)
+                .map_err(file_error)?;
+            print_json(&json!({
+                "acknowledged_checkpoint": operation_id,
+                "replayed": false,
+                "applied": false,
+            }))
+        }
     }
 }
 
@@ -235,6 +254,7 @@ fn file_error(error: FileError) -> CliError {
         FileError::RotationUncertain { .. } => "file_rotation_uncertain",
         FileError::Audit(_) => "file_audit",
         FileError::Control(_) => "control",
+        FileError::Checkpoint(error) => error.code(),
         FileError::Native(error) if error.kind() == std::io::ErrorKind::Unsupported => {
             "file_unsupported"
         }

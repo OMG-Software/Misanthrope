@@ -76,6 +76,11 @@ changing broker admission. Phase A2c must qualify native replacement and add
 trusted CLI apply/acknowledgement. Restore remains a later feature. Passing A2a
 tests does not complete Phase A or qualify either replacement backend.
 
+Phase A2b is implemented by
+[ADR-0021](0021-store-checkpoints-with-native-private-handles.md). It adds Linux
+storage and existing-only inspection/acknowledgement. Native publication and
+trusted CLI apply remain A2c gates. The historical A2a scope above is unchanged.
+
 ## References
 
 - [Implementation plan](../../IMPLEMENTATION_PLAN.md)

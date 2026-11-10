@@ -35,3 +35,4 @@ meaningful alternative does not need an ADR.
 | [0018: Define checkpointed replacement before enabling overwrites](0018-define-checkpointed-replacement-before-enabling-overwrites.md) | Accepted | 2026-11-09 |
 | [0019: Validate replacement records before native storage](0019-validate-replacement-records-before-native-storage.md) | Accepted | 2026-11-09 |
 | [0020: Rename the project to OMGCode](0020-rename-the-project-to-omgcode.md) | Accepted | 2026-11-10 |
+| [0021: Store checkpoints with native private handles](0021-store-checkpoints-with-native-private-handles.md) | Accepted | 2026-11-10 |

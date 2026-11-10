@@ -55,6 +55,17 @@ Changes are recorded here before a release version is assigned.
 
 ### Added
 
+- Rust 0.8.0 Phase A2b: protected Linux checkpoint preparation through the
+  authorized core file broker, exact payload/manifest validation, bounded private
+  storage, durable initialization and journal appends, and failure/reopen handling.
+  Add `file checkpoints` and `file acknowledge-checkpoint` for existing-only
+  recovery. Unresolved or invalid state blocks new broker work without growing
+  the old operation log. Preserve unused legacy stores and permission changes.
+  Windows refuses checkpoint storage before mutation; apply/restore/deletion
+  remain disabled. Add native, public-API, CLI, quota, and injected-failure tests.
+  Enable the existing Rustix dependency's safe UID-query feature; no dependency
+  versions change. ADR-0021 records the storage boundary and remaining gates.
+
 - Rust 0.6.0 read-only replacement-record validation for library callers:
   strict initialization/ledger replay, bounded records and descriptors, native
   path validation, exact manifest references, ordered lifecycle transitions,

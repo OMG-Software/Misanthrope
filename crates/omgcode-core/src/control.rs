@@ -217,6 +217,13 @@ impl ControlStore {
         Ok((self.data_directory.live_path()?, self.snapshot.store_id))
     }
 
+    /// Supply expected private-root identity for comparison with the actual
+    /// opened handle. This metadata grants no workspace or storage authority.
+    pub(crate) fn replacement_context(&self) -> Result<(DirectoryRecord, Uuid), ControlError> {
+        self.file_audit_context()?;
+        Ok((self.data_directory.clone(), self.snapshot.store_id))
+    }
+
     /// Open or initialize `<data_directory>/control-v1.jsonl` under an exclusive lock.
     /// Existing empty, malformed, or incomplete files cause an error without repair.
     pub fn open(data_directory: &Path) -> Result<Self, ControlError> {

@@ -2,6 +2,7 @@
 
 pub mod broker;
 pub mod journal;
+pub mod private_store;
 
 use std::fs::{File, OpenOptions};
 use std::io;

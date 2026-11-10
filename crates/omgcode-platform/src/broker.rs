@@ -211,6 +211,24 @@ impl std::error::Error for CreateError {
     }
 }
 
+/// Captured source bytes and native metadata from the same retained file.
+/// This is evidence, not a write grant or an atomic filesystem snapshot.
+#[derive(Debug)]
+pub struct FileCapture {
+    /// Exact bounded bytes read from the pinned regular single-link file.
+    pub bytes: Vec<u8>,
+    /// Native volume identifier.
+    pub volume: u64,
+    /// Native file ID in the existing 16-byte representation.
+    pub file_id: [u8; 16],
+    /// Unix owner ID from that file.
+    pub owner: u32,
+    /// Unix group ID from that file.
+    pub group: u32,
+    /// Unix permission bits. Special bits and extended attributes are refused.
+    pub mode: u32,
+}
+
 /// An anchored workspace. Policy and session checks belong to the trusted core.
 pub struct Workspace {
     native: NativeWorkspace,
@@ -247,6 +265,27 @@ impl Workspace {
             return Err(invalid("invalid file read limit"));
         }
         self.native.read(path, max_bytes)
+    }
+
+    /// Capture checkpoint source bytes, identity, and supported security metadata.
+    /// Linux refuses extended attributes and special permission bits. Other
+    /// backends refuse this operation until their metadata contract is qualified.
+    pub fn capture(&self, path: &RelativePath, max_bytes: usize) -> io::Result<FileCapture> {
+        require_file_target(path)?;
+        if max_bytes == 0 || max_bytes > MAX_FILE_BYTES {
+            return Err(invalid("invalid checkpoint capture limit"));
+        }
+        #[cfg(target_os = "linux")]
+        {
+            self.native.capture(path, max_bytes)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "checkpoint source capture is unavailable",
+            ))
+        }
     }
 
     /// Enumerate native names through a directory handle, with bounded output.

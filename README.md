@@ -75,9 +75,10 @@ does not isolate hostile same-user processes or contain a process. Existing
 file replacement, deletion, and CLI/provider model-dispatched file tools remain
 unavailable. A read-only `file diff` preview is available; it is not a
 replacement operation and creates no checkpoint.
-The core also validates caller-supplied replacement journal bytes without
-opening files or replaying work. Native replacement storage and apply/recovery
-commands remain unimplemented.
+The core also validates replacement journal bytes and can prepare protected
+Linux checkpoints through its authorized library API. The CLI can inspect and
+acknowledge existing checkpoint state. Windows checkpoint storage is unsupported;
+apply, restore, deletion, and model write tools remain unimplemented.
 Process/network confinement, Git, MCP, and memories remain planned. See the
 [workspace settings contract](docs/workspace-permissions.md), the
 [workspace file-access guide](docs/file-access.md), and the [development

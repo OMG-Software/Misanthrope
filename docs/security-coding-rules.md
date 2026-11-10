@@ -81,7 +81,9 @@ authorization. See
   reparse, device, or non-regular handles before reading it.
 - The [accepted replacement contract](file-access.md#replacement-contract)
   defines implementation gates, not an enabled write path. The core's read-only
-  record inspectors validate claims in supplied bytes only. A recorded ready,
+  record inspectors validate claims in supplied bytes only. Its native Linux
+  checkpoint store checks actual opened objects, owner/mode, scope, payloads,
+  and manifests before admission. A recorded ready,
   prepared, commit, outcome, or acknowledgement cannot prove a native effect,
   authorize access, or trigger replay. Future apply must require fresh
   read/write authority, expected exact bytes, native object checks, a durable
@@ -92,6 +94,15 @@ authorization. See
   against independent writers. Preserve uncertain outcomes without automatic
   retry, cleanup, or restore. A restore needs fresh current-content checks and
   must checkpoint later user work before replacing it.
+- Checkpoint preparation requires fresh read/write authority and a source
+  capture whose bytes, identity, and supported security metadata came from the
+  same pinned file. Keep private initialization separate from an unused-store
+  observation. After initialization, missing or invalid evidence must block new
+  file work without repair, retry, eviction, or old-log growth. Operator
+  inspection/acknowledgement cannot grant authority or expose payload bytes.
+  Windows private storage must refuse until ACL and directory persistence are
+  qualified; the older journal helper's Windows directory-sync no-op is not a
+  checkpoint durability primitive.
 
 The v0.3.0 native file broker currently exposes bounded read, list,
 exclusive-create, and single-directory creation through trusted CLI commands.

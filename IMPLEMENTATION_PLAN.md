@@ -3,8 +3,7 @@
 Last verified: 2026-11-10.
 
 This guide is part of `main` after PR #9. Read it before selecting the next
-increment. Contract acceptance and read-only record validation do not mean
-native checkpoint storage or replacement exists.
+increment. Checkpoint preparation does not mean native replacement exists.
 
 This is a resume guide, not a replacement for the owning contracts in
 [docs](docs/README.md). Read [AGENTS.md](AGENTS.md),
@@ -25,10 +24,10 @@ This is a resume guide, not a replacement for the owning contracts in
   The merge was verified through GitHub on 2026-11-09. It changed documentation
   only.
 - **PR #11** merged at `4da432f`: Phase A2a read-only core inspection of caller-supplied
-  replacement records. Native replacement, checkpoints, and replacement recovery
-  remain unimplemented. See [ADR-0019](docs/adr/0019-validate-replacement-records-before-native-storage.md).
-- The application version on this branch is **0.7.0** for the OMGCode rename;
-  merged PR #11 was 0.6.0 and PR #10 was 0.5.0.
+  replacement records. See [ADR-0019](docs/adr/0019-validate-replacement-records-before-native-storage.md).
+- **PR #12** merged at `9e616a3`: the OMGCode rename, version 0.7.0.
+- This branch, `codex/checkpoint-storage`, implements **Phase A2b**, version
+  **0.8.0**, on that baseline. Its merge must be verified before A2c starts.
 
 Implemented today:
 
@@ -54,11 +53,17 @@ Implemented today:
   no model tools.
 - Read-only core initialization/ledger record inspectors with bounded strict
   JSON, lifecycle validation, manifest references, and unresolved-state retention.
-  They open no files, change no broker admission, and execute no recorded work.
+  The pure inspectors open no files and execute no recorded work.
+- Linux protected checkpoint preparation through the core broker, strict
+  manifests and payload checks, bounded initialization, quota and recovery
+  capacity, and fail-closed admission. No workspace entry is replaced.
+- Existing-only `file checkpoints` and `file acknowledge-checkpoint` recovery.
+  Inspection returns metadata. Acknowledgement clears a blocker without success,
+  repair, permission changes, or replay. Windows checkpoint storage is unsupported.
 
 Not implemented:
 
-- Existing-file replacement or deletion, and any apply/checkpoint/recovery flow.
+- Existing-file replacement, apply, restore, deletion, and CLI checkpoint preparation.
 - CLI or real-provider model tool dispatch.
 - Process execution, execution containment, Git, MCP, runtime skills, memories,
   desktop/UI panels, compaction, or caches.
@@ -78,9 +83,9 @@ Not implemented:
    git status --porcelain
    ```
 
-2. Verify that PR #10 is merged. Before A2b, verify that A2a is merged too;
-   preserve its feature branch if it is still under review. Do not infer
-   implemented storage or replacement from contract acceptance or parser tests.
+2. Verify that the preceding phase's PR is merged. A1, A2a, and the rename are
+   merged. Before A2c, verify the A2b PR and preserve its feature branch while
+   it is under review. Do not infer replacement from checkpoint storage tests.
    Do not merge a PR without the user's authorization.
 3. Re-read the owning contracts for the selected phase. Do not infer authority
    from this plan, prompts, journals, or model output.
@@ -108,6 +113,18 @@ whitespace checks, plus the applicable review and analysis checks in
 services; the repository has no standalone documentation checker. Record the
 checks that actually ran. Application tests were not applicable to A1; A2a
 requires the Cargo checks and targeted `replacement_records` integration tests.
+A2b adds `checkpoint_storage`, `checkpoint_recovery`, native private-store and
+capture tests, and internal persistence fault/reopen tests. Run the complete
+suite on both hosts. Use `-- --test-threads=1` when host contention affects local
+provider fixtures; record failures before any isolated rerun or full retry.
+
+A2b local verification on 2026-11-10 passed formatting, Clippy, serial all-target
+tests, and doc tests with Rust 1.99.1. Ubuntu 24.04 under WSL, uid 1000, passed
+265 tests and one doc test. Native Windows passed 234 tests and one doc test.
+Each command exited zero; no tests failed, were ignored, or were filtered.
+The final provider fixtures did not time out. Earlier baseline timeout evidence
+is retained; no assertion or timeout was weakened. These local results do not
+establish remote CI status or native replacement qualification.
 
 A mock or compile-only result does not establish native containment, live
 provider compatibility, or release filesystem support.
@@ -129,15 +146,17 @@ at that review boundary:
   recovery surface is inspection and acknowledgement. Explicit restore remains
   a later feature with its own current-content and checkpoint tests.
 
-  - **A2a (current):** read-only byte-input initialization/ledger validation.
+  - **A2a (merged as PR #11):** read-only byte-input initialization/ledger validation.
     Preserve recorded uncertainty and test malformed, incomplete, and bounded
     histories. No native storage, writer, CLI, or admission change.
-  - **A2b (next after A2a merges):** protected native store and initialization,
+  - **A2b (current branch):** protected Linux native store and initialization,
     manifest/payload validation, aggregate quota, reserved-capacity durable
     append, existing-only inspection, and fault/reopen tests. Integrate live
-    admission only when native storage and missing-state rules are enforceable.
-  - **A2c:** native replacement, metadata preservation, durable checkpoints,
-    commit uncertainty, and trusted CLI apply/acknowledgement after backend
+    admission with native storage and existing-only missing-state rules.
+    Library-only preparation stops unresolved; CLI inspection/acknowledgement
+    does not apply an edit. See [ADR-0021](docs/adr/0021-store-checkpoints-with-native-private-handles.md).
+  - **A2c (after A2b merges):** native replacement, metadata preservation,
+    commit uncertainty, and trusted CLI apply after backend
     qualification. An unavailable backend must continue to refuse replacement.
 
 Contract decisions accepted in A1:
