@@ -97,9 +97,11 @@ authorization. See
 - Checkpoint preparation requires fresh read/write authority and a source
   capture whose bytes, identity, and supported security metadata came from the
   same pinned file. Keep private initialization separate from an unused-store
-  observation. After initialization, missing or invalid evidence must block new
-  file work without repair, retry, eviction, or old-log growth. Operator
-  inspection/acknowledgement cannot grant authority or expose payload bytes.
+  observation. When at least one checkpoint path remains, missing or invalid
+  evidence must block new file work without repair, retry, eviction, or old-log
+  growth. This layout cannot detect complete erasure of both checkpoint paths.
+  Operator inspection/acknowledgement cannot grant authority or expose payload
+  bytes.
   Windows private storage must refuse until ACL and directory persistence are
   qualified; the older journal helper's Windows directory-sync no-op is not a
   checkpoint durability primitive.

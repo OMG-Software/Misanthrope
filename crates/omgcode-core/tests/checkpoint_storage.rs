@@ -10,9 +10,9 @@ use omgcode_core::policy::DecisionReason;
 #[cfg(target_os = "linux")]
 use omgcode_core::policy::PermissionSet;
 use omgcode_core::policy::{SessionBinding, WorkspaceId};
-use omgcode_core::replacement::RecordedArtifact;
 #[cfg(target_os = "linux")]
 use omgcode_core::replacement::ReplacementProgress;
+use omgcode_core::replacement::{CheckpointState, RecordedArtifact};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -21,6 +21,8 @@ const PREPARED_ROOT: &str = "replacement-v1";
 const INITIALIZATION_LOG: &str = "replacement-init-v1.jsonl";
 const LEDGER: &str = "replacement-v1/ledger.jsonl";
 
+/// Keeps the temporary root and its open control writer alive for each scenario.
+/// The field order is intentional: the control store drops before its directory.
 struct Fixture {
     data: PathBuf,
     workspace: PathBuf,
@@ -31,6 +33,7 @@ struct Fixture {
 }
 
 impl Fixture {
+    /// Builds an isolated data root, development root, and registered workspace.
     fn new() -> Self {
         let temporary = tempfile::tempdir().expect("create private temporary directory");
         let data = temporary.path().join("application-data");
@@ -57,12 +60,14 @@ impl Fixture {
         }
     }
 
+    /// Creates a live binding for the fixture's only session and workspace.
     fn binding(&self) -> SessionBinding {
         self.control
             .bind_session(self.session_id, self.workspace_id)
             .expect("bind workspace session")
     }
 
+    /// Lists the anchor, ledger, and payload directory whose absence is asserted.
     fn replacement_paths(&self) -> [PathBuf; 3] {
         [
             self.data.join(INITIALIZATION_LOG),
@@ -72,6 +77,7 @@ impl Fixture {
     }
 }
 
+/// Uses the lowercase hexadecimal form required by checkpoint preconditions.
 fn digest(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
@@ -79,6 +85,7 @@ fn digest(bytes: &[u8]) -> String {
         .collect()
 }
 
+/// Builds a broker target whose path is interpreted relative to its workspace.
 fn target(session_id: Uuid, workspace_id: WorkspaceId, path: impl Into<PathBuf>) -> FileTarget {
     FileTarget {
         session_id,
@@ -88,18 +95,21 @@ fn target(session_id: Uuid, workspace_id: WorkspaceId, path: impl Into<PathBuf>)
 }
 
 #[cfg(target_os = "linux")]
+/// Checks both descriptor fields against the exact retained byte sequence.
 fn assert_artifact(artifact: &RecordedArtifact, bytes: &[u8]) {
     assert_eq!(artifact.bytes, bytes.len() as u64);
     assert_eq!(artifact.sha256, digest(bytes));
 }
 
 #[cfg(target_os = "linux")]
+/// Decodes a recorded native path so the test can compare its workspace target.
 fn path_from_native(path: &omgcode_core::session::NativePath) -> PathBuf {
     path.to_path_buf()
         .expect("recorded target uses native host paths")
 }
 
 #[cfg(target_os = "linux")]
+/// Returns a stable inventory for before/after checks on retained entries.
 fn entry_paths(directory: &Path) -> Vec<PathBuf> {
     let mut entries = fs::read_dir(directory)
         .expect("read private directory entries")
@@ -110,6 +120,8 @@ fn entry_paths(directory: &Path) -> Vec<PathBuf> {
 }
 
 #[cfg(target_os = "linux")]
+/// Totals actual regular-file lengths and rejects unknown fixture artifacts.
+/// The expected operation count makes the measured inventory exact, not partial.
 fn managed_file_bytes(fixture: &Fixture, expected_operations: usize) -> u64 {
     use std::ffi::OsStr;
 
@@ -156,6 +168,7 @@ fn managed_file_bytes(fixture: &Fixture, expected_operations: usize) -> u64 {
     total
 }
 
+/// Reads through the broker to verify ordinary access still returns exact bytes.
 fn read_bytes_are_unchanged(fixture: &mut Fixture, binding: &SessionBinding, expected: &[u8]) {
     let target = FileTarget {
         session_id: fixture.session_id,
@@ -169,6 +182,22 @@ fn read_bytes_are_unchanged(fixture: &mut Fixture, binding: &SessionBinding, exp
 }
 
 #[test]
+/// Keeps serialized state names stable for existing operator-facing JSON.
+fn checkpoint_states_keep_the_existing_operator_json_values() {
+    for (state, expected) in [
+        (CheckpointState::Unused, "unused"),
+        (CheckpointState::Initializing, "initializing"),
+        (CheckpointState::Ready, "ready"),
+    ] {
+        assert_eq!(
+            serde_json::to_value(state).expect("serialize state"),
+            expected
+        );
+    }
+}
+
+#[test]
+/// Confirms inspection and a normal read leave every replacement path absent.
 fn existing_reads_do_not_initialize_replacement_storage() {
     let mut fixture = Fixture::new();
     let source = b"unchanged source bytes";
@@ -178,7 +207,7 @@ fn existing_reads_do_not_initialize_replacement_storage() {
     let inspection = FileBroker::new(&mut fixture.control)
         .checkpoint_inspect()
         .expect("inspect unused replacement storage");
-    assert_eq!(inspection.state, "unused");
+    assert_eq!(inspection.state, CheckpointState::Unused);
     assert_eq!(inspection.managed_bytes, 0);
     assert!(inspection.operations.is_empty());
     read_bytes_are_unchanged(&mut fixture, &binding, source);
@@ -190,6 +219,8 @@ fn existing_reads_do_not_initialize_replacement_storage() {
 
 #[cfg(target_os = "linux")]
 #[test]
+/// Checks private payload bytes, recorded metadata after reopen, pending admission,
+/// payload-free inspection, and acknowledgement without applying either file.
 fn prepare_retains_exact_private_payload_and_acknowledgement_does_not_apply_it() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -329,6 +360,7 @@ fn prepare_retains_exact_private_payload_and_acknowledgement_does_not_apply_it()
 
 #[cfg(target_os = "linux")]
 #[test]
+/// Acknowledging an unknown UUID must neither initialize storage nor block reads.
 fn wrong_acknowledgement_id_does_not_create_or_clear_checkpoint_state() {
     let mut fixture = Fixture::new();
     let binding = fixture.binding();
@@ -355,6 +387,8 @@ fn wrong_acknowledgement_id_does_not_create_or_clear_checkpoint_state() {
 
 #[cfg(target_os = "linux")]
 #[test]
+/// Exercises policy, stale descriptor, UTF-8, and size refusals before storage
+/// initialization, including the requirement that the workspace source survive.
 fn policy_denials_and_invalid_or_stale_inputs_do_not_initialize_storage() {
     let mut denied = Fixture::new();
     fs::write(denied.workspace.join("source.bin"), b"original").unwrap();
@@ -513,6 +547,7 @@ fn policy_denials_and_invalid_or_stale_inputs_do_not_initialize_storage() {
 
 #[cfg(target_os = "linux")]
 #[test]
+/// Rejects linked targets before any checkpoint artifact is created.
 fn links_are_refused_without_creating_checkpoint_artifacts() {
     use std::os::unix::fs::symlink;
 
@@ -548,6 +583,8 @@ fn links_are_refused_without_creating_checkpoint_artifacts() {
 
 #[cfg(target_os = "linux")]
 #[test]
+/// Missing or altered payload evidence must block reads and stay unchanged after
+/// reopen; admission must not repair retained state from the manifest alone.
 fn corrupt_or_missing_payload_blocks_operations_and_is_never_recreated() {
     for corrupt in [false, true] {
         let mut fixture = Fixture::new();
@@ -607,6 +644,7 @@ fn corrupt_or_missing_payload_blocks_operations_and_is_never_recreated() {
 
 #[cfg(target_os = "linux")]
 #[test]
+/// Verifies fail-closed reopen for changed private modes and unexpected entries.
 fn unsafe_private_directory_file_mode_and_unknown_entry_fail_closed() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -689,6 +727,7 @@ fn unsafe_private_directory_file_mode_and_unknown_entry_fail_closed() {
 
 #[cfg(target_os = "linux")]
 #[test]
+/// Retains all 64 acknowledged operations and refuses another without eviction.
 fn sixty_four_acknowledged_checkpoints_are_retained_and_refuse_the_sixty_fifth() {
     let mut fixture = Fixture::new();
     let original = b"o";
@@ -765,6 +804,8 @@ fn sixty_four_acknowledged_checkpoints_are_retained_and_refuse_the_sixty_fifth()
 
 #[cfg(target_os = "linux")]
 #[test]
+/// Fills storage with full payload pairs, then compares reported bytes with
+/// every actual managed file length at the quota boundary.
 fn aggregate_checkpoint_storage_refuses_before_exceeding_sixty_four_mib() {
     const PAYLOAD_BYTES: usize = 1024 * 1024;
     const MEBIBYTE: u64 = 1024 * 1024;
@@ -841,6 +882,8 @@ fn aggregate_checkpoint_storage_refuses_before_exceeding_sixty_four_mib() {
 
 #[cfg(target_os = "linux")]
 #[test]
+/// Legacy broad data-directory permissions keep ordinary reads usable while
+/// private checkpoint creation fails without creating replacement state.
 fn legacy_world_accessible_data_directory_keeps_no_state_reads_available() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -866,7 +909,7 @@ fn legacy_world_accessible_data_directory_keeps_no_state_reads_available() {
     let inspection = FileBroker::new(&mut fixture.control)
         .checkpoint_inspect()
         .expect("inspect unused replacement state");
-    assert_eq!(inspection.state, "unused");
+    assert_eq!(inspection.state, CheckpointState::Unused);
     assert!(inspection.operations.is_empty());
     for path in fixture.replacement_paths() {
         assert!(!path.exists(), "legacy no-state read created {path:?}");
@@ -875,6 +918,8 @@ fn legacy_world_accessible_data_directory_keeps_no_state_reads_available() {
 
 #[cfg(windows)]
 #[test]
+/// Confirms this unsupported backend reports unused state and refuses before
+/// mutating private storage or changing the workspace source.
 fn windows_reports_unused_state_and_rejects_preparation_before_creating_files() {
     let mut fixture = Fixture::new();
     let original = b"existing Windows source";
@@ -884,7 +929,7 @@ fn windows_reports_unused_state_and_rejects_preparation_before_creating_files() 
     let inspection = FileBroker::new(&mut fixture.control)
         .checkpoint_inspect()
         .expect("inspect unused storage");
-    assert_eq!(inspection.state, "unused");
+    assert_eq!(inspection.state, CheckpointState::Unused);
     assert!(inspection.operations.is_empty());
     let error = FileBroker::new(&mut fixture.control)
         .checkpoint_prepare(

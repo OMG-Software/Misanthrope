@@ -26,8 +26,10 @@ This is a resume guide, not a replacement for the owning contracts in
 - **PR #11** merged at `4da432f`: Phase A2a read-only core inspection of caller-supplied
   replacement records. See [ADR-0019](docs/adr/0019-validate-replacement-records-before-native-storage.md).
 - **PR #12** merged at `9e616a3`: the OMGCode rename, version 0.7.0.
-- This branch, `codex/checkpoint-storage`, implements **Phase A2b**, version
-  **0.8.0**, on that baseline. Its merge must be verified before A2c starts.
+- **PR #13** merged at `22040d5`: **Phase A2b**, version **0.8.0**, with
+  protected Linux checkpoint storage and existing-only CLI recovery.
+- This branch, `codex/checkpoint-review-fixes`, addresses PR #13 review comments.
+  Verify that its follow-up PR is merged before A2c starts.
 
 Implemented today:
 
@@ -84,8 +86,9 @@ Not implemented:
    ```
 
 2. Verify that the preceding phase's PR is merged. A1, A2a, and the rename are
-   merged. Before A2c, verify the A2b PR and preserve its feature branch while
-   it is under review. Do not infer replacement from checkpoint storage tests.
+   merged, as is A2b in PR #13. Before A2c, verify the review-fix follow-up PR.
+   Preserve its feature branch while it is under review. Do not infer
+   replacement from checkpoint storage tests.
    Do not merge a PR without the user's authorization.
 3. Re-read the owning contracts for the selected phase. Do not infer authority
    from this plan, prompts, journals, or model output.
@@ -120,7 +123,7 @@ provider fixtures; record failures before any isolated rerun or full retry.
 
 A2b local verification on 2026-11-10 passed formatting, Clippy, serial all-target
 tests, and doc tests with Rust 1.99.1. Ubuntu 24.04 under WSL, uid 1000, passed
-265 tests and one doc test. Native Windows passed 234 tests and one doc test.
+266 tests and one doc test. Native Windows passed 235 tests and one doc test.
 Each command exited zero; no tests failed, were ignored, or were filtered.
 The final provider fixtures did not time out. Earlier baseline timeout evidence
 is retained; no assertion or timeout was weakened. These local results do not
@@ -149,13 +152,14 @@ at that review boundary:
   - **A2a (merged as PR #11):** read-only byte-input initialization/ledger validation.
     Preserve recorded uncertainty and test malformed, incomplete, and bounded
     histories. No native storage, writer, CLI, or admission change.
-  - **A2b (current branch):** protected Linux native store and initialization,
+  - **A2b (merged as PR #13):** protected Linux native store and initialization,
     manifest/payload validation, aggregate quota, reserved-capacity durable
     append, existing-only inspection, and fault/reopen tests. Integrate live
     admission with native storage and existing-only missing-state rules.
     Library-only preparation stops unresolved; CLI inspection/acknowledgement
     does not apply an edit. See [ADR-0021](docs/adr/0021-store-checkpoints-with-native-private-handles.md).
-  - **A2c (after A2b merges):** native replacement, metadata preservation,
+  - **A2c (after the A2b review fixes merge):** native replacement, metadata
+    preservation,
     commit uncertainty, and trusted CLI apply after backend
     qualification. An unavailable backend must continue to refuse replacement.
 

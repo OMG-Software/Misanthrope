@@ -36,6 +36,8 @@ enum SecurityMetadata {
 }
 
 impl Manifest {
+    /// Bind exact payload descriptors and same-handle source metadata to this
+    /// intent. This records evidence only; it never reopens or authorizes a target.
     pub(super) fn encode(
         scope: ReplacementScope,
         operation_id: Uuid,
@@ -73,6 +75,9 @@ impl Manifest {
         Ok(bytes)
     }
 
+    /// Reject unknown or duplicate fields and mismatches with the strict ledger.
+    /// The caller must also compare the encoded manifest digest and actual files;
+    /// source metadata is a captured claim, not a check of the current workspace.
     pub(super) fn validate(
         bytes: &[u8],
         scope: ReplacementScope,
