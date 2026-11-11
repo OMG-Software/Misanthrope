@@ -13,10 +13,10 @@
 //! handle and refuses on failure, but no page states that this persists entries
 //! or renames. See ADR-0023. Same-user and administrator actors are not isolated.
 
-use std::ffi::{OsStr, OsString};
+use std::ffi::{OsStr, OsString, c_void};
 use std::fs::{File, OpenOptions};
 use std::io;
-use std::mem::{offset_of, size_of};
+use std::mem::{MaybeUninit, offset_of, size_of};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
@@ -391,14 +391,19 @@ impl ObjectSecurity {
         }
         let mut aces = Vec::new();
         for index in 0..information.AceCount {
-            let mut raw = std::ptr::null_mut();
-            // SAFETY: `index` is below the reported ACE count, and `raw` is
+            let mut slot = MaybeUninit::<*mut c_void>::uninit();
+            // SAFETY: `index` is below the reported ACE count, and `slot` is
             // writable. The returned pointer refers into `dacl`.
-            if unsafe { GetAce(self.dacl, index, &mut raw) } == 0 {
+            if unsafe { GetAce(self.dacl, index, slot.as_mut_ptr()) } == 0 {
                 return Err(io::Error::last_os_error());
             }
-            // SAFETY: a successful `GetAce` yields a pointer to an ACE header
-            // inside the live DACL. Only the header is read before its type is known.
+            // SAFETY: a successful `GetAce` has written the output pointer.
+            let raw = unsafe { slot.assume_init() };
+            if raw.is_null() {
+                return Err(invalid_data("native ACE pointer is null"));
+            }
+            // SAFETY: `raw` is non-null and points to an ACE header inside the
+            // live DACL. Only the header is read before its type is known.
             let header = unsafe { std::ptr::read_unaligned(raw.cast::<ACE_HEADER>()) };
             let flags = u32::from(header.AceFlags);
             let kind = u32::from(header.AceType);
