@@ -251,8 +251,7 @@ bytes and modes, source metadata restrictions, strict inventory, malformed or
 missing artifacts, live authority, unchanged targets, reserved tail capacity,
 64 retained intents, actual-file aggregate quota, initialization interruptions,
 partial writes, sync uncertainty, acknowledgement, and existing-only reopen.
-Windows tests verify refusal without checkpoint mutation and unused-state
-inspection. Recovery output excludes payloads and offers no apply/restore route.
+Recovery output excludes payloads and offers no apply/restore route.
 The tests use actual temporary files. They do not simulate physical power loss,
 foreign-user attacks, privileged bind mounts, or qualify a release filesystem.
 No A2b test demonstrates native replacement or metadata publication.
@@ -263,10 +262,17 @@ stage checks, non-CAS interleavings, authority refusal, and one native attempt.
 Test failures at the commit, verification, file sync, parent sync, and terminal
 append boundaries. Reopen actual files to distinguish unchanged targets,
 published targets, complete visible outcomes, and malformed ledger tails.
-Windows tests confirm an unsupported apply leaves storage and targets unchanged.
 Use ext4 for Linux temporary targets and private storage. The native cross-mount
 case also uses a disposable directory under `/dev/shm` on tmpfs. Tests do not
-establish physical power-loss behavior or Windows publication.
+establish physical power-loss behavior.
+
+Phase A3b runs the capture, storage, and apply tests natively on Windows NTFS.
+Exercise exact security descriptors, each refused metadata kind, sharing
+conflicts, the step order, and post-rename failures. A recheck test must defeat
+the earlier checks before it can show a later one works: restore the file times
+after changing security, streams, or the name, and assert that the retained
+snapshot still matches. Tests do not cover audit SACLs, a foreign owner, a real
+second volume, ReFS, filter drivers, or physical power loss.
 
 Before enabling another native replacement backend, implement the
 [accepted replacement contract](file-access.md#replacement-contract)

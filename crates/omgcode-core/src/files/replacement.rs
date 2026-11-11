@@ -2,22 +2,22 @@
 
 use std::io;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use omgcode_platform::broker;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use super::checkpoint::{check_permissions, validate_capture, validate_request};
 use super::{FileBroker, FileError, FileTarget};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use super::{FileOperation, FileOutcome};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use crate::policy::Operation;
 use crate::policy::SessionBinding;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use crate::replacement::store::Store;
 use crate::replacement::{CheckpointError, RecordedArtifact, ReplacementReceipt};
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, any(target_os = "linux", windows)))]
 mod tests;
 
 impl FileBroker<'_> {
@@ -38,11 +38,11 @@ impl FileBroker<'_> {
         expected: &RecordedArtifact,
         proposed: &[u8],
     ) -> Result<ReplacementReceipt, FileError> {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         {
             self.apply_with_preparation_hook(binding, target, expected, proposed, |_| {})
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", windows)))]
         {
             let _ = (binding, target, expected, proposed);
             Err(CheckpointError::Io(io::Error::new(
@@ -55,7 +55,7 @@ impl FileBroker<'_> {
 
     /// The test hook runs after checkpoint sync and before staging. Production
     /// uses a no-op. The control writer remains held for the entire operation.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     fn apply_with_preparation_hook(
         &mut self,
         binding: &SessionBinding,

@@ -187,9 +187,11 @@ impl NativeWorkspace {
             bytes,
             volume: after.device,
             file_id: u128::from(after.inode).to_le_bytes(),
-            owner: after.owner,
-            group: after.group,
-            mode: after.mode & 0o777,
+            security: crate::private_store::NativeSecurity::Unix {
+                owner: after.owner,
+                group: after.group,
+                mode: after.mode & 0o777,
+            },
         })
     }
 
@@ -697,9 +699,14 @@ mod tests {
         assert_eq!(capture.bytes, b"exact source\r\n");
         assert_eq!(capture.volume, metadata.dev());
         assert_eq!(capture.file_id, u128::from(metadata.ino()).to_le_bytes());
-        assert_eq!(capture.owner, metadata.uid());
-        assert_eq!(capture.group, metadata.gid());
-        assert_eq!(capture.mode, 0o640);
+        assert_eq!(
+            capture.security,
+            crate::private_store::NativeSecurity::Unix {
+                owner: metadata.uid(),
+                group: metadata.gid(),
+                mode: 0o640,
+            }
+        );
         assert_eq!(fs::read(path).expect("source unchanged"), capture.bytes);
     }
 

@@ -6,7 +6,7 @@ use super::{
 };
 use crate::broker::{FileCapture, MAX_FILE_BYTES};
 use crate::directory_identity;
-use crate::private_store::{PrivateDirectory, PrivateFileIdentity, StageMetadata};
+use crate::private_store::{NativeSecurity, PrivateDirectory, PrivateFileIdentity, StageMetadata};
 use rustix::fs::{
     AtFlags, Mode, OFlags, RenameFlags, ResolveFlags, StatxFlags, fchmod, fchown, fsync, openat2,
     renameat_with, statx,
@@ -121,9 +121,11 @@ impl NativeWorkspace {
                 bytes,
                 volume: source_snapshot.device,
                 file_id: u128::from(source_snapshot.inode).to_le_bytes(),
-                owner: source_snapshot.owner,
-                group: source_snapshot.group,
-                mode: source_snapshot.mode & 0o777,
+                security: NativeSecurity::Unix {
+                    owner: source_snapshot.owner,
+                    group: source_snapshot.group,
+                    mode: source_snapshot.mode & 0o777,
+                },
             },
             mount_id,
             #[cfg(test)]
@@ -163,19 +165,18 @@ impl ReplacementTarget<'_> {
         file.write_all(proposed)?;
         fchown(
             &file,
-            Some(Uid::from_raw(self.capture.owner)),
-            Some(Gid::from_raw(self.capture.group)),
+            Some(Uid::from_raw(self.source_snapshot.owner)),
+            Some(Gid::from_raw(self.source_snapshot.group)),
         )?;
-        fchmod(&file, Mode::from_raw_mode(self.capture.mode))?;
+        fchmod(
+            &file,
+            Mode::from_raw_mode(self.source_snapshot.mode & 0o777),
+        )?;
         file.sync_all()?;
         directory.sync()?;
         let snapshot = regular_single_link_snapshot(&file)?;
         let metadata = crate::private_store::stage_metadata(&file)?;
-        if metadata.owner != self.capture.owner
-            || metadata.group != self.capture.group
-            || metadata.mode != self.capture.mode
-            || !file_bytes_matches(&file, proposed)?
-        {
+        if metadata.security != self.capture.security || !file_bytes_matches(&file, proposed)? {
             return Err(invalid_data(
                 "replacement stage metadata or bytes do not match",
             ));
@@ -657,9 +658,14 @@ mod tests {
         assert_eq!(fs::read(&source_path).expect("published bytes"), b"after");
         assert_ne!(stage.identity().expect("stage identity"), old_id);
         let published = fs::metadata(&source_path).expect("published metadata");
-        assert_eq!(published.uid(), target.capture.owner);
-        assert_eq!(published.gid(), target.capture.group);
-        assert_eq!(published.mode() & 0o777, target.capture.mode);
+        assert_eq!(
+            target.capture.security,
+            NativeSecurity::Unix {
+                owner: published.uid(),
+                group: published.gid(),
+                mode: published.mode() & 0o777,
+            }
+        );
         assert!(!storage.path().join("stage").exists());
         assert!(
             target.commit(&mut stage, || Ok(())).is_err(),

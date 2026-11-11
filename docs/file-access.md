@@ -18,8 +18,8 @@ archive and active-turn state before starting and obtains a fresh binding before
 each call; it does not infer a live binding from journal metadata. A future CLI
 or provider integration must preserve those checks.
 
-Trusted apply can replace an existing file on Linux ext4 under the
-[replacement contract](#replacement-contract). A create operation still refuses
+Trusted apply can replace an existing file on Linux ext4 or Windows NTFS under
+the [replacement contract](#replacement-contract). A create operation still refuses
 every existing entry. Deletion, restore, recursive directory creation, and action
 replay are unavailable. A content check followed by rename cannot guarantee no
 lost updates against independent writers. See
@@ -161,8 +161,8 @@ This contract was accepted through PR #10 and
 [ADR-0018](adr/0018-define-checkpointed-replacement-before-enabling-overwrites.md).
 Phase A2a implements read-only validation of caller-supplied record bytes.
 Phase A2b adds Linux private checkpoint storage and existing-only recovery.
-Phase A2c adds trusted native apply on Linux ext4. Windows apply, restore,
-deletion, and model write tools remain unavailable.
+Phase A2c adds trusted native apply on Linux ext4. Phase A3b adds Windows NTFS
+storage and apply. Restore, deletion, and model write tools remain unavailable.
 
 ### Implemented record inspection (Phase A2a)
 
@@ -234,7 +234,7 @@ checkpoint capture; ordinary reads keep their existing behavior. Stale expected
 bytes, invalid UTF-8, oversized input, and unchanged content create no checkpoint.
 The capture is not an atomic filesystem snapshot.
 
-Preparation is available only on Linux. Private directories must belong to the
+On Linux, private directories must belong to the
 current effective user and have mode 0700. Files must be regular, single-link,
 owned by that user, and mode 0600. The implementation checks opened objects,
 not only requested creation modes. It retains directory handles, checks the
@@ -242,10 +242,9 @@ registered data-root identity and creation time, and uses `openat2` without
 symlink or magic-link traversal. Selecting the trusted data root can cross a
 mount; child traversal cannot. Generated procfs reopening requires procfs and
 verifies the retained file identity again. There is no weaker path fallback.
-Windows still refuses checkpoint storage before mutation. A separate NTFS
-private-store backend exists but the core does not use it yet; see
-[ADR-0023](adr/0023-store-windows-checkpoints-with-verified-acls.md). No
-automatic chmod or ACL repair occurs.
+Windows uses the NTFS private store from
+[ADR-0023](adr/0023-store-windows-checkpoints-with-verified-acls.md), with exact
+protected per-user DACLs. No automatic chmod or ACL repair occurs.
 
 The source and private root must have the same device identifier before
 initialization. This check does not qualify a later rename across mount aliases.
@@ -555,16 +554,17 @@ is made. Replay and archive/restore must never execute a recorded replacement.
 
 ### Native backend gates
 
-Linux ext4 is the implemented prototype. Windows remains an unqualified
-implementation direction. Its private store exists but is not wired to the core.
+Linux ext4 and Windows NTFS are implemented prototypes. Windows is unqualified
+for release.
 [ADR-0023](adr/0023-store-windows-checkpoints-with-verified-acls.md) accepts a
 directory-handle flush for persistence, for which Microsoft gives no contract,
-and records observed rename behaviour:
+and records observed rename behaviour.
+[ADR-0024](adr/0024-publish-one-verified-stage-on-windows-ntfs.md) records the publication decisions:
 
 | Backend | Required primitive and review gate |
 | --- | --- |
 | Linux | Require one ext4 mount and retained rooted parent handles. Use one `renameat2` replacement from the private stage. Sync checkpoint files, checkpoint directories, the staged/published file, and both rename parents in the required order. The rename changes the namespace atomically; it cannot check expected content. |
-| Windows | Review a retained-source-handle rename with a retained target-parent handle through `FILE_RENAME_INFORMATION`, using replace-if-exists semantics. Verify access/share requirements, target-open conflicts, reparse controls, metadata handling, failure states, and directory-entry persistence. Resolve the existing directory-option contract gap for this operation. |
+| Windows | Require NTFS, one volume, and retained handles. Use one `FileRenameInformationEx` replacement from the private stage to the retained target parent, with replace-if-exists and POSIX semantics. Flush checkpoint files, directories, the published file, and both parents, and refuse a failed flush. The flush has no Microsoft persistence contract, and the directory-option contract gap remains open. |
 
 The [Linux rename contract](https://man7.org/linux/man-pages/man2/rename.2.html)
 defines replacement publication, and its
@@ -589,7 +589,32 @@ Do not use path-based `ReplaceFileW` as a shortcut: its
 [documented errors](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-replacefilew)
 include partial name/metadata changes, and its write-through flag is unsupported.
 Backend unavailability must be reported before workspace mutation. Windows
-directory durability and ACL hardening remain gates, not current guarantees.
+directory durability remains unqualified and is not a current guarantee.
+
+### Implemented Windows apply (Phase A3b)
+
+The v0.10.0 `file apply` command uses the same arguments and record flow on
+Windows NTFS. The same limits apply: stop other writers first, and a swap or
+removal after the final check can go undetected. The retained source handle
+blocks new writers while the operation runs, so an in-place edit cannot happen
+during it. A writer that already has the file open refuses the capture. A
+reader that does not share delete access refuses apply, but not a checkpoint.
+
+Apply preserves the owner, group, DACL with its protected and auto-inherited
+state, and the content-indexing opt-out. It refuses other file attributes,
+including read-only and hidden, alternate data streams, extended attributes,
+mandatory labels, resource attributes, scoped policy entries, an owner other
+than the current user or the token default owner, a name that differs from the
+stored name by case or short-name alias, hard links, reparse points, a different
+volume, and filesystems other than NTFS. An audit SACL cannot be read without
+elevation, so it is neither checked nor preserved. The file ID and modification
+time can change.
+
+The data root must meet the
+[ADR-0023](adr/0023-store-windows-checkpoints-with-verified-acls.md) rule. Any
+grant beyond the current user, SYSTEM, and Administrators is refused, including
+an inherited one. Windows makes no power-loss claim. See
+[ADR-0024](adr/0024-publish-one-verified-stage-on-windows-ntfs.md).
 
 ### Uncertain outcomes and recovery
 

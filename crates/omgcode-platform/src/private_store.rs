@@ -1,8 +1,7 @@
 //! Handle-relative private storage. This is not workspace authorization.
 //!
-//! Linux requires openat2 and procfs. Other backends refuse before I/O until
-//! private ACL and directory persistence requirements have been qualified.
-//! The separate Windows backend is not yet wired to `PrivateDirectory`.
+//! Linux requires openat2 and procfs. Windows requires NTFS and verified ACLs.
+//! Other backends refuse before I/O.
 
 #[cfg(target_os = "linux")]
 pub(crate) mod linux;
@@ -10,6 +9,8 @@ pub(crate) mod linux;
 pub use linux::PrivateDirectory;
 #[cfg(windows)]
 pub mod windows;
+#[cfg(windows)]
+pub use windows::WindowsPrivateDirectory as PrivateDirectory;
 
 /// Native identity metadata for one already-open private regular file.
 /// These values do not authorize access or prove checkpoint durability.
@@ -21,28 +22,52 @@ pub struct PrivateFileIdentity {
     pub file_id: [u8; 16],
 }
 
-/// Metadata that the Linux replacement stage can preserve without ACL or xattr support.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Native security that a replacement must carry over from its source.
+///
+/// This is captured evidence. It never authorizes access.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum NativeSecurity {
+    /// Linux ownership and ordinary permission bits.
+    Unix {
+        /// File owner ID.
+        owner: u32,
+        /// File group ID.
+        group: u32,
+        /// Ordinary permission bits only.
+        mode: u32,
+    },
+    /// Windows owner, group, and DACL, plus the content-indexing opt-out.
+    Windows {
+        /// Canonical SDDL read from one open handle.
+        descriptor: String,
+        /// Whether the file is excluded from content indexing.
+        not_content_indexed: bool,
+    },
+}
+
+/// Metadata that a replacement stage can preserve from its source.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StageMetadata {
     /// Identity of the already-open, regular, single-link file.
     pub identity: PrivateFileIdentity,
-    /// File owner ID.
-    pub owner: u32,
-    /// File group ID.
-    pub group: u32,
-    /// Ordinary permission bits only.
-    pub mode: u32,
+    /// Security read from that same file.
+    pub security: NativeSecurity,
 }
 
 /// Inspect the same private file handle whose bytes the caller reads or hashes.
 /// Linux requires a regular, single-link, current-user-owned mode0600 file.
+/// Windows requires a regular, single-link file with the exact private DACL.
 /// Other platforms refuse before I/O. No pathname lookup or reopen occurs.
 pub fn file_identity(file: &std::fs::File) -> std::io::Result<PrivateFileIdentity> {
     #[cfg(target_os = "linux")]
     {
         linux::file_identity(file)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(windows)]
+    {
+        windows::file_identity(file)
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
     {
         let _ = file;
         Err(unsupported())
@@ -50,22 +75,27 @@ pub fn file_identity(file: &std::fs::File) -> std::io::Result<PrivateFileIdentit
 }
 
 /// Inspect supported replacement-stage metadata from the same open file handle.
-/// This Linux-only contract rejects xattrs, special mode bits, and file attrs.
+/// Linux rejects xattrs, special mode bits, and file attrs. Windows rejects
+/// alternate streams, extended attributes, and unsupported file attributes.
 pub fn stage_metadata(file: &std::fs::File) -> std::io::Result<StageMetadata> {
     #[cfg(target_os = "linux")]
     {
         linux::stage_metadata(file)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(windows)]
+    {
+        windows::stage_metadata(file)
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
     {
         let _ = file;
         Err(unsupported())
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", windows)))]
 use crate::DirectoryIdentity;
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", windows)))]
 use std::{
     ffi::{OsStr, OsString},
     fs::File,
@@ -75,10 +105,10 @@ use std::{
 };
 
 /// An unavailable native private-directory backend.
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", windows)))]
 pub struct PrivateDirectory;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", windows)))]
 impl PrivateDirectory {
     /// Refuse unsupported private storage before opening or creating anything.
     pub fn open(_path: &Path) -> io::Result<Self> {
@@ -126,7 +156,7 @@ impl PrivateDirectory {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", windows)))]
 fn unsupported() -> io::Error {
     io::Error::new(
         io::ErrorKind::Unsupported,
@@ -134,7 +164,7 @@ fn unsupported() -> io::Error {
     )
 }
 
-#[cfg(all(test, not(target_os = "linux")))]
+#[cfg(all(test, not(any(target_os = "linux", windows))))]
 mod tests {
     use super::*;
     #[test]

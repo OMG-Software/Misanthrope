@@ -15,8 +15,8 @@ impl FileBroker<'_> {
     /// Capture and persist a private checkpoint without replacing the target.
     ///
     /// Requires fresh read/write preferences and a live process-local binding.
-    /// Linux captures the source identity/security metadata from the same pinned
-    /// file as its bytes. Unsupported backends refuse before checkpoint I/O.
+    /// The source identity and security metadata come from the same pinned file
+    /// as its bytes. Unsupported backends refuse before checkpoint I/O.
     /// Prepared state remains pending until trusted acknowledgement; this is
     /// not an apply token. No payload bytes appear in the returned receipt.
     ///
@@ -33,7 +33,7 @@ impl FileBroker<'_> {
     ) -> Result<CheckpointReceipt, FileError> {
         let path = validate_request(target, expected, proposed)?;
         check_permissions(self.control, binding, target)?;
-        if !cfg!(target_os = "linux") {
+        if !cfg!(any(target_os = "linux", windows)) {
             return Err(CheckpointError::Io(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
                 "native checkpoint storage is not qualified on this platform",

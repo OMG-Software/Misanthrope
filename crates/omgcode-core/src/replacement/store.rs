@@ -1035,9 +1035,11 @@ mod tests {
                 bytes: fs::read(&self.source).expect("source bytes"),
                 volume: metadata.dev(),
                 file_id: u128::from(metadata.ino()).to_le_bytes(),
-                owner: metadata.uid(),
-                group: metadata.gid(),
-                mode: metadata.mode() & 0o777,
+                security: omgcode_platform::private_store::NativeSecurity::Unix {
+                    owner: metadata.uid(),
+                    group: metadata.gid(),
+                    mode: metadata.mode() & 0o777,
+                },
             }
         }
         fn ledger_bytes(&self) -> Vec<u8> {

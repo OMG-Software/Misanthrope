@@ -1,6 +1,7 @@
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::*;
 use crate::control::ControlStore;
@@ -34,11 +35,9 @@ impl Fixture {
         fs::create_dir(&root).expect("create development root");
         fs::create_dir(&workspace).expect("create workspace");
         fs::write(workspace.join("source.txt"), ORIGINAL).expect("write source");
-        fs::set_permissions(
-            workspace.join("source.txt"),
-            fs::Permissions::from_mode(0o640),
-        )
-        .expect("set source mode");
+        set_source_security(&workspace.join("source.txt"));
+        #[cfg(windows)]
+        make_private_root(&data);
 
         let mut control = ControlStore::open(&data).expect("open control store");
         control
@@ -107,6 +106,67 @@ impl Fixture {
     }
 }
 
+/// Unix fixtures use a distinct mode. Windows sources keep their inherited DACL.
+fn set_source_security(path: &Path) {
+    #[cfg(unix)]
+    fs::set_permissions(path, fs::Permissions::from_mode(0o640)).expect("set source mode");
+    #[cfg(windows)]
+    let _ = path;
+}
+
+/// Reads the security that a replacement must preserve, as comparable text.
+fn source_security(path: &Path) -> String {
+    #[cfg(unix)]
+    {
+        format!(
+            "{:o}",
+            fs::metadata(path).unwrap().permissions().mode() & 0o777
+        )
+    }
+    #[cfg(windows)]
+    {
+        icacls(&[path.as_os_str()])
+    }
+}
+
+/// Runs `icacls` and returns its output with the path line normalized away.
+#[cfg(windows)]
+fn icacls(arguments: &[&std::ffi::OsStr]) -> String {
+    let output = std::process::Command::new("icacls")
+        .args(arguments)
+        .output()
+        .expect("icacls");
+    assert!(output.status.success(), "icacls fixture failed");
+    let text = String::from_utf8_lossy(&output.stdout).into_owned();
+    let path = arguments[0].to_string_lossy().into_owned();
+    text.replace(&path, "")
+}
+
+/// Gives the data root the private ACL the Windows store requires.
+#[cfg(windows)]
+fn make_private_root(data: &Path) {
+    let output = std::process::Command::new("whoami")
+        .args(["/user", "/fo", "csv", "/nh"])
+        .output()
+        .expect("whoami");
+    assert!(output.status.success(), "whoami fixture failed");
+    let identity = String::from_utf8_lossy(&output.stdout).into_owned();
+    let sid = identity
+        .trim()
+        .rsplit(',')
+        .next()
+        .expect("SID column")
+        .trim_matches('"')
+        .to_owned();
+    fs::create_dir(data).expect("application data");
+    icacls(&[
+        data.as_os_str(),
+        "/inheritance:r".as_ref(),
+        "/grant:r".as_ref(),
+        format!("*{sid}:(OI)(CI)F").as_ref(),
+    ]);
+}
+
 fn artifact(bytes: &[u8]) -> RecordedArtifact {
     RecordedArtifact {
         bytes: u64::try_from(bytes.len()).expect("bounded test bytes"),
@@ -152,13 +212,24 @@ fn assert_stage(fixture: &Fixture, id: Uuid, expected: bool) {
     }
 }
 
+/// An edit cannot reach a Windows target in place while its source handle
+/// denies write sharing, so only the entry swap is a possible conflict there.
+fn independent_edit_cases() -> &'static [bool] {
+    if cfg!(windows) {
+        &[true]
+    } else {
+        &[false, true]
+    }
+}
+
 #[test]
 fn independent_edits_after_checkpoint_conflict_and_preserve_evidence() {
-    for replace_inode in [false, true] {
+    for &replace_inode in independent_edit_cases() {
         let mut fixture = Fixture::new();
         let binding = fixture.binding();
         let target = fixture.workspace.join("source.txt");
         let workspace = fixture.workspace.clone();
+        let security = source_security(&target);
         let independent = if replace_inode {
             ORIGINAL
         } else {
@@ -168,8 +239,7 @@ fn independent_edits_after_checkpoint_conflict_and_preserve_evidence() {
             if replace_inode {
                 let replacement = workspace.join("independent.txt");
                 fs::write(&replacement, independent).expect("write independent inode");
-                fs::set_permissions(&replacement, fs::Permissions::from_mode(0o640))
-                    .expect("set replacement mode");
+                set_source_security(&replacement);
                 fs::rename(replacement, &target).expect("replace target inode");
             } else {
                 fs::write(&target, independent).expect("edit target in place");
@@ -183,10 +253,7 @@ fn independent_edits_after_checkpoint_conflict_and_preserve_evidence() {
             "expected conflict for inode replacement={replace_inode}, got {result:?}"
         );
         assert_eq!(fs::read(&target).unwrap(), independent);
-        assert_eq!(
-            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
-            0o640
-        );
+        assert_eq!(source_security(&target), security);
 
         let inspection = fixture.inspect().expect("inspect conflict evidence");
         assert_eq!(inspection.pending, None);
@@ -238,6 +305,7 @@ fn publication_faults_reopen_with_exact_progress_and_no_automatic_retry() {
     for (fault, progress, applied, outcome) in cases {
         let mut fixture = Fixture::new();
         let binding = fixture.binding();
+        let security = source_security(&fixture.workspace.join("source.txt"));
         let id = uncertain_id(fixture.apply(&binding, |store| {
             store.inject_publication_fault(fault);
         }));
@@ -246,12 +314,8 @@ fn publication_faults_reopen_with_exact_progress_and_no_automatic_retry() {
             if applied { PROPOSED } else { ORIGINAL }
         );
         assert_eq!(
-            fs::metadata(fixture.workspace.join("source.txt"))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o640
+            source_security(&fixture.workspace.join("source.txt")),
+            security
         );
         assert_stage(&fixture, id, !applied);
         assert_payloads(&fixture, id);
@@ -317,6 +381,18 @@ fn partial_publication_records_fail_closed_without_changing_evidence() {
     }
 }
 
+/// Change the stage's security so it no longer matches its recorded source.
+fn tamper_stage_security(stage: &Path) {
+    #[cfg(unix)]
+    fs::set_permissions(stage, fs::Permissions::from_mode(0o600)).expect("tamper stage mode");
+    #[cfg(windows)]
+    icacls(&[
+        stage.as_os_str(),
+        "/grant".as_ref(),
+        "*S-1-1-0:(R)".as_ref(),
+    ]);
+}
+
 #[test]
 fn tampered_stage_metadata_fails_closed_and_preserves_the_bytes() {
     let mut fixture = Fixture::new();
@@ -326,8 +402,8 @@ fn tampered_stage_metadata_fails_closed_and_preserves_the_bytes() {
     }));
     let stage = fixture.operation_dir(id).join("stage");
     let stage_bytes = fs::read(&stage).expect("read retained stage");
-    fs::set_permissions(&stage, fs::Permissions::from_mode(0o600)).expect("tamper stage mode");
-    let mode = fs::metadata(&stage).unwrap().permissions().mode() & 0o777;
+    tamper_stage_security(&stage);
+    let security = source_security(&stage);
     let ledger = fixture.data.join("replacement-v1").join("ledger.jsonl");
     let ledger_bytes = fs::read(&ledger).expect("read complete ledger");
 
@@ -342,10 +418,7 @@ fn tampered_stage_metadata_fails_closed_and_preserves_the_bytes() {
         "tampered stage cannot be acknowledged"
     );
     assert_eq!(fs::read(&stage).expect("stage preserved"), stage_bytes);
-    assert_eq!(
-        fs::metadata(&stage).unwrap().permissions().mode() & 0o777,
-        mode
-    );
+    assert_eq!(source_security(&stage), security);
     assert_eq!(fs::read(&ledger).expect("ledger preserved"), ledger_bytes);
     assert_payloads(&fixture, id);
     assert_eq!(

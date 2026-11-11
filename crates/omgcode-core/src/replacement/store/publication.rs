@@ -1,20 +1,20 @@
 //! Ordered publication records under the retained checkpoint writer.
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use std::ffi::OsStr;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use omgcode_platform::private_store::{PrivateDirectory, PrivateFileIdentity};
 use serde::Serialize;
 use uuid::Uuid;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use super::{
     CheckpointError, LedgerAction, Store, TAIL_RECORD_BYTES, add_usage, validate_prepared,
     validate_stage,
 };
 use crate::replacement::RecordedArtifact;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use crate::replacement::{
     RecordedFileIdentity, RecordedReplacement, ReplacementOutcome, ReplacementProgress,
 };
@@ -34,7 +34,7 @@ pub struct ReplacementReceipt {
     pub applied: bool,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 impl Store {
     /// Open the already recorded private entry for the pending prepared operation.
     pub(crate) fn stage_directory(
@@ -141,7 +141,7 @@ impl Store {
         Ok(self.faults.check(name)?)
     }
 
-    #[cfg(all(test, target_os = "linux"))]
+    #[cfg(test)]
     pub(crate) fn inject_publication_fault(&mut self, name: &'static str) {
         self.faults.at = Some(name);
     }

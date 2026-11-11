@@ -74,12 +74,12 @@ operations. The broker applies the current registered workspace checks, but it
 does not isolate hostile same-user processes or contain a process. A read-only
 `file diff` preview is available and creates no checkpoint.
 The core also validates replacement journal bytes and can prepare protected
-Linux checkpoints through its authorized library API. The CLI can inspect and
-acknowledge existing checkpoint state. Trusted `file apply` can publish one
-checkpointed replacement on a qualified Linux ext4 mount. Stop independent
-writers first: a content check and rename cannot guarantee no lost updates.
-Windows checkpoint storage and apply are unsupported. Restore, deletion, and
-CLI/provider model-dispatched file tools remain unavailable.
+Linux and Windows checkpoints through its authorized library API. The CLI can
+inspect and acknowledge existing checkpoint state. Trusted `file apply` can
+publish one checkpointed replacement on a qualified Linux ext4 mount or on
+Windows NTFS. Stop independent writers first: a content check and rename cannot
+guarantee no lost updates. Windows makes no power-loss claim. Restore, deletion,
+and CLI/provider model-dispatched file tools remain unavailable.
 Process/network confinement, Git, MCP, and memories remain planned. See the
 [workspace settings contract](docs/workspace-permissions.md), the
 [workspace file-access guide](docs/file-access.md), and the [development

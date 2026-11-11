@@ -21,8 +21,8 @@ containment.
 | Workspace file broker | Bounded read/list/exclusive-create/single-directory creation through trusted CLI commands; release filesystem support is not qualified |
 | Model file tools | Disabled; `workspace_file_tools` remains false |
 | Linux broker prerequisites | Linux 5.6 or later for required `openat2`; `/proc/self/fd` must be available for pinned-file reads; unsupported features fail closed |
-| Checkpoint preparation/storage | Linux-only core API; openat2/procfs, current-user mode0700 directories/mode0600 files, native birth-time metadata and real file/directory sync required; Windows unavailable through the core, with an unwired NTFS private-store backend (ADR-0023) |
-| Trusted apply | Linux ext4 prototype only; positive statx mount ID (Linux 5.8 or later), same mount, supported file metadata, and file/parent sync required; Windows unavailable |
+| Checkpoint preparation/storage | Core API on Linux and Windows. Linux requires openat2/procfs, current-user mode0700 directories/mode0600 files, native birth-time metadata and real file/directory sync. Windows requires NTFS, exact protected per-user DACLs, and a trusted data root (ADR-0023) |
+| Trusted apply | Linux ext4 and Windows NTFS prototypes. Linux requires a positive statx mount ID (Linux 5.8 or later), same mount, supported file metadata, and file/parent sync. Windows requires one NTFS volume and supported metadata, with no power-loss claim (ADR-0024) |
 | macOS | Outside the first-release target |
 
 ## Support requirements
@@ -49,15 +49,17 @@ containment.
 - Resolve the Windows directory-option contract gap described in the
   [file-access guide](file-access.md) before qualifying a Windows backend.
   A successful native test run does not settle an omission in the API contract.
-- Trusted Linux ext4 apply is available when its native checks pass. The
+- Trusted apply on Linux ext4 and Windows NTFS is available when its native
+  checks pass. The
   [accepted replacement gates](file-access.md#native-backend-gates) require
   private staging on the target filesystem, reviewed handle-relative
   publication, security-metadata preservation, and checkpoint/directory
   persistence evidence. Native apply tests exercise one rename and ordered
   syncs on the tested mount. They do not qualify a release filesystem matrix
   or physical power-loss behavior.
-  In particular, Windows per-user checkpoint ACLs and directory-entry durability
-  must be established before enabling that backend; there is no weaker fallback.
+  Windows uses exact per-user checkpoint ACLs and a failing directory flush.
+  Microsoft gives no contract for that flush, so directory-entry durability
+  remains unqualified. There is no weaker fallback.
 - Phase A2b uses retained private directory handles on Linux. Selecting the
   trusted data root permits mount crossings while refusing symbolic/magic links;
   all child resolution additionally refuses mount crossings. Owned directories
@@ -109,8 +111,8 @@ containment.
 The workflow matrix in `.github/workflows/rust.yml` runs Rust checks on Ubuntu
 24.04 and Windows Server 2025. These CI hosts are not the release support matrix.
 Native filesystem, sandbox, process-tree, networking, and toolchain behavior
-remain unqualified for release. Windows inherits directory ACLs, and directory
-entry power-loss durability is not qualified there. Linux broker behavior
+remain unqualified for release. Windows workspaces inherit directory ACLs, and
+directory entry power-loss durability is not qualified there. Linux broker behavior
 requires an available `openat2` implementation and procfs; distributions and
 filesystems have not been selected as supported targets.
 
