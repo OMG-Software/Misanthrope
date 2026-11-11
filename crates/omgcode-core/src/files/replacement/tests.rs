@@ -198,6 +198,15 @@ fn grants_users(path: &Path) -> bool {
     String::from_utf8_lossy(&output.stdout).contains(&*path.to_string_lossy())
 }
 
+/// Reads a file's security exactly as recovery compares it with the record.
+#[cfg(windows)]
+fn native_security(path: &Path) -> omgcode_platform::private_store::NativeSecurity {
+    let file = fs::File::open(path).expect("open file for its security");
+    omgcode_platform::private_store::stage_metadata(&file)
+        .expect("read native security")
+        .security
+}
+
 /// Copies the owner, group, and protected DACL of `from` onto `to`, as an
 /// interrupted commit attempt would leave a stage.
 #[cfg(windows)]
@@ -511,6 +520,11 @@ fn an_interrupted_attempt_with_the_source_security_reopens_after_commit_intent()
     );
     copy_security(&twin, &stage);
     assert!(grants_users(&stage), "fixture recreates the crash state");
+    assert_eq!(
+        native_security(&stage),
+        native_security(&source),
+        "fixture gives the stage exactly the source security"
+    );
 
     let inspection = fixture
         .inspect()
