@@ -6,6 +6,58 @@ Changes are recorded here before a release version is assigned.
 
 ### Added
 
+- Version 0.16.0 adds the trusted CLI command `omgcode run <workspace-id>
+  --profile <name> -- <program> [arguments]`. It runs one program in a
+  workspace whose `execute` preference is enabled.
+  - **Confinement:** always through `run_confined`. Linux uses Landlock and the
+    socket filter, with a private per-run scratch directory as `HOME` and
+    `TMPDIR`. Windows uses the workspace AppContainer and needs an active
+    read-write grant on the workspace.
+  - **Program and environment:** the program is found through the profile's
+    `PATH` entries, in the workspace, or inside a profile root. The run
+    receives only the profile's `PATH`, runner-owned home and temporary
+    variables, and the profile's variables.
+  - **Options:** `--cwd`, `--timeout-secs` (default 600), and
+    `--max-output-bytes` (default 1 MiB). Ctrl+C or `SIGTERM` cancels the
+    whole tree.
+  - **Output:** printed, never stored.
+- New trusted commands `workspace profile-add`, `profile-show`, and
+  `profile-remove` manage operator-declared toolchain profiles.
+  - **Contents:** a name, read-only roots, `PATH` entries inside them, and
+    extra variables.
+  - **Recording:** each change needs the expected revision and is recorded in
+    the control journal by directory identity.
+  - **Refused:** roots that overlap the development root or application
+    storage; reserved variable names.
+  - **Stale profiles:** a moved or replaced directory makes the profile stale,
+    and runs refuse it. Remove it and add it again.
+- A separate run journal, `runs-v1.jsonl`, records each run's intent before it
+  starts and its outcome afterwards.
+  - **Recorded:** the profile and its revision, the program, an argument count
+    and SHA-256 digest, the working directory, the socket mode, the result,
+    the confinement, and byte counts. Argument text and output are not
+    recorded.
+  - **Pending runs:** a run with a missing outcome or unconfirmed cleanup
+    stays pending until `runs acknowledge`. `runs audit` lists records, and
+    `runs archive` moves a journal with no pending runs.
+- A `host_services` workspace preference, off by default, lets a Linux run
+  select host Unix-socket access when the run also passes `--host-services`.
+  Windows refuses it. Settings logs that record a profile or enable
+  `host_services` cannot be read by 0.15.0.
+- `capabilities` reports `process_execution: "trusted_cli_only"`,
+  `toolchain_profiles`, and the sandbox backend. Settings diagnostics still
+  report `execution_allowed: false`, and no model tool starts a process. See
+  ADR-0030 and `docs/execution.md`.
+- Toolchain acceptance tests, ignored by default, run real Rust, Python, Node,
+  C/C++, Go, and Java workflows through `omgcode run`. Each covers builds,
+  tests, formatting where available, subprocesses, denied host data, writes
+  outside the workspace, loopback connections, and missing dependencies. All
+  but Java passed on Windows 11 build 26300 and WSL 6.6; Java has not run
+  because no JDK was installed.
+  - **Node on Windows** needs `NODE_OPTIONS=--preserve-symlinks
+    --preserve-symlinks-main` in its profile. Child processes with piped stdio
+    hang in the container, so `node --test` needs `--test-isolation=none`.
+  - **Ubuntu's Node** needs `/etc/ssl` as a profile root.
 - Version 0.15.0 adds Windows AppContainer confinement to
   `process::run_confined`, for tests only. Each workspace has one container,
   `OMGCode.Workspace.<id>`, with no capabilities, so it has no network access,
@@ -97,6 +149,9 @@ Changes are recorded here before a release version is assigned.
 
 ### Changed
 
+- The SonarQube Cloud project key is now `OMG-Software_OMGCode`, matching the
+  key a Sonar administrator set on the server. `sonar-project.properties` and
+  the repository-checks guide use the new key.
 - Rename the project and GitHub repository to OMGCode. Version 0.7.0 uses
   `omgcode-*` Rust crates, the `omgcode` command, `OMGCODE_LM_TOKEN`, the OMGCode
   application-data identity, and `omgcode-` session filenames. Prompt version

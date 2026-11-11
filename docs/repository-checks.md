@@ -70,15 +70,15 @@ languages deliberately when the implementation needs them.
 
 ## SonarQube Cloud
 
-Project: [OMGCode](https://sonarcloud.io/project/overview?id=OMG-Software_OrangeCode)
+Project: [OMGCode](https://sonarcloud.io/project/overview?id=OMG-Software_OMGCode)
 in the `omg-software` organization.
 
-The analysis project keeps the key `OMG-Software_OrangeCode` while its configured
-display name is OMGCode. This key identifies existing analysis history; it is
-not an application namespace. A GitHub repository rename does not migrate a
-Sonar project key. Keep this key until a Sonar administrator completes and
-verifies a separate key migration. The workflow still requires a completed
-analysis on the current pull-request head after the repository rename.
+The analysis project key is `OMG-Software_OMGCode`. A Sonar administrator
+changed it from `OMG-Software_OrangeCode` on 2026-11-11. The key identifies the
+analysis history; it is not an application namespace. A GitHub repository
+rename does not migrate a Sonar project key, so change the key on the server
+before changing `sonar-project.properties`. The workflow requires a completed
+analysis on the current pull-request head.
 
 `.github/workflows/sonar.yml` uses CI-based analysis and
 `sonar-project.properties`. Keep Sonar Automatic Analysis disabled to avoid

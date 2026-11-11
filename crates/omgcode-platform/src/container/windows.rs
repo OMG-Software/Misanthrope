@@ -15,9 +15,10 @@ use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::windows::ffi::OsStrExt;
+use std::os::windows::ffi::OsStringExt;
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::AsRawHandle;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::{HANDLE, LocalFree};
@@ -54,6 +55,8 @@ pub(crate) const READ_EXECUTE_MASK: u32 = FILE_GENERIC_READ | FILE_GENERIC_EXECU
 pub(crate) const READ_WRITE_MASK: u32 = READ_EXECUTE_MASK | FILE_GENERIC_WRITE | DELETE;
 /// Directories and files beneath the granted directory inherit the entry.
 const GRANT_INHERITANCE: ACE_FLAGS = CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE;
+/// Longest accepted container folder path, in UTF-16 units.
+const MAX_FOLDER_UNITS: usize = 32_768;
 /// Enough to verify a directory and replace its DACL; no data access.
 const GRANT_ACCESS: FILE_ACCESS_RIGHTS =
     READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
@@ -131,21 +134,44 @@ pub(crate) fn ensure_profile(name: &ContainerName) -> io::Result<bool> {
 }
 
 /// Whether the AppContainer profile for `name` exists.
-#[allow(unsafe_code)]
 pub(crate) fn profile_exists(name: &ContainerName) -> io::Result<bool> {
+    folder_path(name).map(|folder| folder.is_some())
+}
+
+/// The container-writable folder of the profile for `name`, or `None` when
+/// the profile does not exist.
+#[allow(unsafe_code)]
+pub(crate) fn folder_path(name: &ContainerName) -> io::Result<Option<PathBuf>> {
     let sid = wide_nul(&sid_string(&derive_sid(name)?)?);
     let mut path: *mut u16 = null_mut();
     // SAFETY: `sid` is a NUL-terminated string SID that outlives the call,
     // and `path` is writable.
     let result = unsafe { GetAppContainerFolderPath(sid.as_ptr(), &raw mut path) };
-    if !path.is_null() {
+    let folder = if path.is_null() {
+        None
+    } else {
+        let mut length = 0;
+        // SAFETY: the call returned a NUL-terminated string it allocated. The
+        // scan reads up to and including that terminator, within the bound.
+        while length < MAX_FOLDER_UNITS && unsafe { *path.add(length) } != 0 {
+            length += 1;
+        }
+        let folder = (length < MAX_FOLDER_UNITS).then(|| {
+            // SAFETY: the `length` units before the terminator were just
+            // read, and the allocation outlives this borrow.
+            let units = unsafe { std::slice::from_raw_parts(path, length) };
+            PathBuf::from(std::ffi::OsString::from_wide(units))
+        });
         // SAFETY: the path was allocated by the call with the COM task
         // allocator and is not used after this.
         unsafe { CoTaskMemFree(path.cast()) };
-    }
+        folder
+    };
     match result {
-        0 => Ok(true),
-        PROFILE_MISSING => Ok(false),
+        0 => folder
+            .map(Some)
+            .ok_or_else(|| invalid_data("the container folder path is unterminated")),
+        PROFILE_MISSING => Ok(None),
         _ => Err(hresult_error("container profile lookup", result)),
     }
 }

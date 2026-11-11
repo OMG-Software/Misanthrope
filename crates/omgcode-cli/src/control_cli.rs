@@ -1,9 +1,9 @@
 //! Operator commands for workspace registration, configuration-only policy
-//! checks, and recorded AppContainer grants.
+//! checks, recorded AppContainer grants, and toolchain profiles.
 #![forbid(unsafe_code)]
 
 use clap::{Args, Subcommand, ValueEnum};
-use omgcode_core::control::{ContainerGrantAccess, ControlError, ControlStore};
+use omgcode_core::control::{ContainerGrantAccess, ControlError, ControlStore, ProfileDeclaration};
 use omgcode_core::policy::{Operation, PermissionSet, PolicyRequest, WorkspaceId};
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -40,13 +40,43 @@ pub(crate) enum WorkspaceCommand {
     /// Grant the workspace's AppContainer access to a directory (Windows).
     ///
     /// Read-write grants are limited to the workspace directory. The grant
-    /// persists until it is revoked. Nothing runs in the container yet.
+    /// persists until it is revoked. `omgcode run` needs a read-write grant
+    /// on the workspace.
     ContainerGrant(ContainerGrantArgs),
     /// Revoke one recorded container grant. Needs no revision.
     ContainerRevoke {
         /// The grant identifier shown by `container-grant` and `status`.
         grant: Uuid,
     },
+    /// Record a toolchain profile for `omgcode run`.
+    ProfileAdd(ProfileAddArgs),
+    /// Show one recorded toolchain profile.
+    ProfileShow { name: String },
+    /// Remove a toolchain profile.
+    ProfileRemove {
+        name: String,
+        #[arg(long)]
+        revision: u64,
+    },
+}
+
+#[derive(Args)]
+pub(crate) struct ProfileAddArgs {
+    /// The profile name: ASCII letters, digits, '.', '-', or '_'.
+    name: String,
+    /// A directory the run may read and execute. Repeat for each root.
+    #[arg(long = "root", required = true)]
+    roots: Vec<PathBuf>,
+    /// A directory inside a root, searched for bare program names and joined
+    /// in order as PATH. Repeat for each entry.
+    #[arg(long = "path")]
+    path_entries: Vec<PathBuf>,
+    /// An extra environment value, NAME=VALUE. Stored in the private
+    /// settings journal and shown by `status`; never pass secrets.
+    #[arg(long = "env")]
+    environment: Vec<String>,
+    #[arg(long)]
+    revision: u64,
 }
 
 #[derive(Args)]
@@ -93,6 +123,10 @@ pub(crate) struct PermissionsArgs {
     /// Let chat offer the local model the read-only workspace read/list tools.
     #[arg(long = "model-tools")]
     model_tools: Option<bool>,
+    /// Let a trusted `run` select host-service Unix-socket access when it
+    /// also passes `--host-services`. Refused on Windows at run time.
+    #[arg(long = "host-services")]
+    host_services: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -154,6 +188,26 @@ pub(crate) fn run(action: WorkspaceCommand, data_root: &Path) -> Result<(), CliE
         WorkspaceCommand::Check(args) => check(args, data_root),
         WorkspaceCommand::Audit { limit } => audit(limit, data_root),
         WorkspaceCommand::ContainerGrant(args) => container_grant(args, data_root),
+        WorkspaceCommand::ProfileAdd(args) => profile_add(args, data_root),
+        WorkspaceCommand::ProfileShow { name } => {
+            let store = open_existing(data_root)?
+                .ok_or_else(|| CliError::new("control", "Workspace control is not initialized"))?;
+            let profile = store
+                .profile(&name)
+                .ok_or_else(|| control_error(ControlError::UnknownProfile))?;
+            print_json(&json!({ "profile": profile }))
+        }
+        WorkspaceCommand::ProfileRemove { name, revision } => {
+            let mut store = open_existing(data_root)?
+                .ok_or_else(|| CliError::new("control", "Workspace control is not initialized"))?;
+            let profile_id = store
+                .remove_profile(&name, revision)
+                .map_err(control_error)?;
+            print_json(&json!({
+                "removed_profile_id": profile_id,
+                "snapshot": store.snapshot(),
+            }))
+        }
         WorkspaceCommand::ContainerRevoke { grant } => {
             let mut store = open_existing(data_root)?
                 .ok_or_else(|| CliError::new("control", "Workspace control is not initialized"))?;
@@ -179,12 +233,42 @@ fn container_grant(args: ContainerGrantArgs, data_root: &Path) -> Result<(), Cli
     }))
 }
 
+fn profile_add(args: ProfileAddArgs, data_root: &Path) -> Result<(), CliError> {
+    let environment = args
+        .environment
+        .iter()
+        .map(|pair| {
+            pair.split_once('=')
+                .map(|(name, value)| (name.to_owned(), value.to_owned()))
+                .ok_or_else(|| CliError::new("configuration", "Use --env NAME=VALUE"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut store = open_existing(data_root)?
+        .ok_or_else(|| CliError::new("control", "Workspace control is not initialized"))?;
+    let profile = store
+        .add_profile(
+            &ProfileDeclaration {
+                name: args.name,
+                read_only_roots: args.roots,
+                path_entries: args.path_entries,
+                environment,
+            },
+            args.revision,
+        )
+        .map_err(control_error)?;
+    print_json(&json!({
+        "profile_id": profile.id(),
+        "snapshot": store.snapshot(),
+    }))
+}
+
 fn set_permissions(args: PermissionsArgs, data_root: &Path) -> Result<(), CliError> {
     if args.read.is_none()
         && args.write.is_none()
         && args.execute.is_none()
         && args.task_network.is_none()
         && args.model_tools.is_none()
+        && args.host_services.is_none()
     {
         return Err(CliError::new(
             "configuration",
@@ -203,6 +287,7 @@ fn set_permissions(args: PermissionsArgs, data_root: &Path) -> Result<(), CliErr
         execute: args.execute.unwrap_or(current.execute),
         task_network: args.task_network.unwrap_or(current.task_network),
         model_tools: args.model_tools.unwrap_or(current.model_tools),
+        host_services: args.host_services.unwrap_or(current.host_services),
     };
     store
         .set_permissions(id, permissions, args.revision)

@@ -17,15 +17,20 @@ Version 0.14.0 added **`process::run_confined`**, which applies the
 [Linux confinement](#linux-confinement) below: a Landlock filesystem allowlist
 and a seccomp socket filter.
 
-Version 0.15.0 adds [Windows confinement](#windows-confinement): the tree runs
+Version 0.15.0 added [Windows confinement](#windows-confinement): the tree runs
 in a per-workspace AppContainer with no capabilities, and trusted CLI commands
 record and apply the [container grants](#container-grants) that decide what it
 can reach.
 
-No CLI command, model tool, or core API calls `run` or `run_confined`.
-Settings reports keep `execution_allowed: false`. Do not describe this as
-command support, and do not describe either confinement as qualified beyond
-the tested kernel and Windows build.
+Version 0.16.0 adds [trusted runs](#trusted-runs). `omgcode run` starts one
+program through `run_confined` under a recorded
+[toolchain profile](#toolchain-profiles), behind the workspace `execute`
+preference, and records it in the [run journal](#run-journal). It is a
+trusted operator command only. No model tool starts a process, and nothing
+calls the unconfined `run`. Settings diagnostics keep
+`execution_allowed: false`, because a diagnostic never authorizes a run. Do
+not describe either confinement as qualified beyond the tested kernel and
+Windows build.
 
 ## Accepted decisions
 
@@ -136,8 +141,9 @@ The user chose a per-run mode with the stricter one as the default; see
 similar service. Landlock cannot limit which pathname sockets are reached, so
 it also exposes the D-Bus session bus, SSH agents, and any other socket the
 user can open. Access to the Docker daemon is usually equivalent to root on the
-host. A later caller must make this an explicit, recorded operator choice and
-must never select it for a model.
+host. A [trusted run](#trusted-runs) selects it only when the workspace
+`host_services` preference and the run's `--host-services` flag are both set,
+and records the mode. No model can select it.
 
 On Windows, `HostServices` is refused with `Unsupported`. In `PairsOnly` mode a
 host named pipe or Unix socket is reachable only when its own ACL admits the
@@ -183,6 +189,178 @@ Rules:
   until it is back at its recorded path.
 - Grants work only on Windows. Elsewhere `container-grant` fails and records
   nothing.
+
+## Trusted runs
+
+The user chose the C4 options on 2026-11-11; see
+[ADR-0030](adr/0030-run-trusted-commands-through-recorded-toolchain-profiles.md).
+
+```text
+omgcode run <workspace-id> --profile <name> [--cwd <relative dir>]
+    [--timeout-secs <1-3600, default 600>]
+    [--max-output-bytes <at most 16 MiB, default 1 MiB>]
+    [--host-services] -- <program> [arguments...]
+omgcode runs audit [--limit <n>] [--archive <file>]
+omgcode runs acknowledge <run-id>
+omgcode runs archive --archive-dir <existing dir>
+```
+
+`run` prints `{"run": report}`. The report holds:
+
+- the recorded `start` and `finish`;
+- `stdout` and `stderr`, each as text with `utf8`, `total_bytes`, and
+  `truncated`;
+- on Linux, `scratch_removed`.
+
+The command succeeds whenever the run was supervised and its outcome recorded,
+whatever the program's exit code. Read `run.finish.result`. A failure prints a
+JSON error with code `run`.
+
+### Checks
+
+While holding the control journal lock, `run` checks:
+
+1. The workspace is registered and its live `execute` preference is enabled.
+2. For `--host-services`: the host is Linux, and the live `host_services`
+   preference is enabled.
+3. The profile exists and was declared on this platform. Each root and `PATH`
+   entry is still the recorded directory, and no root now overlaps the
+   development root or application storage. Otherwise the profile is stale:
+   remove it and add it again.
+4. The working directory is a relative path that stays inside the workspace.
+   The default is the workspace itself.
+5. The program resolves:
+   - A bare name is searched in the profile's `PATH` entries, in order. On
+     Windows `.exe` is tried first. The caller's `PATH` is never searched.
+   - A relative path containing a separator names a file in the workspace.
+   - An absolute path is used as given.
+
+   The file must exist, and its directory must lie inside a profile root or
+   the workspace. The path that runs is the one found, before links resolve.
+6. On Windows, the workspace has an active read-write container grant, and no
+   grant of the workspace is `pending` or `revoking`.
+
+A refused run records nothing. Then the intent is synced to the run journal,
+the locks are released, and the program runs. Settings changed during a run
+apply to later runs.
+
+### Environment and confinement
+
+Nothing is inherited. The run receives `PATH` joined from the profile's
+entries, the runner-owned variables below, and the profile's variables.
+
+| Platform | Runner-owned variables | Read-only | Read-write |
+| --- | --- | --- | --- |
+| Linux | `HOME`, `TMPDIR`, and `XDG_CACHE_HOME`, all set to `<data-dir>/run-scratch/<run id>` (mode 0700, removed after the run) | Profile roots, `/dev/zero`, `/dev/random`, `/dev/urandom` | The workspace, the scratch directory, `/dev/null` |
+| Windows | `LOCALAPPDATA`, `SystemRoot`, `windir`, and `HOME` and `USERPROFILE` set to the container's `AC` folder. Windows then sets `TEMP` and `TMP` inside it | Profile roots, checked against their live ACLs | The workspace, through its grant |
+
+Linux runs use `PairsOnly` sockets unless host services were selected. Windows
+roots that every application package can read, such as `Program Files`, need
+no grant; others need a read-execute [container grant](#container-grants).
+
+`SIGINT` and `SIGTERM` on Linux, and Ctrl+C and Ctrl+Break on Windows, cancel
+the run. The tree is terminated and the outcome is recorded as `cancelled`.
+
+### Toolchain profiles
+
+Profiles are declared by the operator. Nothing is discovered automatically.
+
+| Command | Effect |
+| --- | --- |
+| `omgcode workspace profile-add <name> --root <dir>... [--path <dir>]... [--env NAME=VALUE]... --revision <n>` | Record a profile. Needs the expected revision and increments it. |
+| `omgcode workspace profile-show <name>` | Show one profile. |
+| `omgcode workspace profile-remove <name> --revision <n>` | Remove it. Needs the expected revision and increments it. |
+| `omgcode workspace status` | Lists profiles under `profiles` with the revision that added each. |
+
+Rules:
+
+- **Names:** at most 64 ASCII letters, digits, `.`, `-`, or `_`, starting with
+  a letter or digit. Names are unique case-insensitively. Each profile records
+  the platform it was declared on.
+- **Roots:** 1 to 16 existing directories, recorded by identity. They may not
+  overlap the development root in either direction, overlap application
+  storage, or duplicate each other.
+- **`PATH` entries:** up to 16, each an existing directory inside a root.
+- **Variables:** up to 64, with names of at most 128 bytes and values of at
+  most 4096 bytes, and no NUL.
+  - A name starts with a letter or `_`, continues with letters, digits, or
+    `_`, and is unique case-insensitively.
+  - `PATH`, `HOME`, `TMPDIR`, `TEMP`, `TMP`, `USERPROFILE`, `LOCALAPPDATA`,
+    `SYSTEMROOT`, `WINDIR`, and `XDG_CACHE_HOME` are reserved for the runner,
+    in any case.
+  - Values are stored in the private settings journal and shown by `status`.
+    Never put secrets in them.
+- **Limit:** at most 32 profiles.
+- **Changes:** there is no edit. Remove a profile and add it again. The
+  journal events are `profile_added` and `profile_removed`.
+
+A profile lists what a toolchain needs, not just its executable. Tools that
+read configuration outside their installation need that directory as a root.
+For example, a distribution Node reads `/etc/ssl`.
+
+### Run journal
+
+`<data-dir>/runs-v1.jsonl` sits beside the control journal and shares its
+store identity. Each line has schema version 1, an event UUID, a contiguous
+sequence, a UTC timestamp, and a tagged `action`:
+
+| Action | Meaning |
+| --- | --- |
+| `created` | Header |
+| `run_started` | Synced before the program starts. Records the run ID, workspace, settings revision, profile ID, name, and revision, program path, argument count, `arguments_sha256`, working directory, and socket mode. |
+| `run_finished` | Records the result (`exited`, `signalled`, `deadline_exceeded`, `cancelled`, `not_started`, `supervision_failed`, or `cleanup_unconfirmed`), the applied confinement, the elapsed time, and the output byte counts |
+| `run_acknowledged` | The operator cleared a pending run |
+
+How it works:
+
+- **What is not recorded:** argument text, environment values, and output.
+  The digest is SHA-256 over each argument's native bytes, each prefixed by
+  its length as a little-endian `u64`.
+- **Pending runs:** a run whose outcome is missing, or whose cleanup was
+  unconfirmed, stays pending.
+  - `runs audit` lists pending runs.
+  - `runs acknowledge` clears one. That claims no outcome and retries
+    nothing. On Linux it also removes a leftover scratch directory.
+- **Limits:** at most 16 pending runs; 8 MiB, 4,096 events, and 64 KiB per
+  event.
+- **Reserve:** a new run must leave room for every pending run's remaining
+  events, 1 KiB each: two for a run in progress, one for a run that needs
+  acknowledgement.
+- **Archiving:** `runs archive` moves a journal with no pending runs into an
+  existing directory and reports its SHA-256. A new journal starts on the next
+  run. `runs audit --archive` reads an archived file.
+- **Locking:** the journal lock is held only while appending. A busy lock is
+  retried for up to 10 seconds.
+
+A run whose outcome cannot be recorded still prints its report, then fails;
+it stays pending.
+
+### Acceptance
+
+`crates/omgcode-cli/tests/run_workflow.rs` covers these cases with system
+tools on both platforms:
+
+- confinement and recording;
+- refusals;
+- host-service selection;
+- stale profiles;
+- deadlines, concurrency, and abandoned runs;
+- interrupts, on Linux.
+
+`crates/omgcode-cli/tests/toolchain_acceptance.rs` runs real Rust, Python,
+Node, C/C++, Go, and Java workflows. Its file header lists the toolchain
+variables. Each workflow:
+
+- builds or compiles, runs tests, formats where the toolchain has a formatter,
+  and runs scripts;
+- runs a subordinate process;
+- keeps its outputs in the workspace;
+- fails a missing dependency as an ordinary exit;
+- runs a hostile program that must be denied host data, writes outside the
+  workspace, and a loopback listener.
+
+The C program checks files only. These tests are ignored by default, and a
+missing toolchain variable fails the test.
 
 ## Platform mechanics
 
@@ -296,12 +474,35 @@ sockets ignore it.
 
 ## Known limits
 
-These remain true after C3 and must be addressed or documented by the increments
-that expose execution:
+These remain true after C4:
 
-- **`run` is unconfined.** A program started by `run` can read and write
-  anything the user can, use the network, and talk to host services. Only
-  `run_confined` applies the rules above.
+- **`process::run` is unconfined.** A program started by the platform
+  function `run` can read and write anything the user can, use the network,
+  and talk to host services. Only `run_confined` applies the rules above.
+  The trusted CLI `run` uses `run_confined` only.
+- **Profile variables are not secret.** They are stored in the settings
+  journal and shown by `status`. There is no credential path for runs.
+- **Node on Windows.**
+  - Node's module loader reads every ancestor directory, starting at the drive
+    root, and fails with `EPERM` in a container. Declare
+    `NODE_OPTIONS=--preserve-symlinks --preserve-symlinks-main` in the
+    profile.
+  - Child processes with piped standard streams never return, even with a
+    timeout; only the run deadline ends them. Inherited streams work. This
+    includes the isolated `node --test`; use `--test-isolation=none` (Node
+    22.8 or later).
+- **Acceptance coverage.** The toolchain cases passed with:
+  - Windows: Rust 1.99.1 (MSVC 14.50 and SDK 10.0.26100), Python 3.14.4,
+    Node 24.15.0, Go 1.27.4, and MSVC C/C++;
+  - Linux: Rust 1.99.1, Python 3.12.3, Node 18.19.1, Go 1.26.10, and
+    GCC 13.3.
+
+  The Java case has not run, because neither host had a JDK. Not covered:
+  disk exhaustion; package-network access, because there is no network
+  profile; and Python and Node formatters, because none were installed. On
+  Windows, the Rust, Python, and Node toolchains were user-owned copies
+  granted read-execute, because the installed directories needed
+  administrator rights to grant.
 - **Windows grants are lasting and shared.** Grants are ACL entries that stay
   until revoked. A run's `Confinement` is checked against them, but grants it
   does not list still apply to it. Programs running as the same user can add or
@@ -314,8 +515,8 @@ that expose execution:
   directory. Grant directories that contain no hard links to host data.
 - **Windows ancestors.** The container can open granted paths below
   directories it cannot read, but it cannot list or read those ancestors. Tools
-  that search parent directories for configuration may fail; this was not
-  tested.
+  that search parent directories or resolve real paths may fail; Node does, as
+  described above.
 - **Windows loopback.** Loopback traffic is dropped without a reply, so a
   connect fails only after the system timeout (about 21 seconds), not at once.
 - **Windows build coverage.** Windows confinement was tested on Windows 11
@@ -357,6 +558,12 @@ that expose execution:
 | --- | --- | --- |
 | C2 (0.14.0) | Linux Landlock filesystem rules and seccomp network denial | Done: see [confined runs](#confined-runs) and ADR-0028 |
 | C3 (0.15.0) | Windows AppContainer | Done: see [Windows confinement](#windows-confinement), [container grants](#container-grants), and ADR-0029 |
-| C4 | Trusted CLI `run` and the `execute` preference | Toolchain profiles, a curated environment, recorded profile with each result, journal records, an explicit recorded choice before `HostServices`, confinement built from the recorded grants on Windows, and the acceptance cases in the development-tool contract |
+| C4 (0.16.0) | Trusted CLI `run` and the `execute` preference | Done: see [trusted runs](#trusted-runs) and ADR-0030 |
+
+Later work needs its own decisions:
+
+- a package-network profile;
+- tree-wide resource limits;
+- a model-callable command tool.
 
 Live qualification on each supported OS remains a separate gate.

@@ -9,6 +9,8 @@ pub mod policy;
 pub mod prompt;
 pub mod provider;
 pub mod replacement;
+pub mod run;
+pub mod run_journal;
 pub mod session;
 mod storage;
 pub mod turn;

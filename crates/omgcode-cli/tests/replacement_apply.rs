@@ -258,6 +258,7 @@ fn denied_write_preference_refuses_replacement() {
                     execute: false,
                     task_network: false,
                     model_tools: false,
+                    host_services: false,
                 },
                 control.revision(),
             )

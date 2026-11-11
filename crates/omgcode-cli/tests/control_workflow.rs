@@ -142,7 +142,8 @@ fn workspace_commands_persist_cas_permissions_policy_and_audit_results() {
     assert_eq!(second["snapshot"]["revision"], 3);
 
     // When flags are omitted, defaults keep read/write enabled and execute,
-    // network, and model tools disabled. Status reports every flag explicitly.
+    // network, model tools, and host services disabled. Status reports every
+    // flag explicitly.
     let second_permissions = second["snapshot"]["workspaces"]
         .as_array()
         .expect("workspace registrations")
@@ -157,7 +158,8 @@ fn workspace_commands_persist_cas_permissions_policy_and_audit_results() {
             "write": true,
             "execute": false,
             "task_network": false,
-            "model_tools": false
+            "model_tools": false,
+            "host_services": false
         })
     );
 
@@ -429,7 +431,7 @@ fn legacy_session_creation_remains_available_without_a_control_store() {
 }
 
 #[test]
-fn capabilities_report_configuration_only_policy_without_execution_tools() {
+fn capabilities_report_configuration_only_policy_and_trusted_runs_only() {
     // Given a private data directory that the capabilities command does not need to open.
     let temporary = TempDir::new().expect("private temporary directory");
     let data_root = temporary.path().join("application-data");
@@ -444,8 +446,21 @@ fn capabilities_report_configuration_only_policy_without_execution_tools() {
     assert_eq!(capabilities["policy_decision"], "configuration_only");
     assert_eq!(capabilities["workspace_file_tools"], false);
     assert_eq!(capabilities["workspace_container_grants"], cfg!(windows));
-    assert_eq!(capabilities["process_execution"], false);
-    assert_eq!(capabilities["sandbox_backend"], "unavailable");
+    let runs = cfg!(any(target_os = "linux", windows));
+    assert_eq!(capabilities["toolchain_profiles"], runs);
+    if runs {
+        assert_eq!(capabilities["process_execution"], "trusted_cli_only");
+    } else {
+        assert_eq!(capabilities["process_execution"], false);
+    }
+    let backend = if cfg!(target_os = "linux") {
+        "landlock"
+    } else if cfg!(windows) {
+        "appcontainer"
+    } else {
+        "unavailable"
+    };
+    assert_eq!(capabilities["sandbox_backend"], backend);
     assert!(!data_root.exists());
 }
 
