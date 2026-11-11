@@ -95,6 +95,12 @@ or choose a private `--data-dir`. OMGCode does not repair ACLs.
 
 Gaps that remain open:
 
+- The stage takes the source DACL before publication, and a failed operation
+  retains it. Windows grants bypass traverse checking to everyone by default,
+  so the private parent directories do not stop a principal that the copied
+  DACL admits and that knows the stage path or file ID. Such a principal can
+  already read the target, but it can read proposed bytes that were never
+  published. This exposure is not tested natively.
 - Audit SACLs cannot be observed unelevated and are not preserved.
 - A foreign owner was not tested, because setting one needs elevation.
 - Cross-volume and non-NTFS refusals are unit tested for the comparison only, not

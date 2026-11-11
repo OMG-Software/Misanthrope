@@ -18,11 +18,12 @@ use windows_sys::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
 use windows_sys::Win32::Security::{
-    ATTRIBUTE_SECURITY_INFORMATION, DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION,
-    GetSecurityDescriptorControl, LABEL_SECURITY_INFORMATION, OBJECT_SECURITY_INFORMATION,
-    OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SCOPE_SECURITY_INFORMATION,
-    SE_DACL_AUTO_INHERIT_REQ, SE_DACL_AUTO_INHERITED, SetKernelObjectSecurity,
-    SetSecurityDescriptorControl,
+    ACL, ACL_SIZE_INFORMATION, ATTRIBUTE_SECURITY_INFORMATION, AclSizeInformation,
+    DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, GetAclInformation,
+    GetSecurityDescriptorControl, GetSecurityDescriptorSacl, LABEL_SECURITY_INFORMATION,
+    OBJECT_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+    SCOPE_SECURITY_INFORMATION, SE_DACL_AUTO_INHERIT_REQ, SE_DACL_AUTO_INHERITED,
+    SetKernelObjectSecurity, SetSecurityDescriptorControl,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_ARCHIVE, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_NOT_CONTENT_INDEXED,
@@ -87,7 +88,7 @@ pub(crate) fn read_security(file: &File) -> io::Result<String> {
             "replacement requires an owner, group, and DACL",
         ));
     }
-    if security.has_sacl_entries() {
+    if security.has_sacl_entries()? {
         return Err(unsupported(
             "replacement cannot preserve label, attribute, or scope entries",
         ));
@@ -316,11 +317,40 @@ fn require_no_extended_attributes(file: &File) -> io::Result<()> {
 }
 
 impl ObjectSecurity {
-    /// Reports whether the SACL read from this handle holds any entry.
+    /// Reports whether the descriptor read from this handle has a SACL entry.
     #[allow(unsafe_code)]
-    fn has_sacl_entries(&self) -> bool {
-        // SAFETY: a non-null `sacl` points into `descriptor`, live until drop.
-        !self.sacl.is_null() && unsafe { (*self.sacl).AceCount } != 0
+    fn has_sacl_entries(&self) -> io::Result<bool> {
+        let mut present = 0;
+        let mut defaulted = 0;
+        let mut sacl: *mut ACL = std::ptr::null_mut();
+        // SAFETY: `descriptor` is a valid descriptor, live until drop, and the
+        // three outputs are writable for this synchronous call.
+        if unsafe {
+            GetSecurityDescriptorSacl(self.descriptor, &mut present, &mut sacl, &mut defaulted)
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        if present == 0 || sacl.is_null() {
+            return Ok(false);
+        }
+        let mut size = ACL_SIZE_INFORMATION::default();
+        let length = u32::try_from(size_of::<ACL_SIZE_INFORMATION>())
+            .map_err(|_| invalid_data("ACL information is too large"))?;
+        // SAFETY: the call above reported a present, non-null SACL inside
+        // `descriptor`, and `size` is writable for `length` bytes.
+        if unsafe {
+            GetAclInformation(
+                sacl,
+                std::ptr::from_mut(&mut size).cast(),
+                length,
+                AclSizeInformation,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(size.AceCount != 0)
     }
 
     /// Converts the selected parts of this descriptor to bounded SDDL text.

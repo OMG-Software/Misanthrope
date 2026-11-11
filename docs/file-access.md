@@ -610,6 +610,12 @@ volume, and filesystems other than NTFS. An audit SACL cannot be read without
 elevation, so it is neither checked nor preserved. The file ID and modification
 time can change.
 
+The stage takes the source DACL before publication, and a failed operation
+retains it. Windows grants bypass traverse checking to everyone by default, so
+the private parent directories do not stop a principal that the copied DACL
+admits and that knows the stage path or file ID. Such a principal can already
+read the target, but it can read proposed bytes that were never published.
+
 The data root must meet the
 [ADR-0023](adr/0023-store-windows-checkpoints-with-verified-acls.md) rule. Any
 grant beyond the current user, SYSTEM, and Administrators is refused, including

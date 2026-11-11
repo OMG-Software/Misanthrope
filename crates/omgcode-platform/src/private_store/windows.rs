@@ -333,7 +333,6 @@ struct ObjectSecurity {
     owner: PSID,
     group: PSID,
     dacl: *mut ACL,
-    sacl: *mut ACL,
 }
 
 impl ObjectSecurity {
@@ -352,7 +351,6 @@ impl ObjectSecurity {
         let mut owner: PSID = std::ptr::null_mut();
         let mut group: PSID = std::ptr::null_mut();
         let mut dacl: *mut ACL = std::ptr::null_mut();
-        let mut sacl: *mut ACL = std::ptr::null_mut();
         let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
         // SAFETY: `file` is a live handle opened with READ_CONTROL, and every
         // output pointer is writable for this synchronous call.
@@ -364,7 +362,7 @@ impl ObjectSecurity {
                 &mut owner,
                 &mut group,
                 &mut dacl,
-                &mut sacl,
+                std::ptr::null_mut(),
                 &mut descriptor,
             )
         };
@@ -378,7 +376,6 @@ impl ObjectSecurity {
             owner,
             group,
             dacl,
-            sacl,
         })
     }
 

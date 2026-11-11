@@ -322,12 +322,12 @@ fn checkpoint_acknowledgement_does_not_restore_revoked_workspace_permissions() {
 fn present_checkpoint_storage_refuses_an_untrusted_root_without_mutation() {
     let fixture = Fixture::new(ORIGINAL);
     let operation_id = fixture.prepare();
-    let granted = std::process::Command::new("icacls")
-        .arg(&fixture.data)
-        .args(["/grant", "*S-1-1-0:(R)"])
-        .output()
-        .expect("broaden fixture ACL");
-    assert!(granted.status.success(), "ACL fixture applies");
+    let mut icacls = std::process::Command::new("icacls");
+    icacls.arg(&fixture.data).args(["/grant", "*S-1-1-0:(R)"]);
+    let granted =
+        support::run_with_deadline(icacls, support::CLI_DEADLINE).expect("broaden fixture ACL");
+    assert!(!granted.timed_out, "ACL fixture timed out");
+    assert!(granted.output.status.success(), "ACL fixture applies");
     let before = child_names(&fixture.data);
     let settings = fs::read(fixture.data.join("control-v1.jsonl")).expect("settings bytes");
 

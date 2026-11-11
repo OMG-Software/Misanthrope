@@ -195,8 +195,18 @@ fn publication_keeps_the_content_indexing_opt_out_both_ways() {
 fn publication_works_when_the_copied_dacl_denies_writing() {
     let fixture = Fixture::with_source(b"before");
     let user = current_user_ace_sid(&fixture.path);
-    set_dacl(&fixture.path, &format!("P(A;;0x1301bf;;;{user})"));
+    // Read and execute only: no write data, append, attribute, or delete rights.
+    set_dacl(&fixture.path, &format!("P(A;;0x1200a9;;;{user})"));
+    let denied = OpenOptions::new()
+        .write(true)
+        .open(&fixture.path)
+        .expect_err("the copied DACL denies writing");
+    assert_eq!(denied.kind(), io::ErrorKind::PermissionDenied);
     let target = fixture.target();
+    assert!(
+        descriptor(target.capture()).ends_with(&format!("D:P(A;;0x1200a9;;;{user})")),
+        "capture records the read-only DACL"
+    );
     let mut stage = target
         .prepare_stage(fixture.directory(), b"after")
         .expect("stage");
