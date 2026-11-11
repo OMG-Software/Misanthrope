@@ -94,9 +94,12 @@ specification and limits as `run`, plus a `Confinement`:
 
 Rules:
 
-- Everything not listed is denied, including the user's home directory and
-  other host data. A directory rule covers everything beneath it. Rules are
-  additive: a read-only path inside a read-write path is still writable.
+- Filesystem operations that Landlock handles are denied outside the listed
+  paths, including in the user's home directory and other host data. Metadata
+  changes and some other operations are not restricted anywhere; see
+  [known limits](#known-limits). A directory rule covers everything beneath it.
+  Rules are additive: a read-only path inside a read-write path is still
+  writable.
 - Each path must be absolute and name an existing directory, regular file, or
   character device. No component may be a symbolic link. At most 64 paths are
   accepted.
@@ -141,7 +144,9 @@ must never select it for a model.
   is held around `CreateProcessW`.
 - Termination uses `TerminateJobObject`. Cleanup is observed when the job's
   active process count is zero. The pipes report end of file once all members
-  are gone.
+  are gone. A member's process object can become signaled shortly after the
+  count reaches zero, while the kernel finishes its exit, so a check for that
+  object must allow a short wait.
 
 ### Linux
 
@@ -204,9 +209,14 @@ that expose execution:
   until C3.
 - **Linux kernel coverage.** Confinement needs Landlock ABI 3 (Linux 6.2 or
   later) with Landlock enabled. It was tested on WSL 6.6 (ABI 3) only.
-- **What Landlock does not cover.** Metadata reads with `stat`, `readlink`, and
-  ownership or permission changes on reachable files are not restricted.
-  Before ABI 6, a confined program can signal other processes of the same user.
+- **What Landlock does not cover.** Landlock up to ABI 6 does not restrict
+  `stat`, `readlink`, `chdir`, `access`, `flock`, or `fcntl`, or metadata
+  changes with `chmod`, `chown`, `setxattr`, and `utime`. These work on any
+  path the program can name, including unlisted host files, within the user's
+  own rights. On ABI 3 and 4, device `ioctl` is not restricted either: a
+  character device reachable through any rule, read-only included, accepts
+  state-changing `ioctl` calls. Grant devices only when needed. Before ABI 6, a
+  confined program can signal other processes of the same user.
 - **`HostServices` exposure.** See [Unix-domain sockets](#unix-domain-sockets).
 - **No IP networking.** Package downloads, loopback test servers, and
   development servers fail until a network profile is designed.

@@ -35,7 +35,8 @@ owns the details.
 
 - **Filesystem:** a Landlock ruleset with read-only paths (execute, read, list)
   and read-write paths (every handled right except creating device nodes).
-  Everything else is denied. The parent opens each path with `openat2` and
+  Landlock-handled operations are denied everywhere else; metadata changes are
+  not handled. The parent opens each path with `openat2` and
   `RESOLVE_NO_SYMLINKS`, accepts only directories, regular files, and character
   devices, and builds the ruleset before `fork`. The child only calls
   `landlock_restrict_self` after `no_new_privs`.
@@ -95,8 +96,10 @@ owns the details.
   root on the host.
 - Before ABI 6, a confined program can still signal other processes of the same
   user and connect to abstract Unix sockets in `HostServices` mode.
-- Landlock does not restrict reading metadata through `stat`, following
-  `readlink`, or changing ownership and permissions of reachable files.
+- Landlock up to ABI 6 does not restrict `stat`, `readlink`, or metadata
+  changes such as `chmod`, `chown`, `setxattr`, and `utime`, on any path the
+  program can name. On ABI 3 and 4 it does not restrict device `ioctl`, so a
+  granted character device accepts state-changing `ioctl` calls.
 - Tests ran on WSL 6.6 (ABI 3). Each of eight temporary mutations, such as
   removing `landlock_restrict_self`, allowing `socket`, allowing `io_uring`, not
   handling truncation, or following symbolic links, was caught. Nothing calls

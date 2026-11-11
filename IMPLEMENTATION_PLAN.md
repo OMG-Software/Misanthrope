@@ -260,6 +260,16 @@ allowing non-Unix families in `HostServices`, and accepting special files as
 rule paths. These results do not establish confinement on other kernels,
 remote CI status, or release readiness.
 
+PR #23's first CI run failed one Windows test, the C1 escape test, which had
+also failed on `main` at `6b1ebe4`. Windows reported the job empty before the
+killed grandchild's process object was signaled. It did not fail in 200 local
+runs or 40 local suite runs. The test now waits up to five seconds for that
+object; a surviving grandchild still fails it. Review fixes then qualified the
+allowlist claims: Landlock does not restrict metadata changes, and does not
+restrict device `ioctl` before ABI 5. Re-verification passed formatting,
+Clippy, all-target tests, and doc tests: Windows 362 tests and Linux 365, each
+with one doc test, none failed, ignored, or filtered.
+
 A mock or compile-only result does not establish native containment, live
 provider compatibility, or release filesystem support.
 

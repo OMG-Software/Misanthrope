@@ -13,7 +13,12 @@ use super::{ProcessError, contains_nul};
 /// Largest number of paths, read-only and read-write together, in one confinement.
 pub const MAX_CONFINEMENT_PATHS: usize = 64;
 
-/// Filesystem allowlist for a confined run. Everything not listed is denied.
+/// Filesystem allowlist for a confined run. Operations that Landlock handles,
+/// such as opening, executing, listing, creating, renaming, truncating, and
+/// removing, are denied outside the listed paths. Landlock does not restrict
+/// metadata changes: a confined program can still change permissions,
+/// ownership (within the user's rights), timestamps, and extended attributes
+/// of any path it can name. See `docs/execution.md` for the full limits.
 ///
 /// Each path must be absolute and name an existing directory, regular file,
 /// or character device. On Linux no component of the path may be a symbolic
@@ -22,8 +27,10 @@ pub const MAX_CONFINEMENT_PATHS: usize = 64;
 /// inside a read-write directory is still writable.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Confinement {
-    /// Paths that may be read and executed but never changed. Toolchain roots,
-    /// system libraries, and the program itself belong here.
+    /// Paths whose contents may be read and executed, and whose directories
+    /// may be listed, but not written, truncated, or changed beneath.
+    /// Metadata changes are not prevented. Toolchain roots, system
+    /// libraries, and the program itself belong here.
     pub read_only: Vec<PathBuf>,
     /// Paths that may also be written, created, renamed, and removed beneath.
     /// The workspace and a private scratch directory belong here.

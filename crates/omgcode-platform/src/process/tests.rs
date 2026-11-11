@@ -297,8 +297,33 @@ fn descendants_cannot_escape_and_never_outlive_the_run() {
         contents.contains("escape=denied"),
         "the grandchild escaped: {contents}"
     );
-    assert!(!is_alive(pid), "grandchild {pid} outlived the run");
+    assert!(
+        exits_within(pid, Duration::from_secs(5)),
+        "grandchild {pid} outlived the run"
+    );
     drop(guard);
+}
+
+/// Whether `pid` is gone within `timeout`. Windows can report the job empty
+/// before a killed member's process object is signaled, so an instant check
+/// races the kernel's exit. A surviving grandchild sleeps for 120 seconds, so
+/// this still fails when one escapes.
+fn exits_within(pid: u32, timeout: Duration) -> bool {
+    let until = Instant::now() + timeout;
+    loop {
+        if !is_alive(pid) {
+            return true;
+        }
+        if Instant::now() >= until {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn a_live_process_is_not_reported_gone() {
+    assert!(!exits_within(std::process::id(), Duration::from_millis(50)));
 }
 
 #[test]
