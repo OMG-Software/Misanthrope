@@ -207,11 +207,16 @@ fn copy_security(from: &Path, to: &Path) {
             "-NoProfile",
             "-NonInteractive",
             "-Command",
-            // Set-Acl would also write the audit SACL, which needs elevation.
-            "$a = New-Object System.Security.AccessControl.FileSecurity; \
-             $a.SetSecurityDescriptorSddlForm((Get-Acl -LiteralPath $env:OMG_FROM).Sddl, 'Owner,Group,Access'); \
-             [System.IO.File]::SetAccessControl($env:OMG_TO, $a)",
+            // .NET only, no cmdlets: a module path inherited from another shell
+            // can stop Windows PowerShell loading them. Set-Acl would also
+            // write the audit SACL, which needs elevation.
+            "$parts = [System.Security.AccessControl.AccessControlSections]'Owner,Group,Access'; \
+             $sddl = [System.IO.File]::GetAccessControl($env:OMG_FROM).GetSecurityDescriptorSddlForm($parts); \
+             $copy = [System.Security.AccessControl.FileSecurity]::new(); \
+             $copy.SetSecurityDescriptorSddlForm($sddl, $parts); \
+             [System.IO.File]::SetAccessControl($env:OMG_TO, $copy)",
         ])
+        .env_remove("PSModulePath")
         .env("OMG_FROM", from)
         .env("OMG_TO", to)
         .output()
