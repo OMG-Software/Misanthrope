@@ -557,6 +557,7 @@ fn parse_tool_response(response: Response) -> Result<ToolModelReply, ProviderErr
     Ok(ToolModelReply {
         content,
         tool_calls,
+        finish_reason: finish_reason.to_owned(),
     })
 }
 

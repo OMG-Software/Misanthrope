@@ -119,8 +119,12 @@ cargo run --locked -p omgcode-cli -- chat --workspace . --model "YOUR_MODEL_ID" 
 
 The endpoint defaults to `http://127.0.0.1:1234/v1`. The required context value
 must come from the selected model's validated profile. The adapter uses a
-conservative byte-based estimate; it is not the model tokenizer. The example
-sends only the supplied message and saved chat history, not the workspace files.
+conservative byte-based estimate; it is not the model tokenizer. While the
+workspace's `model_tools` preference is off, which is the default, the example
+sends only the supplied message and saved chat history, not workspace files;
+earlier tool results are replaced by a withheld notice. If `model_tools` is
+enabled for `.`, the model can call the read and list tools, and the file
+contents it reads are sent to the local model.
 The loopback connection does not establish how LM Studio handles data upstream;
 check the server's configuration before sending sensitive text.
 

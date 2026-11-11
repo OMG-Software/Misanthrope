@@ -15,6 +15,7 @@ use omgcode_core::provider::{LocalModelClient, LocalModelConfig};
 use omgcode_core::session::{
     MessageRole, NativePath, RequestManifest, SessionError, SessionJournal,
 };
+use omgcode_core::turn::replay_history;
 use serde::Serialize;
 use serde_json::json;
 use std::env;
@@ -210,7 +211,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
             "checkpoint_restore": cfg!(any(target_os = "linux", target_os = "windows")),
             "checkpoint_deletion": cfg!(any(target_os = "linux", target_os = "windows")),
             "edit_previews": cfg!(any(target_os = "linux", target_os = "windows")),
-            "model_read_list_tools": cfg!(any(target_os = "linux", target_os = "windows")),
+            "model_read_list_tools": model_tools::MODEL_TOOLS_SUPPORTED,
             "workspace_file_tools": false,
             "process_execution": false,
             "mcp": false,
@@ -360,20 +361,12 @@ fn chat_turn(
         }
         model_tools::ToolMode::Disabled { reason } => reason,
     };
-    let mut history: Vec<ConversationMessage> = journal
-        .snapshot()
-        .messages
-        .iter()
-        .map(|message| ConversationMessage {
-            role: match message.role {
-                MessageRole::User => ConversationRole::User,
-                MessageRole::Assistant => ConversationRole::Assistant,
-                // Stored tool text is already source-labelled untrusted content.
-                MessageRole::Tool => ConversationRole::User,
-            },
-            content: redact_known_secret(&message.text, token),
-        })
-        .collect();
+    // Text-only chat has no model file-read authority, so saved tool results
+    // are withheld rather than sent again.
+    let (mut history, withheld_tool_results) = replay_history(&journal.snapshot().messages, false);
+    for message in &mut history {
+        message.content = redact_known_secret(&message.content, token);
+    }
     history.push(ConversationMessage {
         role: ConversationRole::User,
         content: args.message.clone(),
@@ -434,7 +427,11 @@ fn chat_turn(
         locator: journal_locator(journal)?,
         detail: json!({
             "reply": reply,
-            "model_tools": {"mode": "disabled", "reason": reason},
+            "model_tools": {
+                "mode": "disabled",
+                "reason": reason,
+                "withheld_tool_results": withheld_tool_results,
+            },
         }),
     })
 }

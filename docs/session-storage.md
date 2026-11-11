@@ -114,7 +114,11 @@ fit, it fails the turn before recording an intent or opening the target. Every
 rendered tool message, including an error, must fit the selected per-message
 limit and the 16 KiB session message limit before it is recorded. Interim
 assistant text returned with tool calls is recorded and retained in the
-follow-up history. Call identifiers are scoped to one turn: a failed turn may
+follow-up history. Saved tool messages from earlier turns are sent again only
+while the live `model_tools` and `read` preferences both allow it, checked when
+the turn starts; otherwise each is replaced by a fixed withheld notice, and the
+journal keeps the original. Text-only chat always withholds them. Call
+identifiers are scoped to one turn: a failed turn may
 leave a pending intent, and a later turn may reuse that identifier.
 Cancellation and the deadline are checked between bounded operations; they do
 not preempt a broker call already in progress.

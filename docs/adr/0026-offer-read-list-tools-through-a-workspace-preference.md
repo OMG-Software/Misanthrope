@@ -36,6 +36,8 @@ session's recorded workspace UUID can only select an existing registration. The
 workspace ID and preference come from current settings. Tools are offered only
 when all of these hold:
 
+- the build runs on Linux or Windows, matching the `model_read_list_tools`
+  capability;
 - a control store exists;
 - the recorded UUID matches a registered workspace;
 - that workspace's `model_tools` preference is enabled;
@@ -65,7 +67,18 @@ Calls stay confined to the session workspace in two layers:
 
 Tool results stay source-labelled user content. The compiled base prompt
 remains the only system message. Chat removes a configured local server token
-from text sent to and received from the model, as text chat already does.
+from text sent to and received from the model, as text chat already does. A
+tool call whose identifier or arguments contain the token is refused before the
+runtime records it; redacting the arguments could change the requested path.
+
+Earlier tool results are workspace data disclosed under an earlier decision. A
+turn sends them again only while the live `model_tools` and `read` preferences
+both allow it, checked when the turn starts. Otherwise each is replaced by a
+fixed withheld notice, and the journal keeps the original. Text-only chat
+always withholds them.
+
+A final reply cut short by the token limit is accepted, as in text chat. Its
+`finish_reason` of `length` is reported in the output, not hidden.
 
 ## Alternatives considered
 
@@ -85,6 +98,13 @@ from text sent to and received from the model, as text chat already does.
   settings fail closed, as they do for session creation.
 - Send tool results back with the provider `tool` role: rejected. ADR-0016 keeps
   tool content user-level and source-labelled.
+- Replay saved tool results whatever the current preferences: rejected after
+  review. It would keep disclosing file contents after the operator revoked
+  access.
+- Refuse to continue a session after revocation: rejected. Withholding the
+  results keeps the conversation usable without sending them.
+- Reject a reply cut short by the token limit in tool mode: rejected. Text chat
+  accepts it and reports the reason; tool mode now does the same.
 
 ## Consequences
 
@@ -109,7 +129,11 @@ Limits and gaps:
   snapshots, not locks.
 - Secret redaction covers only the configured local server token. Chat
   removes it from tool results before they are recorded or sent, and from model
-  text. Other secrets in a workspace file reach the journal and the model.
+  text, and refuses tool calls that contain it. Other secrets in a workspace
+  file reach the journal and the model.
+- Withholding earlier tool results cannot recall what the model already
+  received. A permission change during a turn affects the next call, not
+  history already sent in that turn.
 
 ## References
 
