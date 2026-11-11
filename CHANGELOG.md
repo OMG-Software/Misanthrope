@@ -19,7 +19,13 @@ Changes are recorded here before a release version is assigned.
   status` reports `model_tools`, and `capabilities` reports
   `model_read_list_tools` and a new `tool_policy` value. Live LM Studio
   tool-call compatibility is not qualified. One opt-in Windows spot-check with
-  LM Studio 0.4.28 and `google/gemma-4-e4b` passed; see ADR-0026.
+  LM Studio 0.4.28 and `google/gemma-4-e4b` passed; see ADR-0026. Saved tool
+  results are sent again only while the live `model_tools` and `read`
+  preferences allow it; otherwise, and in every text-only turn, each is replaced
+  by a withheld notice and counted in `withheld_tool_results`. A tool call that
+  contains the server token is refused before it is recorded. Tool-enabled
+  output reports the final `finish_reason`, and platforms other than Linux and
+  Windows stay text only with `platform_unsupported`.
 - Version 0.11.0 adds trusted `file restore` and
   `file delete-checkpoint --permanent` on Linux ext4 and Windows NTFS. Restore
   writes a retained checkpoint's original bytes back through the normal apply

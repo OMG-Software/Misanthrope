@@ -17,8 +17,16 @@ use omgcode_core::turn::{
     TurnRuntime,
 };
 use serde::Serialize;
+use serde_json::Value;
 
 use crate::{CliError, provider_error, redact_known_secret};
+
+/// Whether this build can serve the model read/list tools.
+///
+/// The capability report and tool selection share this value, so chat never
+/// offers tools the platform cannot run.
+pub(crate) const MODEL_TOOLS_SUPPORTED: bool =
+    cfg!(any(target_os = "linux", target_os = "windows"));
 
 /// Whether this chat turn offers the model the workspace read/list tools.
 #[derive(Debug)]
@@ -31,10 +39,15 @@ pub(crate) enum ToolMode {
 
 /// Decide the tool mode from current settings without holding the settings lock.
 ///
-/// An absent store, an unregistered workspace, or a disabled preference gives
-/// text-only chat. Invalid settings fail closed. A version 1 journal cannot
-/// record tool events, so it stays text-only.
+/// An unsupported platform, an absent store, an unregistered workspace, or a
+/// disabled preference gives text-only chat. Invalid settings fail closed. A
+/// version 1 journal cannot record tool events, so it stays text-only.
 pub(crate) fn select(data_root: &Path, journal: &SessionJournal) -> Result<ToolMode, CliError> {
+    if !MODEL_TOOLS_SUPPORTED {
+        return Ok(ToolMode::Disabled {
+            reason: "platform_unsupported",
+        });
+    }
     let Some(control) = ControlStore::open_existing(data_root)
         .map_err(|error| CliError::new("control", error.to_string()))?
     else {
@@ -79,6 +92,8 @@ pub(crate) struct ToolTurnOutput {
 #[derive(Serialize)]
 pub(crate) struct ToolTurnReply {
     pub(crate) content: String,
+    /// `stop`, or `length` when the token limit cut the reply short.
+    pub(crate) finish_reason: String,
 }
 
 /// Bounded counters for a tool-enabled turn.
@@ -89,6 +104,7 @@ pub(crate) struct ToolTurnSummary {
     rounds: usize,
     tool_calls: usize,
     tool_bytes: u64,
+    withheld_tool_results: usize,
 }
 
 /// The user's request for one tool-enabled turn.
@@ -110,6 +126,7 @@ pub(crate) fn run(
     let mut model = RedactingModel {
         inner: LocalToolModel::new(client),
         token,
+        secret_in_tool_call: false,
     };
     // Tool results are recorded before the next model request, so they need
     // their own redaction; the model wrapper sees them only afterwards.
@@ -123,10 +140,19 @@ pub(crate) fn run(
                 turn.manifest,
             )
         })
-        .map_err(|error| turn_error(error, model.inner.last_error()))?;
+        .map_err(|error| {
+            if model.secret_in_tool_call {
+                return CliError::new(
+                    "provider",
+                    "The model returned a tool call containing the configured server token; it was not recorded or run",
+                );
+            }
+            turn_error(error, model.inner.last_error())
+        })?;
     Ok(ToolTurnOutput {
         reply: ToolTurnReply {
             content: report.reply,
+            finish_reason: report.finish_reason,
         },
         model_tools: ToolTurnSummary {
             mode: "enabled",
@@ -134,6 +160,7 @@ pub(crate) fn run(
             rounds: report.rounds,
             tool_calls: report.tool_calls,
             tool_bytes: report.tool_bytes,
+            withheld_tool_results: report.withheld_tool_results,
         },
     })
 }
@@ -153,9 +180,14 @@ fn chat_limits() -> TurnLimits {
 }
 
 /// Remove a known local server token from text sent to and received from the model.
+///
+/// A tool call that contains the token is refused rather than redacted, because
+/// editing its arguments could change the requested path. The runtime records
+/// calls before any result filter runs, so the refusal happens here.
 struct RedactingModel<'a> {
     inner: LocalToolModel<'a>,
     token: Option<&'a str>,
+    secret_in_tool_call: bool,
 }
 
 impl ToolModel for RedactingModel<'_> {
@@ -172,8 +204,40 @@ impl ToolModel for RedactingModel<'_> {
             messages: &messages,
             tools: request.tools,
         })?;
+        if let Some(token) = self.token.filter(|token| !token.is_empty())
+            && reply
+                .tool_calls
+                .iter()
+                .any(|call| contains_secret(call, token, true))
+        {
+            self.secret_in_tool_call = true;
+            return Err(ModelError::InvalidResponse);
+        }
         reply.content = redact_known_secret(&reply.content, self.token);
         Ok(reply)
+    }
+}
+
+/// Report whether any key or string in a raw tool-call value contains `token`.
+///
+/// Tool-call arguments arrive as a JSON-encoded string, so a string that parses
+/// as JSON is searched once more after decoding. Decoding is not repeated
+/// inside that nested value.
+fn contains_secret(value: &Value, token: &str, decode_nested: bool) -> bool {
+    match value {
+        Value::String(text) => {
+            text.contains(token)
+                || (decode_nested
+                    && serde_json::from_str::<Value>(text)
+                        .is_ok_and(|nested| contains_secret(&nested, token, false)))
+        }
+        Value::Array(items) => items
+            .iter()
+            .any(|item| contains_secret(item, token, decode_nested)),
+        Value::Object(fields) => fields
+            .iter()
+            .any(|(key, item)| key.contains(token) || contains_secret(item, token, decode_nested)),
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
     }
 }
 

@@ -148,14 +148,15 @@ version 0.11.0 refuses the settings log.
 
 Before each turn, `chat` reads current settings and offers the tools only when:
 
+- the build runs on Linux or Windows;
 - a control store exists;
 - the session's recorded workspace UUID matches a registered workspace;
 - that workspace's `model_tools` preference is enabled;
 - the session journal uses schema version 2.
 
 Otherwise chat stays text only and reports `model_tools.mode` as `disabled` with
-a `reason`: `settings_absent`, `workspace_unregistered`,
-`preference_disabled`, or `session_schema_v1`. Invalid settings fail with a
+a `reason`: `platform_unsupported`, `settings_absent`,
+`workspace_unregistered`, `preference_disabled`, or `session_schema_v1`. Invalid settings fail with a
 `control` error before any model request. The recorded UUID only selects a
 registration. The workspace ID and preference used come from current settings.
 
@@ -164,6 +165,13 @@ fresh binding. It denies the call with `model_tools_disabled` unless the
 preference is still enabled. The broker then requires the live `read`
 preference and denies the call with `permission_denied` otherwise. A denial
 ends the turn. A change made during model I/O applies to the next call.
+
+Earlier tool results stay in the journal. A turn sends them to the model again
+only while the live `model_tools` and `read` preferences both allow it, checked
+when the turn starts. Otherwise, including every text-only turn, each is
+replaced by a fixed withheld notice and the output reports
+`withheld_tool_results`. Revoking either preference therefore stops further
+disclosure of earlier reads; it cannot recall what the model already received.
 
 A model call never reads outside the session workspace, which is registered
 beneath the development root. Parsing rejects absolute, drive-qualified, root,

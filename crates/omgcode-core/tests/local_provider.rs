@@ -543,6 +543,20 @@ fn tool_exchange(body: &str) -> (Result<ToolModelReply, ProviderError>, Value) {
 }
 
 #[test]
+fn a_length_limited_tool_mode_text_reply_keeps_its_finish_reason() {
+    let (reply, _) = tool_exchange(
+        r#"{"choices":[{"message":{"role":"assistant","content":"partial"},"finish_reason":"length"}]}"#,
+    );
+    let reply = reply.expect("length-limited text reply");
+    assert!(reply.tool_calls.is_empty());
+    assert_eq!(reply.content, "partial");
+    assert_eq!(reply.finish_reason, "length");
+
+    let (reply, _) = tool_exchange(TOOL_CALL_REPLY);
+    assert_eq!(reply.expect("tool-call reply").finish_reason, "tool_calls");
+}
+
+#[test]
 fn tool_requests_advertise_exact_function_tools_and_return_raw_calls() {
     let (reply, request) = tool_exchange(TOOL_CALL_REPLY);
     let reply = reply.expect("tool-call reply");

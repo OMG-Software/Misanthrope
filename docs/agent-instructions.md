@@ -41,8 +41,9 @@ KiB, history to 128 messages, and the assembled UTF-8 text to 256 KiB. The
 adapter applies a caller-supplied context budget using a byte-based estimate and
 fixed overhead. This is not an exact tokenizer or model-capacity check. The
 prototype has no settings UI, application/workspace/session preference store,
-preview UI, token-count display, compaction, skills, memories, tools, or
-provider-specific subscription routes. The current `--instructions` value is
+preview UI, token-count display, compaction, skills, memories, tools other
+than chat's read/list workspace tools, or provider-specific subscription
+routes. The current `--instructions` value is
 per invocation, not a saved preference with scope or revision history.
 
 These statements describe implemented prototype behavior. The sections below

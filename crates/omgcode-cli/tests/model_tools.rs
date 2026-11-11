@@ -389,6 +389,131 @@ fn the_server_token_in_a_workspace_file_is_redacted_before_the_journal_and_model
     assert!(!events.contains(TOKEN));
 }
 
+/// Run chat with a configured LM Studio token against `server`.
+fn chat_with_token(fixture: &Fixture, journal: &Path, endpoint: &str, token: &str) -> Output {
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_omgcode"));
+    command
+        .env("OMGCODE_LM_TOKEN", token)
+        .env_remove(HANG_FIXTURE_ENV)
+        .arg("--data-dir")
+        .arg(&fixture.data)
+        .args(["chat", "--journal", path_arg(journal)])
+        .args(["--endpoint", endpoint, "--model", "fixture"])
+        .args(["--context-tokens", "131072", "--max-output-tokens", "64"])
+        .arg("read a file");
+    let result = run_with_deadline(command, CLI_DEADLINE).expect("run OMGCode CLI");
+    assert!(!result.timed_out, "CLI exceeded its deadline");
+    result.output
+}
+
+#[test]
+fn a_tool_call_carrying_the_server_token_is_refused_before_the_journal() {
+    const TOKEN: &str = "fixture-lm-credential-987654";
+    // A backslash is escaped inside the JSON-encoded arguments string, so only
+    // a search of the decoded arguments finds this token.
+    const ESCAPED_TOKEN: &str = r"fixture\lm-credential-246810";
+    let in_arguments = tool_call(
+        "call-1",
+        "workspace_read_file",
+        &json!({"path": format!("{TOKEN}.txt")}),
+    );
+    let in_id = tool_call(
+        &format!("call-{TOKEN}"),
+        "workspace_read_file",
+        &json!({"path": "note.txt"}),
+    );
+    let in_encoded_arguments = tool_call(
+        "call-1",
+        "workspace_read_file",
+        &json!({"path": format!("{ESCAPED_TOKEN}.txt")}),
+    );
+    for (token, reply) in [
+        (TOKEN, in_arguments),
+        (TOKEN, in_id),
+        (ESCAPED_TOKEN, in_encoded_arguments),
+    ] {
+        let fixture = Fixture::new(NOTE);
+        let journal = fixture.session();
+        fixture.set("--model-tools", true);
+        let server = SequenceServer::start(vec![reply]);
+        let output = chat_with_token(&fixture, &journal, &server.endpoint, token);
+        let requests = server.finish();
+
+        assert_error_code(&output, "provider");
+        assert_eq!(requests.len(), 1, "a refused call ends the turn");
+        assert!(!String::from_utf8_lossy(&output.stdout).contains(token));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains(token));
+        let events = fs::read_to_string(&journal).expect("journal");
+        assert!(!events.contains("lm-credential"));
+        assert!(!events.contains("\"tool.requested\""));
+        assert!(events.contains("turn.failed"));
+    }
+}
+
+#[test]
+fn text_chat_withholds_saved_tool_results_after_model_tools_are_disabled() {
+    let note = std::str::from_utf8(NOTE).expect("UTF-8 note");
+    let fixture = Fixture::new(NOTE);
+    let journal = fixture.session();
+    fixture.set("--model-tools", true);
+    let server = SequenceServer::start(vec![
+        tool_call(
+            "call-1",
+            "workspace_read_file",
+            &json!({"path": "note.txt"}),
+        ),
+        text("Read it."),
+    ]);
+    let output = fixture.chat(&journal, &server.endpoint, "read note.txt");
+    let requests = server.finish();
+    assert_success(&output);
+    assert!(requests[1].to_string().contains(note));
+
+    fixture.set("--model-tools", false);
+    let server = SequenceServer::start(vec![text("No file access now.")]);
+    let output = fixture.chat(&journal, &server.endpoint, "what did it say?");
+    let requests = server.finish();
+
+    assert_success(&output);
+    let result = json_output(&output);
+    assert_eq!(result["model_tools"]["mode"], "disabled");
+    assert_eq!(result["model_tools"]["withheld_tool_results"], 1);
+    assert!(!requests[0].to_string().contains(note));
+    assert!(
+        user_texts(&requests[0])
+            .iter()
+            .any(|text| text.starts_with("Tool result withheld"))
+    );
+    let events = fs::read_to_string(&journal).expect("journal");
+    assert!(
+        events.contains(note),
+        "the journal keeps the original result"
+    );
+}
+
+#[test]
+fn a_length_limited_tool_mode_reply_reports_its_finish_reason() {
+    let fixture = Fixture::new(NOTE);
+    let journal = fixture.session();
+    fixture.set("--model-tools", true);
+    let server = SequenceServer::start(vec![json!({
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "A partial"},
+            "finish_reason": "length"
+        }]
+    })]);
+    let output = fixture.chat(&journal, &server.endpoint, "say a lot");
+    server.finish();
+
+    assert_success(&output);
+    let result = json_output(&output);
+    assert_eq!(result["model_tools"]["mode"], "enabled");
+    assert_eq!(result["reply"]["content"], "A partial");
+    assert_eq!(result["reply"]["finish_reason"], "length");
+    assert_eq!(result["model_tools"]["withheld_tool_results"], 0);
+}
+
 #[test]
 fn model_tool_calls_never_read_outside_the_workspace_through_the_cli() {
     let attempts = [

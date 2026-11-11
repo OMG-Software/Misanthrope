@@ -210,6 +210,14 @@ tool-text filter, and the CLI filter call were each caught by a test. These
 results use a mock LM Studio server. They do not establish live tool-call
 compatibility, remote CI status, or release readiness.
 
+A review follow-up then withheld saved tool results without live read
+authority, refused token-bearing tool calls, reported the final finish reason,
+and gated tool mode by platform. The same checks passed: Windows NTFS ran 345
+tests and one doc test, and Linux ext4 under WSL ran 331 tests and one doc test,
+with none failed, ignored, or filtered. Forcing replay in the runtime or text
+chat, removing the token refusal or its nested-argument decoding, and dropping
+the finish reason in the runtime or provider were each caught by a test.
+
 An opt-in live spot-check then ran the debug CLI on Windows against LM Studio 0.4.28 and `google/gemma-4-e4b`
 at `http://127.0.0.1:1234/v1`, with no token and disposable data. Text-only chat
 with the preference off, a read, and a directory listing succeeded. Revoking
@@ -315,7 +323,8 @@ that preference live before each call. Model paths are refused before the
 broker when absolute, rooted, prefixed, or parent-relative; the broker still
 refuses links and names outside the workspace. The LM Studio adapter parses tool
 calls strictly, and the configured token is removed from tool results before
-they are recorded or sent. See
+they are recorded or sent. Earlier tool results are replayed only under live
+`model_tools` and `read` preferences, and token-bearing calls are refused. See
 [ADR-0026](docs/adr/0026-offer-read-list-tools-through-a-workspace-preference.md).
 Live LM Studio tool-call compatibility remains open.
 

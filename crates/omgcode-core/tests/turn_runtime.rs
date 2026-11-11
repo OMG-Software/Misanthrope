@@ -10,6 +10,7 @@ use omgcode_core::session::{MessageRole, RequestManifest, SessionJournal};
 use omgcode_core::turn::{
     CancelToken, ModelError, TOOL_SCHEMA_VERSION, ToolCallError, ToolModel, ToolModelReply,
     ToolModelRequest, TurnError, TurnLimit, TurnLimits, TurnReport, TurnRuntime,
+    WITHHELD_TOOL_RESULT,
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -235,6 +236,7 @@ fn text_reply(text: &str) -> Result<ToolModelReply, ModelError> {
     Ok(ToolModelReply {
         content: text.to_owned(),
         tool_calls: Vec::new(),
+        finish_reason: "stop".to_owned(),
     })
 }
 
@@ -242,6 +244,7 @@ fn tool_reply(calls: Vec<Value>) -> Result<ToolModelReply, ModelError> {
     Ok(ToolModelReply {
         content: String::new(),
         tool_calls: calls,
+        finish_reason: "tool_calls".to_owned(),
     })
 }
 
@@ -272,6 +275,7 @@ fn allowed_read_and_list_produce_durable_source_labelled_results() {
                 ),
                 call("list-1", "workspace_list_directory", json!({"path": ""})),
             ],
+            finish_reason: "tool_calls".to_owned(),
         }),
         text_reply("done"),
     ]);
@@ -1259,6 +1263,9 @@ type Plant = Box<dyn Fn(&Fixture)>;
 fn model_paths_never_read_outside_the_session_workspace() {
     const IN_ROOT: &str = "sentinel-in-root-beside-workspace";
     const BEYOND_ROOT: &str = "sentinel-beyond-development-root";
+    // Names that only an outside directory listing could reveal.
+    const ROOT_ENTRY: &str = "entry-name-only-in-development-root";
+    const BEYOND_ENTRY: &str = "entry-name-only-beyond-development-root";
 
     let probe = Fixture::new();
     let mut cases: Vec<(String, Plant)> = Vec::new();
@@ -1272,6 +1279,9 @@ fn model_paths_never_read_outside_the_session_workspace() {
     ] {
         cases.push((path.to_owned(), none()));
     }
+    // Directory forms that a listing could enumerate.
+    let root_text = probe.root.to_str().expect("UTF-8 fixture path").to_owned();
+    cases.push((root_text, none()));
     let beside_absolute = probe.root.join("beside.txt");
     let beyond_absolute = probe.root.parent().expect("root parent").join("beyond.txt");
     for absolute in [&beside_absolute, &beyond_absolute] {
@@ -1317,74 +1327,163 @@ fn model_paths_never_read_outside_the_session_workspace() {
                 .expect("file symlink");
             }),
         ));
+        for path in ["root-link/beside.txt", "root-link", "root-link/.."] {
+            cases.push((
+                path.to_owned(),
+                Box::new(|fixture: &Fixture| {
+                    std::os::unix::fs::symlink(&fixture.root, fixture.workspace.join("root-link"))
+                        .expect("directory symlink");
+                }),
+            ));
+        }
+    }
+    #[cfg(windows)]
+    for path in ["root-junction/beside.txt", "root-junction"] {
         cases.push((
-            "root-link/beside.txt".to_owned(),
+            path.to_owned(),
             Box::new(|fixture: &Fixture| {
-                std::os::unix::fs::symlink(&fixture.root, fixture.workspace.join("root-link"))
-                    .expect("directory symlink");
+                junction(&fixture.workspace.join("root-junction"), &fixture.root);
             }),
         ));
     }
-    #[cfg(windows)]
-    cases.push((
-        "root-junction/beside.txt".to_owned(),
-        Box::new(|fixture: &Fixture| {
-            junction(&fixture.workspace.join("root-junction"), &fixture.root);
-        }),
-    ));
 
-    for (path, plant) in cases {
-        let mut fixture = Fixture::new();
-        fs::write(fixture.root.join("beside.txt"), IN_ROOT).expect("in-root sentinel");
-        fs::write(
-            fixture
-                .root
-                .parent()
-                .expect("root parent")
-                .join("beyond.txt"),
-            BEYOND_ROOT,
-        )
-        .expect("beyond-root sentinel");
-        fs::create_dir(fixture.workspace.join("sub")).expect("workspace subdirectory");
-        plant(&fixture);
-        let mut model = ScriptedModel::new(vec![
-            tool_reply(vec![call(
-                "read",
-                "workspace_read_file",
-                json!({"path": path}),
-            )]),
-            tool_reply(vec![call(
-                "list",
-                "workspace_list_directory",
-                json!({"path": path}),
-            )]),
-            text_reply("done"),
-        ]);
+    // Each call runs in its own turn, so a validation failure of one tool
+    // cannot hide the outcome of the other.
+    for (path, plant) in &cases {
+        for (call_id, tool) in [
+            ("read", "workspace_read_file"),
+            ("list", "workspace_list_directory"),
+        ] {
+            let mut fixture = Fixture::new();
+            fs::write(fixture.root.join("beside.txt"), IN_ROOT).expect("in-root sentinel");
+            fs::write(fixture.root.join(ROOT_ENTRY), IN_ROOT).expect("in-root name sentinel");
+            let beyond_directory = fixture.root.parent().expect("root parent");
+            fs::write(beyond_directory.join("beyond.txt"), BEYOND_ROOT)
+                .expect("beyond-root sentinel");
+            fs::write(beyond_directory.join(BEYOND_ENTRY), BEYOND_ROOT)
+                .expect("beyond-root name sentinel");
+            fs::create_dir(fixture.workspace.join("sub")).expect("workspace subdirectory");
+            plant(&fixture);
+            let mut model = ScriptedModel::new(vec![
+                tool_reply(vec![call(call_id, tool, json!({"path": path}))]),
+                text_reply("done"),
+            ]);
 
-        let _outcome = fixture.run(&mut model, TurnLimits::default());
+            let _outcome = fixture.run(&mut model, TurnLimits::default());
 
-        for request in &model.requests {
-            for message in &request.messages {
+            for request in &model.requests {
+                for message in &request.messages {
+                    for sentinel in [IN_ROOT, BEYOND_ROOT, ROOT_ENTRY, BEYOND_ENTRY] {
+                        assert!(
+                            !message.content.contains(sentinel),
+                            "{path} ({call_id}): outside data {sentinel} reached the model"
+                        );
+                    }
+                }
+            }
+            let succeeded = fixture.session_events().iter().any(|event| {
+                event["type"] == "tool.completed"
+                    && event["payload"]["outcome"] == "succeeded"
+                    && event["payload"]["call_id"] == call_id
+            });
+            assert!(!succeeded, "{path} ({call_id}): an escaping call succeeded");
+            fixture.close_journal();
+            let journal = fs::read_to_string(&fixture.journal_path).expect("journal bytes");
+            for sentinel in [IN_ROOT, BEYOND_ROOT, ROOT_ENTRY, BEYOND_ENTRY] {
                 assert!(
-                    !message.content.contains(IN_ROOT) && !message.content.contains(BEYOND_ROOT),
-                    "{path}: an outside sentinel reached the model"
+                    !journal.contains(sentinel),
+                    "{path} ({call_id}): outside data {sentinel} reached the journal"
                 );
             }
         }
+    }
+}
+
+fn request_contains(request: &SeenRequest, text: &str) -> bool {
+    request
+        .messages
+        .iter()
+        .any(|message| message.content.contains(text))
+}
+
+/// A saved tool result reaches the model again only while the live `read` and
+/// `model_tools` preferences both allow it. The journal keeps the original.
+#[test]
+fn saved_tool_results_are_withheld_after_read_authority_is_revoked() {
+    const SAVED: &str = "sentinel-saved-tool-result";
+    let read_revoked = PermissionSet {
+        read: false,
+        model_tools: true,
+        ..PermissionSet::default()
+    };
+    let tools_revoked = PermissionSet::default();
+    for revoked in [read_revoked, tools_revoked] {
+        let mut fixture = Fixture::new();
+        fs::write(fixture.workspace.join("notes.txt"), SAVED).expect("workspace file");
+        let mut first = ScriptedModel::new(vec![
+            tool_reply(vec![call(
+                "read-1",
+                "workspace_read_file",
+                json!({"path": "notes.txt"}),
+            )]),
+            text_reply("read it"),
+        ]);
+        let report = fixture
+            .run(&mut first, TurnLimits::default())
+            .expect("tool turn");
+        assert_eq!(report.withheld_tool_results, 0);
+        assert!(request_contains(&first.requests[1], SAVED));
+
+        let mut allowed = ScriptedModel::new(vec![text_reply("still allowed")]);
+        let report = fixture
+            .run(&mut allowed, TurnLimits::default())
+            .expect("replay under live authority");
+        assert_eq!(report.withheld_tool_results, 0);
+        assert!(request_contains(&allowed.requests[0], SAVED));
+
+        let mut control = ControlStore::open_existing(&fixture.data)
+            .expect("open control store")
+            .expect("control store exists");
+        control
+            .set_permissions(fixture.workspace_id, revoked, control.revision())
+            .expect("revoke model reads");
+        drop(control);
+
+        let mut later = ScriptedModel::new(vec![text_reply("after revocation")]);
+        let report = fixture
+            .run(&mut later, TurnLimits::default())
+            .expect("text reply after revocation");
+        assert_eq!(report.withheld_tool_results, 1);
+        assert!(!request_contains(&later.requests[0], SAVED));
+        assert!(request_contains(&later.requests[0], WITHHELD_TOOL_RESULT));
+
         fixture.close_journal();
         let journal = fs::read_to_string(&fixture.journal_path).expect("journal bytes");
         assert!(
-            !journal.contains(IN_ROOT) && !journal.contains(BEYOND_ROOT),
-            "{path}: an outside sentinel reached the journal"
-        );
-        assert!(
-            !fixture
-                .session_events()
-                .iter()
-                .any(|event| event["type"] == "tool.completed"
-                    && event["payload"]["outcome"] == "succeeded"
-                    && event["payload"]["call_id"] == "read"),
-            "{path}: an escaping read succeeded"
+            journal.contains(SAVED),
+            "the journal keeps the original result"
         );
     }
+}
+
+/// A final reply cut short by the token limit is reported as such.
+#[test]
+fn a_length_limited_final_reply_reports_its_finish_reason() {
+    let mut fixture = Fixture::new();
+    let mut model = ScriptedModel::new(vec![Ok(ToolModelReply {
+        content: "partial answer".to_owned(),
+        tool_calls: Vec::new(),
+        finish_reason: "length".to_owned(),
+    })]);
+    let report = fixture
+        .run(&mut model, TurnLimits::default())
+        .expect("length-limited reply");
+    assert_eq!(report.reply, "partial answer");
+    assert_eq!(report.finish_reason, "length");
+
+    let mut model = ScriptedModel::new(vec![text_reply("complete answer")]);
+    let report = fixture
+        .run(&mut model, TurnLimits::default())
+        .expect("complete reply");
+    assert_eq!(report.finish_reason, "stop");
 }

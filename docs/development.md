@@ -249,7 +249,11 @@ trusted application-data directory, and the workspace ID. The runtime:
 - treats every tool result as source-labelled untrusted user-level content and
   never promotes it to the system role;
 - denies every call with `model_tools_disabled` unless the workspace's live
-  `model_tools` preference is still enabled.
+  `model_tools` preference is still enabled;
+- sends saved tool results from earlier turns again only while the live
+  `model_tools` and `read` preferences both allow it, and otherwise replaces
+  each with a fixed withheld notice;
+- reports the final reply's provider `finish_reason`.
 
 The runtime supports no writes, process execution, Git, MCP, or network access.
 `LocalToolModel` adapts the LM Studio client to its model interface. The adapter
@@ -280,25 +284,33 @@ upstream. Verify the server's own configuration before sending sensitive text.
 
 The CLI sends the compiled base prompt, optional --instructions user-level
 preferences, the saved user/assistant history, and the current message. When the
-session's workspace does not enable `model_tools`, it sends no workspace
-contents or tool definitions, rejects structured tool calls, and reports
-`model_tools.mode` as `disabled` with a reason. Text which resembles a command
+session's workspace does not enable `model_tools`, it sends no tool
+definitions and rejects structured tool calls. Saved tool results from earlier
+turns are not sent: each is replaced by a fixed withheld notice, and the journal
+keeps the original. The output reports `model_tools.mode` as `disabled` with a
+reason and a `withheld_tool_results` count. Text which resembles a command
 remains text.
 
 When the workspace enables `model_tools`, chat offers `workspace_read_file` and
 `workspace_list_directory`. The model may make up to four requests in one turn.
 Each call is rechecked against live settings and stays inside the workspace.
 Results return to the model as source-labelled user messages. The configured
-LM Studio token is removed from each result before it is recorded or sent. There
-is no per-call approval prompt. The output reports
-`model_tools.mode` as `enabled`, with the workspace ID, rounds, call count, and
-tool bytes. A refused or invalid call ends the turn with a `permission`,
+LM Studio token is removed from each result before it is recorded or sent. A
+tool call that contains the token is refused with a `provider` error before it
+is recorded, because editing its arguments could change the requested path.
+Saved tool results are sent again only while the live `model_tools` and `read`
+preferences both allow it. There is no per-call approval prompt. The output reports
+`model_tools.mode` as `enabled`, with the workspace ID, rounds, call count,
+tool bytes, and withheld count. `reply.finish_reason` is `length` when the token
+limit cut the final reply short; the turn is still recorded as complete. A refused or invalid call ends the turn with a `permission`,
 `tool_call`, or `tool_limit` error, recorded in the journal.
 
 ```text
 omgcode --data-dir C:\omgcode-data chat --journal <journal-path> --model google/gemma-4-e4b --context-tokens 131072 "Summarise README.md."
-``` Output is JSON so untrusted control
-characters are escaped rather than written as terminal instructions.
+```
+
+Output is JSON so untrusted control characters are escaped rather than written
+as terminal instructions.
 
 Each text-only invocation sends one non-streaming request; a tool-enabled turn
 sends at most four. There is a five-second connect timeout and a thirty-second
