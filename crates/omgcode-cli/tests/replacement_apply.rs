@@ -17,6 +17,7 @@ use uuid::Uuid;
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::MetadataExt;
 
+use support::spawn_gate::without_child_spawns;
 use support::{
     assert_control_error, assert_error_code, assert_success, json_output, path_arg, run_cli,
 };
@@ -44,26 +45,29 @@ impl Fixture {
         fs::create_dir_all(&workspace).expect("workspace directories");
         fs::write(workspace.join("note.txt"), ORIGINAL).expect("original workspace file");
 
-        let mut control = ControlStore::open(&data).expect("private control store");
-        control
-            .set_development_root(&development, control.revision())
-            .expect("development root");
-        let workspace_id = control
-            .register_workspace(&workspace, control.revision())
-            .expect("registered workspace")
-            .id();
-        control
-            .set_permissions(
-                workspace_id,
-                PermissionSet {
-                    read: true,
-                    write: true,
-                    execute: false,
-                    task_network: false,
-                },
-                control.revision(),
-            )
-            .expect("explicit file preferences");
+        let workspace_id = without_child_spawns(|| {
+            let mut control = ControlStore::open(&data).expect("private control store");
+            control
+                .set_development_root(&development, control.revision())
+                .expect("development root");
+            let workspace_id = control
+                .register_workspace(&workspace, control.revision())
+                .expect("registered workspace")
+                .id();
+            control
+                .set_permissions(
+                    workspace_id,
+                    PermissionSet {
+                        read: true,
+                        write: true,
+                        execute: false,
+                        task_network: false,
+                    },
+                    control.revision(),
+                )
+                .expect("explicit file preferences");
+            workspace_id
+        });
 
         Self {
             _temporary: temporary,
@@ -286,22 +290,23 @@ fn denied_write_preference_refuses_replacement() {
     let fixture = Fixture::new();
     let proposed_file = fixture._temporary.path().join("proposed.txt");
     fs::write(&proposed_file, PROPOSED).expect("complete proposed bytes");
-    let mut control = ControlStore::open_existing(&fixture.data)
-        .expect("existing settings")
-        .expect("control store exists");
-    control
-        .set_permissions(
-            fixture.workspace_id,
-            PermissionSet {
-                read: true,
-                write: false,
-                execute: false,
-                task_network: false,
-            },
-            control.revision(),
-        )
-        .expect("revoke write preference");
-    drop(control);
+    without_child_spawns(|| {
+        let mut control = ControlStore::open_existing(&fixture.data)
+            .expect("existing settings")
+            .expect("control store exists");
+        control
+            .set_permissions(
+                fixture.workspace_id,
+                PermissionSet {
+                    read: true,
+                    write: false,
+                    execute: false,
+                    task_network: false,
+                },
+                control.revision(),
+            )
+            .expect("revoke write preference");
+    });
 
     let output = fixture.apply(&proposed_file, &"0".repeat(64), ORIGINAL.len(), true);
     assert_error_code(&output, "checkpoint_denied");

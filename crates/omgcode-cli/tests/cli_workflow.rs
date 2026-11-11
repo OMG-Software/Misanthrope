@@ -1,10 +1,14 @@
+#[path = "support/spawn_gate.rs"]
+mod spawn_gate;
+
 use omgcode_core::prompt::{BASE_PROMPT, BASE_PROMPT_VERSION, base_prompt_sha256};
-use omgcode_core::session::{MessageRole, SessionJournal};
+use omgcode_core::session::{MessageRole, SessionJournal, SessionSnapshot};
 use serde_json::{Value, json};
-use std::io::{Read, Write};
+use spawn_gate::without_child_spawns;
+use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -184,8 +188,37 @@ fn cli() -> Command {
     command
 }
 
+/// Matches `Command::output` while starting the child through the spawn gate.
+fn gated_output(command: &mut Command) -> io::Result<Output> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    spawn_gate::spawn(command)?.wait_with_output()
+}
+
+/// Creates an idle fixture journal and returns its path after closing it.
+fn create_journal(data_dir: &Path, workspace: &Path, title: &str) -> PathBuf {
+    without_child_spawns(|| {
+        SessionJournal::create(data_dir, workspace, title)
+            .expect("create private session journal")
+            .path()
+            .to_path_buf()
+    })
+}
+
+/// Returns a journal's replayed state after closing it.
+fn read_snapshot(path: &Path) -> SessionSnapshot {
+    without_child_spawns(|| {
+        SessionJournal::open(path)
+            .expect("reopen session journal")
+            .snapshot()
+            .clone()
+    })
+}
+
 fn run_cli(args: &[&str]) -> Output {
-    cli().args(args).output().expect("run OMGCode CLI binary")
+    gated_output(cli().args(args)).expect("run OMGCode CLI binary")
 }
 
 fn assert_success(output: &Output) {
@@ -210,48 +243,44 @@ fn run_chat(
 ) -> Output {
     let data_dir = data_dir.to_str().expect("temporary path is Unicode");
     let workspace = workspace.to_str().expect("temporary path is Unicode");
-    cli()
-        .args([
-            "--data-dir",
-            data_dir,
-            "chat",
-            "--workspace",
-            workspace,
-            "--endpoint",
-            endpoint,
-            "--model",
-            "fixture",
-            "--context-tokens",
-            "131072",
-            "--max-output-tokens",
-            "32",
-            "--instructions",
-            instructions,
-            message,
-        ])
-        .output()
-        .expect("run OMGCode chat command")
+    gated_output(cli().args([
+        "--data-dir",
+        data_dir,
+        "chat",
+        "--workspace",
+        workspace,
+        "--endpoint",
+        endpoint,
+        "--model",
+        "fixture",
+        "--context-tokens",
+        "131072",
+        "--max-output-tokens",
+        "32",
+        "--instructions",
+        instructions,
+        message,
+    ]))
+    .expect("run OMGCode chat command")
 }
 
 fn run_resumed_chat(journal: &Path, endpoint: &str, message: &str) -> Output {
     let journal = journal.to_str().expect("temporary path is Unicode");
-    cli()
-        .args([
-            "chat",
-            "--journal",
-            journal,
-            "--endpoint",
-            endpoint,
-            "--model",
-            "fixture",
-            "--context-tokens",
-            "131072",
-            "--max-output-tokens",
-            "32",
-            message,
-        ])
-        .output()
-        .expect("run resumed OMGCode chat command")
+    gated_output(cli().args([
+        "chat",
+        "--journal",
+        journal,
+        "--endpoint",
+        endpoint,
+        "--model",
+        "fixture",
+        "--context-tokens",
+        "131072",
+        "--max-output-tokens",
+        "32",
+        message,
+    ]))
+    .expect("run resumed OMGCode chat command")
 }
 
 fn read_events(journal: &Path) -> Vec<Value> {
@@ -536,14 +565,15 @@ fn active_turn_refuses_chat_then_interrupt_is_idempotent_and_allows_archive() {
     let data_dir = temporary.path().join("application-data");
     let workspace = temporary.path().join("workspace");
     std::fs::create_dir(&workspace).expect("create private workspace");
-    let mut journal = SessionJournal::create(&data_dir, &workspace, "active fixture")
-        .expect("create private session journal");
-    let session_id = journal.snapshot().session_id;
-    let request_id = journal
-        .start_turn()
-        .expect("start interrupted fixture turn");
-    let journal_path = journal.path().to_path_buf();
-    drop(journal);
+    let (session_id, request_id, journal_path) = without_child_spawns(|| {
+        let mut journal = SessionJournal::create(&data_dir, &workspace, "active fixture")
+            .expect("create private session journal");
+        let session_id = journal.snapshot().session_id;
+        let request_id = journal
+            .start_turn()
+            .expect("start interrupted fixture turn");
+        (session_id, request_id, journal.path().to_path_buf())
+    });
     let before_chat = std::fs::read(&journal_path).expect("read active journal bytes");
 
     let journal_arg = journal_path.to_str().expect("journal path is Unicode");
@@ -556,10 +586,9 @@ fn active_turn_refuses_chat_then_interrupt_is_idempotent_and_allows_archive() {
         before_chat,
         "refused chat must not alter or fail the active turn"
     );
-    let reopened = SessionJournal::open(&journal_path).expect("reopen active journal");
-    assert_eq!(reopened.snapshot().active_turn, Some(request_id));
-    assert_eq!(reopened.snapshot().session_id, session_id);
-    drop(reopened);
+    let reopened = read_snapshot(&journal_path);
+    assert_eq!(reopened.active_turn, Some(request_id));
+    assert_eq!(reopened.session_id, session_id);
 
     let interrupt = run_cli(&["session", "interrupt", journal_arg]);
     assert_success(&interrupt);
@@ -596,10 +625,7 @@ fn oversized_provider_reply_fails_turn_without_recording_assistant_message() {
     let data_dir = temporary.path().join("application-data");
     let workspace = temporary.path().join("workspace");
     std::fs::create_dir(&workspace).expect("create private workspace");
-    let journal = SessionJournal::create(&data_dir, &workspace, "oversized reply fixture")
-        .expect("create private session journal");
-    let journal_path = journal.path().to_path_buf();
-    drop(journal);
+    let journal_path = create_journal(&data_dir, &workspace, "oversized reply fixture");
 
     let oversized_content = "x".repeat(16 * 1024 + 1);
     let server = MockServer::start(completion_response(&oversized_content));
@@ -615,15 +641,11 @@ fn oversized_provider_reply_fails_turn_without_recording_assistant_message() {
     let error: Value = serde_json::from_slice(&output.stderr).expect("CLI error is JSON");
     assert_eq!(error["error"]["code"], "provider");
 
-    let reopened = SessionJournal::open(&journal_path).expect("reopen failed-turn journal");
-    assert_eq!(reopened.snapshot().active_turn, None);
-    assert_eq!(reopened.snapshot().messages.len(), 1);
-    assert_eq!(reopened.snapshot().messages[0].role, MessageRole::User);
-    assert_eq!(
-        reopened.snapshot().messages[0].text,
-        "request with oversized response"
-    );
-    drop(reopened);
+    let reopened = read_snapshot(&journal_path);
+    assert_eq!(reopened.active_turn, None);
+    assert_eq!(reopened.messages.len(), 1);
+    assert_eq!(reopened.messages[0].role, MessageRole::User);
+    assert_eq!(reopened.messages[0].text, "request with oversized response");
     let events = read_events(&journal_path);
     let failure = events.last().expect("oversized reply records failed turn");
     assert_eq!(failure["type"], "turn.failed");
@@ -673,12 +695,9 @@ fn failed_new_chat_returns_a_locator_for_the_failed_session() {
     let error: Value = serde_json::from_slice(&output.stderr).expect("error JSON");
     let locator = &error["error"]["session"];
     let path = Path::new(locator["journal"].as_str().expect("failed session locator"));
-    let reopened = SessionJournal::open(path).expect("failure locator reopens");
-    assert_eq!(reopened.snapshot().active_turn, None);
-    assert_eq!(
-        locator["session_id"],
-        reopened.snapshot().session_id.to_string()
-    );
+    let reopened = read_snapshot(path);
+    assert_eq!(reopened.active_turn, None);
+    assert_eq!(locator["session_id"], reopened.session_id.to_string());
     assert!(locator["journal_native"].is_object());
 }
 
@@ -688,36 +707,29 @@ fn oversized_encoded_manifest_is_rejected_before_starting_a_turn() {
     let workspace = temporary.path().join("workspace");
     std::fs::create_dir(&workspace).expect("workspace");
     let data = temporary.path().join("data");
-    let journal = SessionJournal::create(&data, &workspace, "preflight").expect("journal");
-    let path = journal.path().to_path_buf();
-    drop(journal);
+    let path = create_journal(&data, &workspace, "preflight");
     let before = std::fs::read(&path).expect("initial bytes");
-    let output = cli()
-        .args(["chat", "--journal"])
-        .arg(&path)
-        .args([
-            "--model",
-            "fixture",
-            "--context-tokens",
-            "131072",
-            "--instructions",
-        ])
-        .arg("\u{0001}".repeat(12_000))
-        .arg("request")
-        .output()
-        .expect("CLI");
+    let output = gated_output(
+        cli()
+            .args(["chat", "--journal"])
+            .arg(&path)
+            .args([
+                "--model",
+                "fixture",
+                "--context-tokens",
+                "131072",
+                "--instructions",
+            ])
+            .arg("\u{0001}".repeat(12_000))
+            .arg("request"),
+    )
+    .expect("CLI");
     assert!(!output.status.success());
     assert_eq!(
         std::fs::read(&path).expect("rejected journal bytes"),
         before
     );
-    assert_eq!(
-        SessionJournal::open(&path)
-            .expect("reopen")
-            .snapshot()
-            .active_turn,
-        None
-    );
+    assert_eq!(read_snapshot(&path).active_turn, None);
 }
 
 #[test]
@@ -725,18 +737,14 @@ fn oversized_encoded_reply_fails_the_turn_without_leaving_it_active() {
     let temporary = TempDir::new().expect("private test directory");
     let workspace = temporary.path().join("workspace");
     std::fs::create_dir(&workspace).expect("workspace");
-    let journal = SessionJournal::create(&temporary.path().join("data"), &workspace, "reply")
-        .expect("journal");
-    let path = journal.path().to_path_buf();
-    drop(journal);
+    let path = create_journal(&temporary.path().join("data"), &workspace, "reply");
     let server = MockServer::start(completion_response(&"\u{0001}".repeat(12_000)));
     let output = run_resumed_chat(&path, &server.endpoint, "request");
     server.finish();
     assert!(!output.status.success());
-    let reopened = SessionJournal::open(&path).expect("reopen");
-    assert_eq!(reopened.snapshot().active_turn, None);
-    assert_eq!(reopened.snapshot().messages.len(), 1);
-    drop(reopened);
+    let reopened = read_snapshot(&path);
+    assert_eq!(reopened.active_turn, None);
+    assert_eq!(reopened.messages.len(), 1);
     assert_eq!(
         read_events(&path).last().expect("failure")["payload"]["code"],
         "response_too_large"
@@ -750,23 +758,24 @@ fn configured_credential_is_redacted_from_reply_journal_and_resumed_context() {
     std::fs::create_dir(&workspace).expect("workspace");
     let token = "fixture-lm-credential-123456";
     let server = MockServer::start(completion_response(&format!("Echoed {token}.")));
-    let output = cli()
-        .env("OMGCODE_LM_TOKEN", token)
-        .arg("--data-dir")
-        .arg(temporary.path().join("data"))
-        .args(["chat", "--workspace"])
-        .arg(&workspace)
-        .args([
-            "--endpoint",
-            &server.endpoint,
-            "--model",
-            "fixture",
-            "--context-tokens",
-            "131072",
-            "request",
-        ])
-        .output()
-        .expect("CLI");
+    let output = gated_output(
+        cli()
+            .env("OMGCODE_LM_TOKEN", token)
+            .arg("--data-dir")
+            .arg(temporary.path().join("data"))
+            .args(["chat", "--workspace"])
+            .arg(&workspace)
+            .args([
+                "--endpoint",
+                &server.endpoint,
+                "--model",
+                "fixture",
+                "--context-tokens",
+                "131072",
+                "request",
+            ]),
+    )
+    .expect("CLI");
     server.finish();
     assert_success(&output);
     assert!(!String::from_utf8_lossy(&output.stdout).contains(token));
@@ -794,13 +803,14 @@ fn native_locator_reopens_a_non_utf8_journal_path() {
     let data = temporary
         .path()
         .join(std::ffi::OsString::from_vec(b"data-\xff".to_vec()));
-    let created = cli()
-        .arg("--data-dir")
-        .arg(&data)
-        .args(["session", "new", "--workspace"])
-        .arg(&workspace)
-        .output()
-        .expect("CLI");
+    let created = gated_output(
+        cli()
+            .arg("--data-dir")
+            .arg(&data)
+            .args(["session", "new", "--workspace"])
+            .arg(&workspace),
+    )
+    .expect("CLI");
     assert_success(&created);
     let result = output_json(&created);
     assert!(result["journal_native"].is_object());
@@ -828,27 +838,28 @@ fn configured_credential_is_removed_from_new_inputs_before_request_and_retention
     std::fs::create_dir(&workspace).expect("workspace");
     let token = "fixture-ingress-credential-987654";
     let server = MockServer::start(completion_response("safe reply"));
-    let output = cli()
-        .env("OMGCODE_LM_TOKEN", token)
-        .arg("--data-dir")
-        .arg(temporary.path().join("data"))
-        .args(["chat", "--workspace"])
-        .arg(&workspace)
-        .args([
-            "--endpoint",
-            &server.endpoint,
-            "--model",
-            "fixture",
-            "--context-tokens",
-            "131072",
-            "--title",
-        ])
-        .arg(format!("title {token}"))
-        .arg("--instructions")
-        .arg(format!("preference {token}"))
-        .arg(format!("request {token}"))
-        .output()
-        .expect("CLI");
+    let output = gated_output(
+        cli()
+            .env("OMGCODE_LM_TOKEN", token)
+            .arg("--data-dir")
+            .arg(temporary.path().join("data"))
+            .args(["chat", "--workspace"])
+            .arg(&workspace)
+            .args([
+                "--endpoint",
+                &server.endpoint,
+                "--model",
+                "fixture",
+                "--context-tokens",
+                "131072",
+                "--title",
+            ])
+            .arg(format!("title {token}"))
+            .arg("--instructions")
+            .arg(format!("preference {token}"))
+            .arg(format!("request {token}")),
+    )
+    .expect("CLI");
     let request = server.finish();
     assert_success(&output);
     assert!(!request["messages"].to_string().contains(token));
@@ -865,16 +876,17 @@ fn configured_credential_is_removed_from_new_inputs_before_request_and_retention
 fn session_new_redacts_the_configured_credential_in_its_title() {
     let temporary = TempDir::new().expect("private test directory");
     let token = "fixture-session-title-credential-246810";
-    let output = cli()
-        .env("OMGCODE_LM_TOKEN", token)
-        .arg("--data-dir")
-        .arg(temporary.path().join("data"))
-        .args(["session", "new", "--workspace"])
-        .arg(temporary.path())
-        .arg("--title")
-        .arg(format!("title {token}"))
-        .output()
-        .expect("CLI");
+    let output = gated_output(
+        cli()
+            .env("OMGCODE_LM_TOKEN", token)
+            .arg("--data-dir")
+            .arg(temporary.path().join("data"))
+            .args(["session", "new", "--workspace"])
+            .arg(temporary.path())
+            .arg("--title")
+            .arg(format!("title {token}")),
+    )
+    .expect("CLI");
     assert_success(&output);
     assert!(!String::from_utf8_lossy(&output.stdout).contains(token));
     let result = output_json(&output);
@@ -890,39 +902,41 @@ fn session_new_redacts_the_configured_credential_in_its_title() {
 fn configured_credential_in_older_history_is_redacted_before_resuming() {
     let temporary = TempDir::new().expect("private test directory");
     let token = "fixture-historical-credential-135790";
-    let mut journal = SessionJournal::create(
-        &temporary.path().join("data"),
-        temporary.path(),
-        "old history",
-    )
-    .expect("journal");
-    journal
-        .record_message(MessageRole::User, &format!("Earlier user text {token}"))
-        .expect("older user message");
-    journal
-        .record_message(
-            MessageRole::Assistant,
-            &format!("Earlier assistant text {token}"),
+    let path = without_child_spawns(|| {
+        let mut journal = SessionJournal::create(
+            &temporary.path().join("data"),
+            temporary.path(),
+            "old history",
         )
-        .expect("older assistant message");
-    let path = journal.path().to_path_buf();
-    drop(journal);
+        .expect("journal");
+        journal
+            .record_message(MessageRole::User, &format!("Earlier user text {token}"))
+            .expect("older user message");
+        journal
+            .record_message(
+                MessageRole::Assistant,
+                &format!("Earlier assistant text {token}"),
+            )
+            .expect("older assistant message");
+        journal.path().to_path_buf()
+    });
     let server = MockServer::start(completion_response("safe new answer"));
-    let output = cli()
-        .env("OMGCODE_LM_TOKEN", token)
-        .args(["chat", "--journal"])
-        .arg(&path)
-        .args([
-            "--endpoint",
-            &server.endpoint,
-            "--model",
-            "fixture",
-            "--context-tokens",
-            "131072",
-            "continue",
-        ])
-        .output()
-        .expect("CLI");
+    let output = gated_output(
+        cli()
+            .env("OMGCODE_LM_TOKEN", token)
+            .args(["chat", "--journal"])
+            .arg(&path)
+            .args([
+                "--endpoint",
+                &server.endpoint,
+                "--model",
+                "fixture",
+                "--context-tokens",
+                "131072",
+                "continue",
+            ]),
+    )
+    .expect("CLI");
     let request = server.finish();
     assert_success(&output);
     assert_eq!(
@@ -953,13 +967,14 @@ fn native_locator_reopens_a_journal_path_with_an_unpaired_surrogate() {
     let data = temporary.path().join(std::ffi::OsString::from_wide(&[
         100, 97, 116, 97, 45, 0xdc00,
     ]));
-    let created = cli()
-        .arg("--data-dir")
-        .arg(&data)
-        .args(["session", "new", "--workspace"])
-        .arg(&workspace)
-        .output()
-        .expect("CLI");
+    let created = gated_output(
+        cli()
+            .arg("--data-dir")
+            .arg(&data)
+            .args(["session", "new", "--workspace"])
+            .arg(&workspace),
+    )
+    .expect("CLI");
     assert_success(&created);
     let result = output_json(&created);
     assert!(result["journal_native"].is_object());

@@ -15,6 +15,11 @@ Changes are recorded here before a release version is assigned.
 
 ### Fixed
 
+- Stop parallel CLI integration tests from failing with `Busy` on Linux. A child
+  spawned while a test held a store open could inherit that store's `flock` until
+  `exec`, so the lock outlived the test's close. A test-only gate now keeps child
+  spawns and in-process store sections apart. Production locking is unchanged.
+
 - Use a typed checkpoint inspection state while preserving its JSON values.
   Clarify that checkpoint admission cannot detect complete erasure of both
   checkpoint paths. Document persistence helper contracts and the acceptance

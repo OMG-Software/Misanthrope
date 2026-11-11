@@ -4,6 +4,9 @@ mod support;
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::thread;
+use std::time::Duration;
 
 use omgcode_core::control::ControlStore;
 #[cfg(target_os = "linux")]
@@ -15,6 +18,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use uuid::Uuid;
 
+use support::spawn_gate::without_child_spawns;
 use support::{
     assert_control_error, assert_error_code, assert_success, json_output, path_arg, run_cli,
 };
@@ -42,26 +46,29 @@ impl Fixture {
         fs::create_dir_all(&workspace).expect("workspace directories");
         fs::write(workspace.join("note.txt"), ORIGINAL).expect("original workspace file");
 
-        let mut control = ControlStore::open(&data).expect("private control store");
-        control
-            .set_development_root(&development, control.revision())
-            .expect("development root");
-        let workspace_id = control
-            .register_workspace(&workspace, control.revision())
-            .expect("registered workspace")
-            .id();
-        control
-            .set_permissions(
-                workspace_id,
-                PermissionSet {
-                    read: true,
-                    write: true,
-                    execute: false,
-                    task_network: false,
-                },
-                control.revision(),
-            )
-            .expect("explicit file preferences");
+        let workspace_id = without_child_spawns(|| {
+            let mut control = ControlStore::open(&data).expect("private control store");
+            control
+                .set_development_root(&development, control.revision())
+                .expect("development root");
+            let workspace_id = control
+                .register_workspace(&workspace, control.revision())
+                .expect("registered workspace")
+                .id();
+            control
+                .set_permissions(
+                    workspace_id,
+                    PermissionSet {
+                        read: true,
+                        write: true,
+                        execute: false,
+                        task_network: false,
+                    },
+                    control.revision(),
+                )
+                .expect("explicit file preferences");
+            workspace_id
+        });
 
         Self {
             _temporary: temporary,
@@ -91,29 +98,31 @@ impl Fixture {
     /// Prepares real Linux checkpoint evidence through a live binding and returns
     /// its operation ID; the CLI itself has no preparation command.
     fn prepare(&self) -> Uuid {
-        let mut control = ControlStore::open_existing(&self.data)
-            .expect("existing settings")
-            .expect("control store exists");
-        let binding = control
-            .bind_session(self.session_id, self.workspace_id)
-            .expect("live binding");
-        let target = FileTarget {
-            session_id: self.session_id,
-            workspace_id: self.workspace_id,
-            path: PathBuf::from("note.txt"),
-        };
-        let mut broker = FileBroker::new(&mut control);
-        let current = broker
-            .read(&binding, &target, 1024)
-            .expect("current exact bytes");
-        let expected = RecordedArtifact {
-            bytes: u64::try_from(current.bytes.len()).expect("bounded current size"),
-            sha256: current.sha256,
-        };
-        broker
-            .checkpoint_prepare(&binding, &target, &expected, PROPOSED)
-            .expect("private checkpoint preparation")
-            .operation_id
+        without_child_spawns(|| {
+            let mut control = ControlStore::open_existing(&self.data)
+                .expect("existing settings")
+                .expect("control store exists");
+            let binding = control
+                .bind_session(self.session_id, self.workspace_id)
+                .expect("live binding");
+            let target = FileTarget {
+                session_id: self.session_id,
+                workspace_id: self.workspace_id,
+                path: PathBuf::from("note.txt"),
+            };
+            let mut broker = FileBroker::new(&mut control);
+            let current = broker
+                .read(&binding, &target, 1024)
+                .expect("current exact bytes");
+            let expected = RecordedArtifact {
+                bytes: u64::try_from(current.bytes.len()).expect("bounded current size"),
+                sha256: current.sha256,
+            };
+            broker
+                .checkpoint_prepare(&binding, &target, &expected, PROPOSED)
+                .expect("private checkpoint preparation")
+                .operation_id
+        })
     }
 }
 
@@ -125,6 +134,34 @@ fn child_names(directory: &Path) -> Vec<std::ffi::OsString> {
         .collect::<Vec<_>>();
     names.sort();
     names
+}
+
+#[test]
+/// A child must not start during an in-process store section, or it can inherit
+/// the store's lock and make a later open report `Busy`.
+fn child_spawn_waits_for_in_process_store_section() {
+    let temporary = tempfile::tempdir().expect("private fixture root");
+    let data = temporary.path().join("absent-application-data");
+    let (spawned, observed) = mpsc::channel();
+    thread::scope(|scope| {
+        let worker = without_child_spawns(|| {
+            let worker = scope.spawn(|| {
+                let output = run_cli(&data, &["file", "checkpoints"]);
+                spawned.send(()).expect("observer stays alive");
+                output
+            });
+            // The gate enforces this ordering. The timeout only bounds how long
+            // the test looks for a violation, so a slow host cannot fail it.
+            assert_eq!(
+                observed.recv_timeout(Duration::from_millis(500)),
+                Err(RecvTimeoutError::Timeout),
+                "child ran while the store section was active"
+            );
+            worker
+        });
+        assert_control_error(&worker.join().expect("gated child completes"));
+    });
+    observed.recv().expect("child completion is reported");
 }
 
 #[test]
@@ -296,22 +333,23 @@ fn pending_checkpoint_blocks_file_reads_until_trusted_acknowledgement_without_ap
 fn checkpoint_acknowledgement_does_not_restore_revoked_workspace_permissions() {
     let fixture = Fixture::new();
     let operation_id = fixture.prepare();
-    let mut control = ControlStore::open_existing(&fixture.data)
-        .expect("existing settings")
-        .expect("control store exists");
-    control
-        .set_permissions(
-            fixture.workspace_id,
-            PermissionSet {
-                read: false,
-                write: false,
-                execute: false,
-                task_network: false,
-            },
-            control.revision(),
-        )
-        .expect("permission changes remain available while a checkpoint is pending");
-    drop(control);
+    without_child_spawns(|| {
+        let mut control = ControlStore::open_existing(&fixture.data)
+            .expect("existing settings")
+            .expect("control store exists");
+        control
+            .set_permissions(
+                fixture.workspace_id,
+                PermissionSet {
+                    read: false,
+                    write: false,
+                    execute: false,
+                    task_network: false,
+                },
+                control.revision(),
+            )
+            .expect("permission changes remain available while a checkpoint is pending");
+    });
 
     let acknowledgement = run_cli(
         &fixture.data,

@@ -1,5 +1,7 @@
 //! Shared bounded subprocess and JSON helpers for real CLI workflow tests.
 
+pub(crate) mod spawn_gate;
+
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
@@ -38,7 +40,7 @@ pub(crate) fn run_with_deadline(
     command
         .stdout(Stdio::from(stdout_file))
         .stderr(Stdio::from(stderr_file));
-    let mut child = command.spawn()?;
+    let mut child = spawn_gate::spawn(&mut command)?;
     let mut timed_out = false;
 
     let status = loop {
