@@ -5,9 +5,9 @@
 OMGCode aims to connect language models to controlled development tools.
 The current code is an early Rust core and command-line prototype. A bounded
 native workspace file broker is available through trusted CLI commands. A core
-turn/tool runtime and schema-v2 session format exist for library callers and
-tests, but the CLI and every real provider adapter still dispatch no model
-tools. Model write and process tools, a desktop interface, Git workflows, and an
+turn/tool runtime and schema-v2 session format let chat offer the local LM Studio
+model read and list tools, only for a workspace that enables `model_tools`.
+Model write and process tools, a desktop interface, Git workflows, and an
 execution sandbox remain planned.
 
 > **Status: early prototype, not release-ready.** The Rust CLI can inspect the
