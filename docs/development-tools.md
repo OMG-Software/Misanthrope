@@ -17,7 +17,8 @@ a project needs, including:
 
 These are required tool categories and profile candidates, not a claim that
 every listed executable or version already works. The platform crate has an
-unexposed process-tree runner core with no confinement; see
+unexposed process-tree runner core. Its confined entry point applies Linux
+Landlock and seccomp rules and has no caller; see
 [command execution](execution.md). No command runs project tools yet. Tool
 support must be qualified on the actual platform.
 

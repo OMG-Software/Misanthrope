@@ -40,13 +40,13 @@ This is a resume guide, not a replacement for the owning contracts in
   Windows NTFS checkpoint storage and trusted apply.
 - **PR #19** merged at `270b889`: **Phase A4**, version **0.11.0**, with
   explicit restore and checkpoint deletion.
-- **PR #20**, `codex/model-read-tools`: **Phase B**, version **0.12.0**, with
+- **PR #20** merged on 2026-11-11: **Phase B**, version **0.12.0**, with
   read/list model tools in chat behind the `model_tools` workspace preference.
-  Open and unmerged when C1 started from its `14cf21f` head. Its review
-  follow-up `6e8a676` was later merged into this branch.
-- This branch, `codex/process-runner-core`: **Phase C1**, version **0.13.0**,
-  with the execution contract and an unexposed process-tree runner core. It is
-  stacked on PR #20. Retarget its PR to `main` after PR #20 merges.
+- **PR #21** merged at `6b1ebe4`: **Phase C1**, version **0.13.0**, with the
+  execution contract and an unexposed process-tree runner core.
+- This branch, `codex/linux-confinement`: **Phase C2**, version **0.14.0**,
+  with `run_confined`: Landlock and a seccomp socket filter on Linux, and a
+  per-run Unix-socket mode. It started from `main` at `6b1ebe4`.
 
 Implemented today:
 
@@ -87,6 +87,10 @@ Implemented today:
   and verified sync/outcome ordering. See [ADR-0022](docs/adr/0022-publish-one-verified-stage-on-linux-ext4.md).
 - Windows NTFS checkpoint storage and trusted `file apply`, with no power-loss
   claim. See [ADR-0024](docs/adr/0024-publish-one-verified-stage-on-windows-ntfs.md).
+- `process::run_confined` on Linux: a Landlock allowlist (ABI 3 or later),
+  seccomp refusal of IP sockets and `io_uring`, and `PairsOnly` (default) or
+  `HostServices` Unix-socket access. No caller; Windows refuses. See
+  [ADR-0028](docs/adr/0028-confine-linux-runs-with-landlock-and-a-socket-filter.md).
 - Trusted `file restore` through a new checkpoint and
   `file delete-checkpoint --permanent` for one resolved checkpoint, on the same
   filesystems as apply. Neither is power-loss qualified. See
@@ -98,9 +102,10 @@ Not implemented:
   compaction, and standalone CLI checkpoint preparation.
 - Model write, process, network, Git, or MCP tools; per-call tool approval;
   and live provider tool-call qualification.
-- Exposed process execution, execution containment, Git, MCP, runtime skills,
-  memories, desktop/UI panels, compaction, or caches. The process-tree runner
-  core has no caller and no confinement.
+- Exposed process execution, Windows execution confinement, tree-wide resource
+  limits, task networking, Git, MCP, runtime skills, memories, desktop/UI
+  panels, compaction, or caches. The process-tree runner core has no caller;
+  only its Linux confined path applies confinement.
 - Subscription/API-key provider profiles beyond the local LM Studio route.
 
 ## Resume steps
@@ -243,6 +248,28 @@ After PR #20's review follow-up was merged in, the same checks passed with 359
 Windows tests and 344 Linux tests, each with one doc test, and none failed,
 ignored, or filtered.
 
+C2 started from `main` at `6b1ebe4`. Its final verification ran with Rust
+1.99.1 and default test parallelism. It passed formatting, Clippy, all-target
+tests, and doc tests. Native Windows ran 361 tests and one doc test. Linux ext4
+under WSL (kernel 6.6, Landlock ABI 3, uid 1000) ran 364 tests and one doc
+test. No tests failed, were ignored, or were filtered. Eight temporary
+mutations were each caught: removing `landlock_restrict_self`, allowing
+`socket` in `PairsOnly`, allowing `io_uring_setup`, leaving truncation
+unhandled, following symbolic links in rule paths, allowing datagram pairs,
+allowing non-Unix families in `HostServices`, and accepting special files as
+rule paths. These results do not establish confinement on other kernels,
+remote CI status, or release readiness.
+
+PR #23's first CI run failed one Windows test, the C1 escape test, which had
+also failed on `main` at `6b1ebe4`. Windows reported the job empty before the
+killed grandchild's process object was signaled. It did not fail in 200 local
+runs or 40 local suite runs. The test now waits up to five seconds for that
+object; a surviving grandchild still fails it. Review fixes then qualified the
+allowlist claims: Landlock does not restrict metadata changes, and does not
+restrict device `ioctl` before ABI 5. Re-verification passed formatting,
+Clippy, all-target tests, and doc tests: Windows 362 tests and Linux 365, each
+with one doc test, none failed, ignored, or filtered.
+
 A mock or compile-only result does not establish native containment, live
 provider compatibility, or release filesystem support.
 
@@ -375,12 +402,16 @@ on Windows, and trusted CLI commands as the first caller. See
   It covers bounded output, deadline, cancellation, and observed cleanup. It
   denies Linux process-group escape with seccomp and Windows job breakaway.
   There is no confinement and no caller.
-- **C2:** Linux Landlock filesystem rules and seccomp network denial, including
-  a decision for Unix-domain sockets to host services.
+- **C2 (this branch, `codex/linux-confinement`):** Linux Landlock filesystem
+  rules and seccomp network denial. The user chose a per-run Unix-socket mode:
+  `PairsOnly` by default, and `HostServices` for developers who need the
+  Docker daemon or similar services. See
+  [ADR-0028](docs/adr/0028-confine-linux-runs-with-landlock-and-a-socket-filter.md).
 - **C3:** Windows AppContainer with recorded, reversible workspace access
   entries and no network capability.
 - **C4:** trusted CLI `run` behind the `execute` preference, with toolchain
-  profiles, journal records, and the development-tool acceptance cases.
+  profiles, journal records, an explicit recorded operator choice before
+  `HostServices`, and the development-tool acceptance cases.
 
 ### Phase D: additional providers, streaming, and account lifecycle
 

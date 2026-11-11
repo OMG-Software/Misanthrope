@@ -9,14 +9,18 @@ general process boundary.
 
 ## Status
 
-Version 0.13.0 adds only the **process-tree runner core** in the
-`omgcode-platform` crate (`process::run`). It applies **no filesystem or network
-confinement**. No CLI command, model tool, or core API calls it. Settings
-reports keep `execution_allowed: false`. Do not describe it as a sandbox or as
-command support.
+Version 0.13.0 added the **process-tree runner core** in the
+`omgcode-platform` crate (`process::run`). It applies no filesystem or network
+confinement.
 
-The core exists so that later increments add confinement to a supervised,
-tested tree instead of to an unbounded child process.
+Version 0.14.0 adds **`process::run_confined`**, which applies the
+[Linux confinement](#linux-confinement) below: a Landlock filesystem allowlist
+and a seccomp socket filter. On Windows it returns `Unsupported` until C3.
+
+No CLI command, model tool, or core API calls either function. Settings
+reports keep `execution_allowed: false`. Do not describe this as command
+support, and do not describe Linux confinement as qualified beyond the tested
+kernel.
 
 ## Accepted decisions
 
@@ -77,6 +81,53 @@ Behaviour:
   empty. `CleanupUnconfirmed` means a process or an open output handle remained
   after the cleanup timeout; it is never reported as success.
 
+## Confined runs
+
+`process::run_confined(spec, confinement, limits, cancel)` takes the same
+specification and limits as `run`, plus a `Confinement`:
+
+| Field | Meaning |
+| --- | --- |
+| `read_only` | Paths that may be read, listed, and executed. Toolchain roots, system libraries, and the program belong here. |
+| `read_write` | Paths that may also be written, created, renamed, truncated, and removed beneath. The workspace and a private scratch directory belong here. |
+| `unix_sockets` | `PairsOnly` (default) or `HostServices`; see below. |
+
+Rules:
+
+- Filesystem operations that Landlock handles are denied outside the listed
+  paths, including in the user's home directory and other host data. Metadata
+  changes and some other operations are not restricted anywhere; see
+  [known limits](#known-limits). A directory rule covers everything beneath it.
+  Rules are additive: a read-only path inside a read-write path is still
+  writable.
+- Each path must be absolute and name an existing directory, regular file, or
+  character device. No component may be a symbolic link. At most 64 paths are
+  accepted.
+- IP sockets are refused in every mode, including loopback. There is no
+  package-network or development-server networking yet.
+- Setup fails closed. A missing path, a link, an unsupported type, a missing
+  primitive, or an old kernel starts nothing. A program that the rules do not
+  let the kernel execute fails as `Spawn` with `EACCES`.
+- The outcome's `confinement` field records what applied:
+  `Unconfined` for `run`, or `Landlock { abi, unix_sockets }`.
+
+### Unix-domain sockets
+
+The user chose a per-run mode with the stricter one as the default; see
+[ADR-0028](adr/0028-confine-linux-runs-with-landlock-and-a-socket-filter.md).
+
+| Mode | Allowed | Reaches host services |
+| --- | --- | --- |
+| `PairsOnly` (default) | `socketpair(AF_UNIX)` of stream or sequenced-packet type only | No |
+| `HostServices` | `socket(AF_UNIX)` of any type, every Unix `socketpair`, and socket files in read-write paths | **Yes: every pathname socket the user can reach** |
+
+`HostServices` exists for developers whose builds need the Docker daemon or a
+similar service. Landlock cannot limit which pathname sockets are reached, so
+it also exposes the D-Bus session bus, SSH agents, and any other socket the
+user can open. Access to the Docker daemon is usually equivalent to root on the
+host. A later caller must make this an explicit, recorded operator choice and
+must never select it for a model.
+
 ## Platform mechanics
 
 ### Windows
@@ -93,7 +144,9 @@ Behaviour:
   is held around `CreateProcessW`.
 - Termination uses `TerminateJobObject`. Cleanup is observed when the job's
   active process count is zero. The pipes report end of file once all members
-  are gone.
+  are gone. A member's process object can become signaled shortly after the
+  count reaches zero, while the kernel finishes its exit, so a check for that
+  object must allow a short wait.
 
 ### Linux
 
@@ -111,13 +164,62 @@ Behaviour:
   the group reports no such process.
 - Supported architectures are x86_64 and aarch64. Others return `Unsupported`.
 
+### Linux confinement
+
+For `run_confined`, the parent prepares everything that can fail before
+`fork`:
+
+1. It reads the Landlock ABI with `landlock_create_ruleset`. Without Landlock,
+   or below ABI 3, it returns `Unsupported`. ABI 3 is the first that handles
+   truncation, so earlier ABIs could not keep a read-only file intact.
+2. It creates a ruleset that handles every filesystem right the ABI knows,
+   TCP bind and connect from ABI 4, and signal and abstract-socket scoping from
+   ABI 6. Rights added after ABI 6 are not handled.
+3. It opens each path with `openat2(O_PATH, RESOLVE_NO_SYMLINKS |
+   RESOLVE_NO_MAGICLINKS)`, checks its type, and adds a path-beneath rule.
+   Read-only rules grant execute, read, and list. Read-write rules grant every
+   handled right except creating device nodes, and except creating socket
+   files in `PairsOnly` mode. File rules keep only the rights that apply to
+   files.
+
+Rules bind to the opened objects, so a later rename does not change the grant.
+The ruleset descriptor is close-on-exec. The child then runs C1's steps and, after
+`no_new_privs`, calls `landlock_restrict_self` before installing the seccomp
+filter. The confined filter adds these refusals, each with `EPERM`:
+
+- `socket` and `socketpair` for every family other than `AF_UNIX`, and the
+  Unix rule for the selected mode;
+- `io_uring_setup`, `io_uring_enter`, and `io_uring_register`, because
+  `io_uring` can create sockets without `socket`.
+
+Datagram socket pairs are refused in `PairsOnly` mode because `sendto` on a
+connected Unix datagram socket can still address a host socket path, such as
+`/dev/log`. Stream sockets refuse a destination address, and sequenced-packet
+sockets ignore it.
+
 ## Known limits
 
-These remain true after C1 and must be addressed or documented by the increments
+These remain true after C2 and must be addressed or documented by the increments
 that expose execution:
 
-- **No confinement.** A program can read and write anything the user can, use
-  the network, and talk to host services.
+- **`run` is unconfined.** A program started by `run` can read and write
+  anything the user can, use the network, and talk to host services. Only
+  `run_confined` applies the rules above, and only on Linux.
+- **Windows confinement.** `run_confined` returns `Unsupported` on Windows
+  until C3.
+- **Linux kernel coverage.** Confinement needs Landlock ABI 3 (Linux 6.2 or
+  later) with Landlock enabled. It was tested on WSL 6.6 (ABI 3) only.
+- **What Landlock does not cover.** Landlock up to ABI 6 does not restrict
+  `stat`, `readlink`, `chdir`, `access`, `flock`, or `fcntl`, or metadata
+  changes with `chmod`, `chown`, `setxattr`, and `utime`. These work on any
+  path the program can name, including unlisted host files, within the user's
+  own rights. On ABI 3 and 4, device `ioctl` is not restricted either: a
+  character device reachable through any rule, read-only included, accepts
+  state-changing `ioctl` calls. Grant devices only when needed. Before ABI 6, a
+  confined program can signal other processes of the same user.
+- **`HostServices` exposure.** See [Unix-domain sockets](#unix-domain-sockets).
+- **No IP networking.** Package downloads, loopback test servers, and
+  development servers fail until a network profile is designed.
 - **No tree-wide resource limits.** There is no memory, process-count, or disk
   limit. Windows can add job limits; Linux needs a delegated cgroup or another
   reviewed mechanism.
@@ -140,8 +242,8 @@ that expose execution:
 
 | Increment | Scope | Must establish |
 | --- | --- | --- |
-| C2 | Linux Landlock filesystem rules and seccomp network denial | Read-only toolchain roots, writable workspace/scratch only, denied host data, denied IP sockets, a decision for Unix-domain sockets to host services, Landlock ABI detection that fails closed |
+| C2 (0.14.0) | Linux Landlock filesystem rules and seccomp network denial | Done: see [confined runs](#confined-runs) and ADR-0028 |
 | C3 | Windows AppContainer | A per-workspace container identity, recorded and reversible access entries on the workspace and scratch, no network capability, denied host data |
-| C4 | Trusted CLI `run` and the `execute` preference | Toolchain profiles, a curated environment, recorded profile with each result, journal records, and the acceptance cases in the development-tool contract |
+| C4 | Trusted CLI `run` and the `execute` preference | Toolchain profiles, a curated environment, recorded profile with each result, journal records, an explicit recorded choice before `HostServices`, and the acceptance cases in the development-tool contract |
 
 Live qualification on each supported OS remains a separate gate.

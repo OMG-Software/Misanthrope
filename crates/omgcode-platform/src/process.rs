@@ -2,10 +2,11 @@
 //!
 //! This module starts one program with an explicit environment and supervises
 //! its whole descendant tree: bounded output, a deadline, cooperative
-//! cancellation, and observed tree cleanup. It is **not** a sandbox. It applies
-//! no filesystem or network confinement, so no CLI command or model tool may
-//! expose it until a later increment adds Landlock/seccomp and AppContainer
-//! confinement. See `docs/execution.md` and ADR-0027.
+//! cancellation, and observed tree cleanup. [`run`] applies no filesystem or
+//! network confinement. [`run_confined`] adds a Landlock filesystem allowlist
+//! and a seccomp socket filter on Linux, and refuses to start on Windows until
+//! the AppContainer increment exists. No CLI command or model tool calls either
+//! yet. See `docs/execution.md`, ADR-0027, and ADR-0028.
 
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -17,6 +18,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
+mod confinement;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(windows)]
@@ -24,6 +26,8 @@ mod windows;
 
 #[cfg(test)]
 mod tests;
+
+pub use confinement::{AppliedConfinement, Confinement, MAX_CONFINEMENT_PATHS, UnixSocketAccess};
 
 /// Largest accepted run deadline.
 pub const MAX_DEADLINE: Duration = Duration::from_secs(60 * 60);
@@ -154,6 +158,8 @@ impl CapturedOutput {
 #[must_use]
 pub struct ProcessOutcome {
     pub termination: Termination,
+    /// The confinement that applied to every process in the tree.
+    pub confinement: AppliedConfinement,
     pub stdout: CapturedOutput,
     pub stderr: CapturedOutput,
     pub elapsed: Duration,
@@ -168,6 +174,10 @@ pub enum ProcessError {
     InvalidLimits(&'static str),
     /// A required native primitive is unavailable; nothing was started.
     Unsupported(&'static str),
+    /// A confinement rule could not be prepared, for example because a path is
+    /// missing, is a symbolic link, or has an unsupported type. Nothing was
+    /// started.
+    Confinement(io::Error),
     /// The program could not be started. No process from this run remains.
     Spawn(io::Error),
     /// Supervision failed after start. The runner terminated the tree and
@@ -186,6 +196,12 @@ impl fmt::Display for ProcessError {
             }
             Self::InvalidLimits(reason) => write!(formatter, "invalid process limits: {reason}"),
             Self::Unsupported(reason) => write!(formatter, "process runner unavailable: {reason}"),
+            Self::Confinement(error) => {
+                write!(
+                    formatter,
+                    "a confinement rule could not be prepared: {error}"
+                )
+            }
             Self::Spawn(error) => write!(formatter, "the program could not be started: {error}"),
             Self::Supervision(error) => write!(formatter, "process supervision failed: {error}"),
             Self::CleanupUnconfirmed(reason) => {
@@ -201,7 +217,7 @@ impl fmt::Display for ProcessError {
 impl std::error::Error for ProcessError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Spawn(error) | Self::Supervision(error) => Some(error),
+            Self::Spawn(error) | Self::Supervision(error) | Self::Confinement(error) => Some(error),
             _ => None,
         }
     }
@@ -219,30 +235,61 @@ pub fn run(
 ) -> Result<ProcessOutcome, ProcessError> {
     let limits = limits.validate()?;
     validate_spec(spec)?;
-    run_native(spec, limits, cancel)
+    run_native(spec, None, limits, cancel)
+}
+
+/// Start one program under filesystem and network confinement and supervise
+/// its whole tree until it is observed empty.
+///
+/// The program and every descendant can reach only the paths in
+/// `confinement`, cannot create IP sockets, and cannot use `io_uring`. By
+/// default they can create only a Unix `socketpair` of stream or
+/// sequenced-packet type; [`UnixSocketAccess::HostServices`] also allows
+/// connecting to host Unix-domain sockets. Setup fails closed: if a rule or primitive cannot be applied,
+/// nothing starts and an error is returned. On Linux this needs Landlock ABI 3
+/// or later. Windows returns [`ProcessError::Unsupported`] until AppContainer
+/// confinement is implemented.
+pub fn run_confined(
+    spec: &ProcessSpec,
+    confinement: &Confinement,
+    limits: &ProcessLimits,
+    cancel: &CancelSignal,
+) -> Result<ProcessOutcome, ProcessError> {
+    let limits = limits.validate()?;
+    validate_spec(spec)?;
+    confinement.validate()?;
+    run_native(spec, Some(confinement), limits, cancel)
 }
 
 #[cfg(target_os = "linux")]
 fn run_native(
     spec: &ProcessSpec,
+    confinement: Option<&Confinement>,
     limits: ProcessLimits,
     cancel: &CancelSignal,
 ) -> Result<ProcessOutcome, ProcessError> {
-    linux::run(spec, limits, cancel)
+    linux::run(spec, confinement, limits, cancel)
 }
 
 #[cfg(windows)]
 fn run_native(
     spec: &ProcessSpec,
+    confinement: Option<&Confinement>,
     limits: ProcessLimits,
     cancel: &CancelSignal,
 ) -> Result<ProcessOutcome, ProcessError> {
+    if confinement.is_some() {
+        return Err(ProcessError::Unsupported(
+            "confined execution is not implemented on Windows yet",
+        ));
+    }
     windows::run(spec, limits, cancel)
 }
 
 #[cfg(not(any(target_os = "linux", windows)))]
 fn run_native(
     _spec: &ProcessSpec,
+    _confinement: Option<&Confinement>,
     _limits: ProcessLimits,
     _cancel: &CancelSignal,
 ) -> Result<ProcessOutcome, ProcessError> {
@@ -439,6 +486,7 @@ fn supervise(
     started: Instant,
     limits: ProcessLimits,
     cancel: &CancelSignal,
+    confinement: AppliedConfinement,
 ) -> Result<ProcessOutcome, ProcessError> {
     let watched = watch(tree, started, limits.deadline, cancel);
     // Descendants never outlive the run, including after a normal exit.
@@ -452,6 +500,7 @@ fn supervise(
     let (stdout, stderr) = capture.finish(Instant::now() + limits.cleanup_timeout)?;
     Ok(ProcessOutcome {
         termination,
+        confinement,
         stdout,
         stderr,
         elapsed,
