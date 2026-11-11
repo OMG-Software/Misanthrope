@@ -2,8 +2,9 @@
 
 OMGCode has a Rust CLI prototype for local chat, JSONL sessions, and a
 bounded native workspace file broker. The broker is available only through
-trusted operator commands. Model tool dispatch and the execution sandbox are
-not implemented. The guides distinguish implemented behaviour from the
+trusted operator commands and, when a workspace enables `model_tools`, to the
+local model's read and list tools. Other model tools and the execution sandbox
+are not implemented. A process-tree runner core exists for tests only. The guides distinguish implemented behaviour from the
 remaining product contracts.
 
 ## Start here
@@ -29,6 +30,7 @@ remaining product contracts.
 | [Workspace settings](workspace-permissions.md) | Implemented workspace IDs, configuration-only permissions, revisions, audit, and remaining gates |
 | [Workspace file access](file-access.md) | Native broker, previews, Linux ext4 apply, checkpoint storage, and existing-only recovery |
 | [Development tools](development-tools.md) | Installed/managed toolchains, runtime grants, outputs, caches, and qualification |
+| [Command execution](execution.md) | Process-tree runner contract, accepted confinement primitives, limits, and next increments |
 | [Agent instructions](agent-instructions.md) | Product priorities, visible SYSTEM prompt, user additions, and request manifests |
 | [System prompt draft](../prompts/system.md) | Versioned initial base instructions for the coding assistant |
 | [Context management](context-management.md) | Token-based compaction, cache classes, invalidation, and efficiency measures |
@@ -80,8 +82,8 @@ The Rust workflow adds formatting, strict Clippy, unit/integration tests, and
 separate documentation tests on Windows and Linux. The development guide owns
 the current commands and limits. There is no frontend or execution backend yet.
 The limited file broker and the core read/list turn runtime do not provide
-general model tools or process containment. No CLI route dispatches model
-tools. A read-only CLI preview compares a workspace file with trusted proposed
+general model tools or process containment. Chat dispatches only the read and
+list tools, and only for a workspace that enables `model_tools`. A read-only CLI preview compares a workspace file with trusted proposed
 content without writing to the workspace or creating a checkpoint.
 Dependency security audits, native containment qualification, and release checks
 still need their own implementation and evidence.

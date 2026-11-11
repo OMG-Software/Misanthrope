@@ -36,12 +36,17 @@ This is a resume guide, not a replacement for the owning contracts in
 - **PR #16** merged at `b7fbc0b`: fixes that test race, with tests and
   documentation only.
 - **PR #17** merged at `ddfc90a`: **Phase A3a**, the Windows NTFS private store.
-- **PR #18**, `codex/windows-apply`: **Phase A3b**, version **0.10.0**, with
-  Windows NTFS checkpoint storage and trusted apply. Open and unmerged when A4
-  started from its `2dc3b50` head.
-- This branch, `codex/checkpoint-restore-delete`: **Phase A4**, version
-  **0.11.0**, with explicit restore and checkpoint deletion. It is stacked on
-  PR #18. Retarget its PR to `main` after PR #18 merges.
+- **PR #18** merged at `243ba8d`: **Phase A3b**, version **0.10.0**, with
+  Windows NTFS checkpoint storage and trusted apply.
+- **PR #19** merged at `270b889`: **Phase A4**, version **0.11.0**, with
+  explicit restore and checkpoint deletion.
+- **PR #20**, `codex/model-read-tools`: **Phase B**, version **0.12.0**, with
+  read/list model tools in chat behind the `model_tools` workspace preference.
+  Open and unmerged when C1 started from its `14cf21f` head. Its review
+  follow-up `6e8a676` was later merged into this branch.
+- This branch, `codex/process-runner-core`: **Phase C1**, version **0.13.0**,
+  with the execution contract and an unexposed process-tree runner core. It is
+  stacked on PR #20. Retarget its PR to `main` after PR #20 merges.
 
 Implemented today:
 
@@ -59,12 +64,15 @@ Implemented today:
 - Core turn/tool runtime for read/list through a caller-supplied model
   interface. It has strict tool-call parsing, round/call/byte/prompt limits,
   cooperative cancellation, source-labelled messages, and fresh per-operation
-  policy bindings. No CLI command or real provider adapter dispatches it.
+  policy bindings. Chat dispatches it through the LM Studio adapter for a
+  workspace that enables `model_tools`.
 - Read-only `file diff`: trusted CLI preview of a broker-read file against
   complete proposed UTF-8 content. Exact digests, bounded one-hunk diff, no
   workspace mutation, no checkpoint, no replacement.
-- Text-only LM Studio Chat Completions chat with one non-streaming request and
-  no model tools.
+- LM Studio Chat Completions chat with non-streaming requests. It is text-only
+  unless the session's workspace enables `model_tools`; then it offers only the
+  read and list tools. See
+  [ADR-0026](docs/adr/0026-offer-read-list-tools-through-a-workspace-preference.md).
 - Read-only core initialization/ledger record inspectors with bounded strict
   JSON, lifecycle validation, manifest references, and unresolved-state retention.
   The pure inspectors open no files and execute no recorded work.
@@ -88,9 +96,11 @@ Not implemented:
 
 - Apply or restore on other filesystems, workspace file deletion, ledger
   compaction, and standalone CLI checkpoint preparation.
-- CLI or real-provider model tool dispatch.
-- Process execution, execution containment, Git, MCP, runtime skills, memories,
-  desktop/UI panels, compaction, or caches.
+- Model write, process, network, Git, or MCP tools; per-call tool approval;
+  and live provider tool-call qualification.
+- Exposed process execution, execution containment, Git, MCP, runtime skills,
+  memories, desktop/UI panels, compaction, or caches. The process-tree runner
+  core has no caller and no confinement.
 - Subscription/API-key provider profiles beyond the local LM Studio route.
 
 ## Resume steps
@@ -196,6 +206,43 @@ one doc test. Linux ext4 under WSL, uid 1000, ran 310 tests and one doc test. No
 tests failed, were ignored, or were filtered. These results do not establish
 remote CI status, power-loss behaviour, or release filesystem support.
 
+Phase B started from `main` at `270b889`. Its final verification ran with Rust
+1.99.1 and default test parallelism. It passed formatting, Clippy, all-target
+tests, and doc tests. Native Windows NTFS ran 339 tests and one doc test. Linux
+ext4 under WSL, uid 1000, ran 325 tests and one doc test. No tests failed, were
+ignored, or were filtered. Temporary removal of path confinement, the core
+tool-text filter, and the CLI filter call were each caught by a test. These
+results use a mock LM Studio server. They do not establish live tool-call
+compatibility, remote CI status, or release readiness.
+
+A review follow-up then withheld saved tool results without live read
+authority, refused token-bearing tool calls, reported the final finish reason,
+and gated tool mode by platform. The same checks passed: Windows NTFS ran 345
+tests and one doc test, and Linux ext4 under WSL ran 331 tests and one doc test,
+with none failed, ignored, or filtered. Forcing replay in the runtime or text
+chat, removing the token refusal or its nested-argument decoding, and dropping
+the finish reason in the runtime or provider were each caught by a test.
+
+An opt-in live spot-check then ran the debug CLI on Windows against LM Studio 0.4.28 and `google/gemma-4-e4b`
+at `http://127.0.0.1:1234/v1`, with no token and disposable data. Text-only chat
+with the preference off, a read, and a directory listing succeeded. Revoking
+read produced `tool_denied`. Explicit parent, absolute, rooted, and `..` listing
+calls each failed as `invalid_tool_call` before file access. Sentinels outside
+the workspace never reached the journal. This is one model on one host, not a
+provider qualification.
+
+C1 started from PR #20's head `14cf21f`. Its final verification ran with Rust
+1.99.1 and default test parallelism. It passed formatting, Clippy, all-target
+tests, and doc tests. Native Windows ran 353 tests and one doc test. Linux ext4
+under WSL (kernel 6.6, uid 1000) ran 338 tests and one doc test. No tests failed,
+were ignored, or were filtered. Five temporary mutations were each caught:
+removing the Linux seccomp filter, close-on-exec marking, or kill after a normal
+exit, and allowing Windows job breakaway or dropping the handle list. These
+results do not establish confinement, remote CI status, or release readiness.
+After PR #20's review follow-up was merged in, the same checks passed with 359
+Windows tests and 344 Linux tests, each with one doc test, and none failed,
+ignored, or filtered.
+
 A mock or compile-only result does not establish native containment, live
 provider compatibility, or release filesystem support.
 
@@ -285,8 +332,18 @@ Runtime acceptance criteria for A2:
 
 ### Phase B: provider tool-call integration for read/list
 
-Only after an explicit product decision on model tool dispatch. The runtime is
-already bounded and policy-checked, but the CLI currently advertises no tools.
+**PR #20, `codex/model-read-tools`.** The user chose a persisted
+workspace preference with no per-call prompt, and required that a model call
+never read outside the registered workspace. Chat offers the read and list tools
+only when the session's workspace enables `model_tools`. The dispatcher rechecks
+that preference live before each call. Model paths are refused before the
+broker when absolute, rooted, prefixed, or parent-relative; the broker still
+refuses links and names outside the workspace. The LM Studio adapter parses tool
+calls strictly, and the configured token is removed from tool results before
+they are recorded or sent. Earlier tool results are replayed only under live
+`model_tools` and `read` preferences, and token-bearing calls are refused. See
+[ADR-0026](docs/adr/0026-offer-read-list-tools-through-a-workspace-preference.md).
+Live LM Studio tool-call compatibility remains open.
 
 Acceptance criteria:
 
@@ -303,10 +360,27 @@ Acceptance criteria:
 
 ### Phase C: real execution backends and toolchain profiles
 
-Follow [docs/development-tools.md](docs/development-tools.md) and
+Follow [docs/execution.md](docs/execution.md),
+[docs/development-tools.md](docs/development-tools.md), and
 [docs/platform-support.md](docs/platform-support.md). Add confined execution
 only with explicit toolchain profiles, bounded output, controlled networking,
 and observed process-tree cleanup. Never fall back to unrestricted execution.
+
+The user chose Landlock and seccomp on Linux, AppContainer inside a Job Object
+on Windows, and trusted CLI commands as the first caller. See
+[ADR-0027](docs/adr/0027-confine-execution-with-native-primitives-starting-with-a-process-tree-core.md).
+
+- **C1 (this branch, `codex/process-runner-core`, stacked on PR #20):** the
+  execution contract and a process-tree runner core in `omgcode-platform`.
+  It covers bounded output, deadline, cancellation, and observed cleanup. It
+  denies Linux process-group escape with seccomp and Windows job breakaway.
+  There is no confinement and no caller.
+- **C2:** Linux Landlock filesystem rules and seccomp network denial, including
+  a decision for Unix-domain sockets to host services.
+- **C3:** Windows AppContainer with recorded, reversible workspace access
+  entries and no network capability.
+- **C4:** trusted CLI `run` behind the `execute` preference, with toolchain
+  profiles, journal records, and the development-tool acceptance cases.
 
 ### Phase D: additional providers, streaming, and account lifecycle
 

@@ -1,11 +1,11 @@
 # Security coding rules
 
 These rules define requirements for each implemented boundary. The CLI prototype
-has bounded prompt/provider/journal checks and rejects model-requested tools.
-It has trusted workspace settings and a bounded native file broker for manual
-commands. The core also has a bounded turn/tool runtime for read and list
-through a caller-supplied model interface, but no CLI route or real provider
-adapter dispatches tools. It has no execution sandbox or permission UI. Configuration diagnostics always deny execution and do not replace per-target
+has bounded prompt/provider/journal checks. It has trusted workspace settings
+and a bounded native file broker for manual commands. The core has a bounded
+turn/tool runtime for read and list. Chat runs it with the local LM Studio
+adapter only for a workspace whose `model_tools` preference is enabled;
+otherwise chat rejects model-requested tools. It has no execution sandbox or permission UI. Configuration diagnostics always deny execution and do not replace per-target
 authorization. See
 [workspace settings](workspace-permissions.md) and [current limits](development.md). Apply these rules with the
 [coding rules](coding-rules.md) and [testing standards](testing-standards.md).
@@ -130,12 +130,33 @@ store for each call, obtains a fresh binding, releases the settings lock before
 the next model request, and records tool intents and results as untrusted
 evidence.
 Its checks do not isolate hostile same-user processes or provide process
-containment. Model file tools remain disabled; capability output keeps
-`workspace_file_tools` false. Do not treat journal metadata or enabled
+containment. Since 0.12.0, chat drives this runtime when the session's
+workspace enables `model_tools`. Model write and general file tools remain
+disabled; capability output keeps `workspace_file_tools` false. For model tools:
+
+- Check the live `model_tools` preference before each call, then let the broker
+  check the operation preference. A journal only selects a registration; never
+  build a workspace ID from journal data.
+- Reject absolute, rooted, prefixed, and parent-relative model paths before the
+  broker, and keep the broker's native containment checks.
+- Parse provider tool calls strictly. Refuse duplicate keys, legacy function
+  calls, unexpected call fields, and more than 64 raw calls in one response.
+- Remove known secrets from tool text before it is recorded or sent. The CLI
+  removes the configured LM Studio token.
+- Do not add a tool to the advertised set without an ADR, tests, and a settings
+  decision.
+ Do not treat journal metadata or enabled
 preferences as authority. Follow the [workspace file-access contract](file-access.md)
 for current native operations, failure states, and explicit recovery.
 
 ## Process and sandbox boundary
+
+The [execution guide](execution.md) owns the runner contract. Version 0.13.0
+has only a process-tree runner core with no confinement. Do not call it from the
+CLI, a model tool, or the core until that platform's confinement is implemented
+and tested. Its Windows `CreateProcessW` and job wrappers and its Linux
+pre-exec `prctl`, seccomp, and `close_range` calls are reviewed unsafe code in
+the platform crate.
 
 - Apply policy and operating-system restrictions before untrusted code starts.
   Never fall back to unrestricted execution when setup or a capability fails.

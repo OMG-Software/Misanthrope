@@ -3,6 +3,7 @@
 
 mod control_cli;
 mod file_cli;
+mod model_tools;
 
 use clap::{Args, Parser, Subcommand};
 use directories::ProjectDirs;
@@ -14,6 +15,7 @@ use omgcode_core::provider::{LocalModelClient, LocalModelConfig};
 use omgcode_core::session::{
     MessageRole, NativePath, RequestManifest, SessionError, SessionJournal,
 };
+use omgcode_core::turn::replay_history;
 use serde::Serialize;
 use serde_json::json;
 use std::env;
@@ -209,12 +211,17 @@ fn run(cli: Cli) -> Result<(), CliError> {
             "checkpoint_restore": cfg!(any(target_os = "linux", target_os = "windows")),
             "checkpoint_deletion": cfg!(any(target_os = "linux", target_os = "windows")),
             "edit_previews": cfg!(any(target_os = "linux", target_os = "windows")),
+            "model_read_list_tools": model_tools::MODEL_TOOLS_SUPPORTED,
             "workspace_file_tools": false,
             "process_execution": false,
             "mcp": false,
             "memories": false,
             "sandbox_backend": "unavailable",
-            "tool_policy": "reject all model-requested tools",
+            "tool_policy": if cfg!(any(target_os = "linux", target_os = "windows")) {
+                "read_list_only_when_workspace_model_tools_enabled"
+            } else {
+                "reject all model-requested tools"
+            },
         })),
         Command::Session { action } => match action {
             SessionCommand::New { workspace, title } => {
@@ -285,23 +292,25 @@ fn chat(data_dir: Option<PathBuf>, mut args: ChatArgs) -> Result<(), CliError> {
     } else {
         None
     };
+    let data_root = data_root(data_dir)?;
     let mut journal = match path {
         Some(path) => SessionJournal::open(&path).map_err(session_error)?,
         None => {
             let workspace = args.workspace.as_deref().ok_or_else(|| {
                 CliError::new("configuration", "A workspace or journal is required")
             })?;
-            create_session(&data_root(data_dir)?, workspace, &args.title)?
+            create_session(&data_root, workspace, &args.title)?
         }
     };
     let locator = journal_locator(&journal)?;
-    chat_turn(&mut journal, &client, args, token.as_deref())
+    chat_turn(&mut journal, &data_root, &client, args, token.as_deref())
         .map_err(|error| error.with_session(locator))
 }
 
 /// Preflight deterministic failures before starting; preserve uncertain I/O state.
 fn chat_turn(
     journal: &mut SessionJournal,
+    data_root: &std::path::Path,
     client: &LocalModelClient,
     args: ChatArgs,
     token: Option<&str>,
@@ -318,38 +327,52 @@ fn chat_turn(
             "The previous turn is incomplete; inspect it, then use session interrupt to mark it failed without retrying",
         ));
     }
-    let mut history: Vec<ConversationMessage> = journal
-        .snapshot()
-        .messages
-        .iter()
-        .map(|message| ConversationMessage {
-            role: match message.role {
-                MessageRole::User => ConversationRole::User,
-                MessageRole::Assistant => ConversationRole::Assistant,
-                // Stored tool text is already source-labelled untrusted content.
-                MessageRole::Tool => ConversationRole::User,
-            },
-            content: redact_known_secret(&message.text, token),
-        })
-        .collect();
+    let manifest = RequestManifest {
+        base_prompt: BASE_PROMPT.to_owned(),
+        prompt_version: BASE_PROMPT_VERSION.to_owned(),
+        prompt_sha256: prompt::base_prompt_sha256(),
+        custom_instructions: args.instructions.clone(),
+        model: args.model.clone(),
+        base_url: args.endpoint.clone(),
+        context_tokens: args.context_tokens,
+        max_output_tokens: args.max_output_tokens,
+        tool_schema_version: None,
+        tools: None,
+    };
+    // Live settings decide whether this turn offers the workspace tools.
+    let reason = match model_tools::select(data_root, journal)? {
+        model_tools::ToolMode::Enabled { workspace_id } => {
+            let output = model_tools::run(
+                journal,
+                data_root,
+                workspace_id,
+                client,
+                token,
+                model_tools::UserTurn {
+                    message: &args.message,
+                    instructions: &args.instructions,
+                    manifest,
+                },
+            )?;
+            return print_json(&JournalOutput {
+                locator: journal_locator(journal)?,
+                detail: output,
+            });
+        }
+        model_tools::ToolMode::Disabled { reason } => reason,
+    };
+    // Text-only chat has no model file-read authority, so saved tool results
+    // are withheld rather than sent again.
+    let (mut history, withheld_tool_results) = replay_history(&journal.snapshot().messages, false);
+    for message in &mut history {
+        message.content = redact_known_secret(&message.content, token);
+    }
     history.push(ConversationMessage {
         role: ConversationRole::User,
         content: args.message.clone(),
     });
     let messages = prompt::assemble(&args.instructions, &history)
         .map_err(|error| CliError::new("prompt", error.to_string()))?;
-    let manifest = RequestManifest {
-        base_prompt: BASE_PROMPT.to_owned(),
-        prompt_version: BASE_PROMPT_VERSION.to_owned(),
-        prompt_sha256: prompt::base_prompt_sha256(),
-        custom_instructions: args.instructions,
-        model: args.model,
-        base_url: args.endpoint,
-        context_tokens: args.context_tokens,
-        max_output_tokens: args.max_output_tokens,
-        tool_schema_version: None,
-        tools: None,
-    };
     journal
         .preflight_request(&args.message, &manifest)
         .map_err(session_error)?;
@@ -402,7 +425,14 @@ fn chat_turn(
     journal.complete_turn(request_id).map_err(session_error)?;
     print_json(&JournalOutput {
         locator: journal_locator(journal)?,
-        detail: json!({"reply":reply}),
+        detail: json!({
+            "reply": reply,
+            "model_tools": {
+                "mode": "disabled",
+                "reason": reason,
+                "withheld_tool_results": withheld_tool_results,
+            },
+        }),
     })
 }
 

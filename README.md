@@ -5,10 +5,11 @@
 OMGCode aims to connect language models to controlled development tools.
 The current code is an early Rust core and command-line prototype. A bounded
 native workspace file broker is available through trusted CLI commands. A core
-turn/tool runtime and schema-v2 session format exist for library callers and
-tests, but the CLI and every real provider adapter still dispatch no model
-tools. CLI/provider tool dispatch, a desktop interface, Git workflows, and an
-execution sandbox remain planned.
+turn/tool runtime and schema-v2 session format let chat offer the local LM Studio
+model read and list tools, only for a workspace that enables `model_tools`.
+Model write and process tools, a desktop interface, Git workflows, and an
+execution sandbox remain planned. The platform crate has a process-tree runner
+core for tests only; it applies no confinement and nothing calls it.
 
 > **Status: early prototype, not release-ready.** The Rust CLI can inspect the
 > compiled prompt, report implemented capabilities, manage JSONL sessions and
@@ -16,8 +17,9 @@ execution sandbox remain planned.
 > create new files/directories through the trusted CLI, preview bounded diffs
 > against trusted proposed content, and send one non-streaming chat request to
 > an explicitly selected local LM Studio model.
-> Chat still has no file tools. The core has a bounded read/list turn runtime
-> exercised with a scripted model, but the CLI does not expose it. The trusted
+> When a workspace enables the `model_tools` preference, chat lets the local
+> model read and list files inside that workspace through a bounded runtime.
+> It has no model write, process, network, Git, or MCP tools. The trusted
 > CLI can replace or restore one existing file through a checkpoint on qualified
 > Linux ext4 or Windows NTFS, and can permanently delete one resolved checkpoint.
 > Workspace files cannot be deleted, commands cannot be run, and no execution
@@ -52,7 +54,9 @@ and `omgcode-platform`. The CLI command is `omgcode`. It provides:
   abandoned turn in a JSONL journal.
 - `chat`: send one user turn to an already-running LM Studio server at a literal
   loopback HTTP endpoint. It does not discover, start, or download models, and it
-  rejects model tool requests. The chat path does not read workspace files.
+  rejects model tool requests unless the session's workspace enables
+  `model_tools`. Then it offers only the read and list tools, rechecked against
+  live settings before every call.
 
 Prompt assembly sends the compiled base in the system role. Optional user
 preferences and conversation history remain user or assistant messages. The
@@ -65,8 +69,9 @@ The core also implements a session-owned turn/tool runtime and JSONL schema
 version 2. That runtime accepts a caller-supplied model interface, validates
 strict read/list tool calls, creates a fresh workspace binding before every
 operation, and records tool intents, results, and source-labelled messages.
-Only bounded read and directory listing are supported. It has no CLI command,
-no real provider integration, and no write, process, Git, MCP, or network tool.
+Only bounded read and directory listing are supported. `chat` runs it with the
+local LM Studio adapter for a workspace that enables `model_tools`. It has no
+write, process, Git, MCP, or network tool.
 New sessions use schema version 2; version 1 journals remain readable and
 writable with their original text-only event subset.
 
@@ -84,7 +89,7 @@ guarantee no lost updates. Windows makes no power-loss claim. Trusted
 `file restore` writes a retained original back through a new checkpoint after
 an explicit current-content check. Trusted `file delete-checkpoint --permanent`
 removes one resolved checkpoint's files and keeps its ledger history. Neither
-command is power-loss qualified. CLI/provider model-dispatched file tools
+command is power-loss qualified. Model-dispatched write tools
 remain unavailable.
 Process/network confinement, Git, MCP, and memories remain planned. See the
 [workspace settings contract](docs/workspace-permissions.md), the
@@ -114,8 +119,12 @@ cargo run --locked -p omgcode-cli -- chat --workspace . --model "YOUR_MODEL_ID" 
 
 The endpoint defaults to `http://127.0.0.1:1234/v1`. The required context value
 must come from the selected model's validated profile. The adapter uses a
-conservative byte-based estimate; it is not the model tokenizer. The example
-sends only the supplied message and saved chat history, not the workspace files.
+conservative byte-based estimate; it is not the model tokenizer. While the
+workspace's `model_tools` preference is off, which is the default, the example
+sends only the supplied message and saved chat history, not workspace files;
+earlier tool results are replaced by a withheld notice. If `model_tools` is
+enabled for `.`, the model can call the read and list tools, and the file
+contents it reads are sent to the local model.
 The loopback connection does not establish how LM Studio handles data upstream;
 check the server's configuration before sending sensitive text.
 

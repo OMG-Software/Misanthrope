@@ -51,6 +51,9 @@ pub(crate) struct PermissionsArgs {
     execute: Option<bool>,
     #[arg(long = "task-network")]
     task_network: Option<bool>,
+    /// Let chat offer the local model the read-only workspace read/list tools.
+    #[arg(long = "model-tools")]
+    model_tools: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -119,6 +122,7 @@ fn set_permissions(args: PermissionsArgs, data_root: &Path) -> Result<(), CliErr
         && args.write.is_none()
         && args.execute.is_none()
         && args.task_network.is_none()
+        && args.model_tools.is_none()
     {
         return Err(CliError::new(
             "configuration",
@@ -136,6 +140,7 @@ fn set_permissions(args: PermissionsArgs, data_root: &Path) -> Result<(), CliErr
         write: args.write.unwrap_or(current.write),
         execute: args.execute.unwrap_or(current.execute),
         task_network: args.task_network.unwrap_or(current.task_network),
+        model_tools: args.model_tools.unwrap_or(current.model_tools),
     };
     store
         .set_permissions(id, permissions, args.revision)

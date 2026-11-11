@@ -6,6 +6,36 @@ Changes are recorded here before a release version is assigned.
 
 ### Added
 
+- Version 0.13.0 adds a process-tree runner core to the platform crate, for
+  tests only. It starts one absolute-path program with an exact environment,
+  null input, and bounded output. It ends the whole tree on exit, deadline, or
+  cancellation and reports success only after observing the tree empty.
+  Windows assigns a Job Object at creation and inherits only the standard
+  handles. Linux uses a process group, a seccomp filter that denies `setsid` and
+  `setpgid`, a parent-death signal, and close-on-exec descriptors. It applies no
+  filesystem or network confinement, and no CLI command or model tool can call
+  it. The accepted confinement is Landlock and seccomp on Linux and
+  AppContainer on Windows; see ADR-0027 and `docs/execution.md`.
+- Version 0.12.0 lets chat offer the local LM Studio model two tools,
+  `workspace_read_file` and `workspace_list_directory`, for a workspace whose
+  new `model_tools` preference is enabled. The preference is off by default and
+  is set with `workspace permissions --model-tools true`. Settings logs that
+  never enable it stay readable by 0.11.0. Each call rechecks the live
+  `model_tools` and read preferences and stays inside the registered workspace;
+  parent, absolute, rooted, and link paths are refused. There is no per-call
+  approval prompt. A turn makes at most four model requests within 120 seconds.
+  Tool results are source-labelled user messages, and the configured server
+  token is removed from them before they are recorded or sent. `workspace
+  status` reports `model_tools`, and `capabilities` reports
+  `model_read_list_tools` and a new `tool_policy` value. Live LM Studio
+  tool-call compatibility is not qualified. One opt-in Windows spot-check with
+  LM Studio 0.4.28 and `google/gemma-4-e4b` passed; see ADR-0026. Saved tool
+  results are sent again only while the live `model_tools` and `read`
+  preferences allow it; otherwise, and in every text-only turn, each is replaced
+  by a withheld notice and counted in `withheld_tool_results`. A tool call that
+  contains the server token is refused before it is recorded. Tool-enabled
+  output reports the final `finish_reason`, and platforms other than Linux and
+  Windows stay text only with `platform_unsupported`.
 - Version 0.11.0 adds trusted `file restore` and
   `file delete-checkpoint --permanent` on Linux ext4 and Windows NTFS. Restore
   writes a retained checkpoint's original bytes back through the normal apply

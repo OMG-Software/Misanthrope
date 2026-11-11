@@ -56,11 +56,14 @@ The CLI redacts exact occurrences of that currently configured token from new
 user text, preferences, titles, and assistant text before retention or display.
 Both chat-created sessions and direct `session new` use the same title redaction.
 It also redacts the current token from historical text before sending context.
-This is known-token redaction, not general secret detection or retroactive
-cleanup of existing journals. Ordinary string storage does not guarantee erasure.
+In tool-enabled chat, a tool call whose identifier or arguments contain the
+token is refused before it is recorded, because redacting its arguments could
+change the requested path. This is known-token redaction, not general secret
+detection or retroactive cleanup of existing journals. Ordinary string storage does not guarantee erasure.
 
 The adapter returns assistant text, `finish_reason`, and optional provider usage
-to the CLI, which emits them in JSON output. The session journal stores the
+to the CLI, which emits them in JSON output. Tool-enabled chat emits the final
+reply's `finish_reason` but no usage. The session journal stores the
 assistant text but not provider usage or `finish_reason`. Loopback identifies
 the network destination used by the adapter; it does not prove that the selected
 LM Studio server or model avoids upstream/cloud services.

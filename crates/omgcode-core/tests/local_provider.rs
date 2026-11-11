@@ -2,6 +2,8 @@ use omgcode_core::prompt::{BASE_PROMPT, ModelMessage, ModelRole};
 use omgcode_core::provider::{
     LocalModelClient, LocalModelConfig, ModelReply, ProviderError, Usage,
 };
+use omgcode_core::turn::{ToolCall, ToolModelReply, tool_definitions};
+use serde_json::Value;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread::{self, JoinHandle};
@@ -524,4 +526,122 @@ fn rejects_control_characters_in_bearer_token() {
     );
 
     assert_eq!(result.err(), Some(ProviderError::InvalidToken));
+}
+
+const TOOL_CALL_REPLY: &str = r#"{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call-1","type":"function","function":{"name":"workspace_read_file","arguments":"{\"path\":\"notes.txt\"}"}}]},"finish_reason":"tool_calls"}]}"#;
+
+/// Send one tool-enabled request to a fixture serving `body`.
+fn tool_exchange(body: &str) -> (Result<ToolModelReply, ProviderError>, Value) {
+    let fixture = Fixture::start("200 OK", body.as_bytes(), "");
+    let result =
+        client(fixture.address.clone(), None).complete_with_tools(&messages(), &tool_definitions());
+    let (_, request) = fixture.finish();
+    (
+        result,
+        serde_json::from_slice(&request).expect("request JSON"),
+    )
+}
+
+#[test]
+fn a_length_limited_tool_mode_text_reply_keeps_its_finish_reason() {
+    let (reply, _) = tool_exchange(
+        r#"{"choices":[{"message":{"role":"assistant","content":"partial"},"finish_reason":"length"}]}"#,
+    );
+    let reply = reply.expect("length-limited text reply");
+    assert!(reply.tool_calls.is_empty());
+    assert_eq!(reply.content, "partial");
+    assert_eq!(reply.finish_reason, "length");
+
+    let (reply, _) = tool_exchange(TOOL_CALL_REPLY);
+    assert_eq!(reply.expect("tool-call reply").finish_reason, "tool_calls");
+}
+
+#[test]
+fn tool_requests_advertise_exact_function_tools_and_return_raw_calls() {
+    let (reply, request) = tool_exchange(TOOL_CALL_REPLY);
+    let reply = reply.expect("tool-call reply");
+
+    assert_eq!(request["tool_choice"], "auto");
+    assert_eq!(request["stream"], false);
+    let tools = request["tools"].as_array().expect("tools array");
+    let names: Vec<&str> = tools
+        .iter()
+        .map(|tool| {
+            assert_eq!(tool["type"], "function");
+            tool["function"]["name"].as_str().expect("tool name")
+        })
+        .collect();
+    assert_eq!(names, ["workspace_read_file", "workspace_list_directory"]);
+    assert_eq!(
+        tools[0]["function"]["parameters"]["additionalProperties"],
+        false
+    );
+    let roles: Vec<&str> = request["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .map(|message| message["role"].as_str().expect("role"))
+        .collect();
+    assert_eq!(roles, ["system", "user", "assistant", "user"]);
+
+    assert_eq!(reply.content, "");
+    assert_eq!(reply.tool_calls.len(), 1);
+    // The adapter returns calls unvalidated; the runtime parses them strictly.
+    assert_eq!(reply.tool_calls[0]["id"], "call-1");
+    assert!(ToolCall::parse(&reply.tool_calls[0]).is_ok());
+}
+
+#[test]
+fn tool_requests_accept_plain_text_and_empty_call_lists() {
+    for body in [
+        SUCCESS,
+        r#"{"choices":[{"message":{"role":"assistant","content":"done","tool_calls":[]},"finish_reason":"stop"}]}"#,
+    ] {
+        let (reply, _) = tool_exchange(body);
+        let reply = reply.expect("text reply");
+        assert!(reply.tool_calls.is_empty());
+        assert!(!reply.content.is_empty());
+    }
+}
+
+#[test]
+fn tool_responses_with_duplicate_keys_or_unsupported_shapes_are_refused() {
+    let many_calls = format!(
+        r#"{{"choices":[{{"message":{{"role":"assistant","content":null,"tool_calls":[{}]}},"finish_reason":"tool_calls"}}]}}"#,
+        vec![r#"{"id":"x","type":"function","function":{"name":"workspace_list_directory","arguments":"{}"}}"#; 65].join(",")
+    );
+    let cases = [
+        // Duplicate keys could smuggle a second tool name or argument string.
+        r#"{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"a","type":"function","function":{"name":"workspace_read_file","name":"workspace_delete","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#,
+        r#"{"choices":[{"message":{"role":"assistant","role":"system","content":"x"},"finish_reason":"stop"}]}"#,
+        // A non-assistant role is refused.
+        r#"{"choices":[{"message":{"role":"system","content":"x"},"finish_reason":"stop"}]}"#,
+        // Null content needs at least one tool call.
+        r#"{"choices":[{"message":{"role":"assistant","content":null},"finish_reason":"stop"}]}"#,
+        // Truncated tool-call output is never dispatched.
+        r#"{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"a","type":"function","function":{"name":"workspace_read_file","arguments":"{\"path\":"}}]},"finish_reason":"length"}]}"#,
+        r#"{"choices":[{"message":{"role":"assistant","content":"x","tool_calls":{}},"finish_reason":"stop"}]}"#,
+        r#"{"choices":[]}"#,
+        &many_calls,
+    ];
+    for body in cases {
+        let (reply, _) = tool_exchange(body);
+        assert_eq!(
+            reply.expect_err("refused tool response"),
+            ProviderError::MalformedResponse,
+            "{body}"
+        );
+    }
+
+    for body in [
+        r#"{"choices":[{"message":{"role":"assistant","content":null,"function_call":{"name":"workspace_read_file","arguments":"{}"}},"finish_reason":"function_call"}]}"#,
+        r#"{"choices":[{"message":{"role":"assistant","content":"x"},"tool_calls":[{"id":"a"}],"finish_reason":"stop"}]}"#,
+    ] {
+        let (reply, _) = tool_exchange(body);
+        assert_eq!(
+            reply.expect_err("legacy or misplaced call"),
+            ProviderError::UnsupportedToolCall,
+            "{body}"
+        );
+    }
 }

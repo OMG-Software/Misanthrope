@@ -20,14 +20,14 @@ use uuid::Uuid;
 
 use crate::control::{ControlError, ControlStore};
 use crate::files::{FileBroker, FileError, FileListing, FileTarget};
-use crate::policy::WorkspaceId;
+use crate::policy::{DecisionReason, WorkspaceId};
 use crate::prompt::{
     self, BASE_PROMPT, BASE_PROMPT_VERSION, ConversationMessage, ConversationRole, ModelMessage,
     PromptError,
 };
 use crate::session::{
-    MAX_MESSAGE_BYTES, MessageRole, NativePath, RequestManifest, SessionError, SessionJournal,
-    ToolOutcome, sha256_hex,
+    MAX_MESSAGE_BYTES, MessageRole, NativePath, RecordedMessage, RequestManifest, SessionError,
+    SessionJournal, ToolOutcome, sha256_hex,
 };
 
 /// Revision of the tool schemas advertised by this runtime.
@@ -83,6 +83,9 @@ pub struct ToolModelReply {
     pub content: String,
     /// Raw provider tool-call values, validated before any dispatch.
     pub tool_calls: Vec<Value>,
+    /// The provider finish reason. A final reply is `stop`, or `length` when the
+    /// token limit cut its text short.
+    pub finish_reason: String,
 }
 
 /// A bounded model-interface failure. It never claims an execution result.
@@ -557,6 +560,55 @@ pub struct TurnReport {
     pub tool_bytes: u64,
     /// The exact manifest recorded for the request, including tool metadata.
     pub manifest: RequestManifest,
+    /// The final reply's provider finish reason: `stop`, or `length` when the
+    /// token limit cut the reply short. The turn is still recorded as complete.
+    pub finish_reason: String,
+    /// Saved tool results replaced by [`WITHHELD_TOOL_RESULT`] because live
+    /// settings did not allow model file reads when the turn started.
+    pub withheld_tool_results: usize,
+}
+
+/// Text sent in place of a saved tool result whose replay is not authorized.
+pub const WITHHELD_TOOL_RESULT: &str = "Tool result withheld [source omgcode_runtime]: current workspace settings do not allow model file reads, so this earlier workspace data is not sent again.";
+
+/// Map saved session messages to conversation history.
+///
+/// A saved tool result is workspace data that was disclosed under an earlier
+/// decision. It is replayed only when `tool_results_allowed` reflects live
+/// authority; otherwise it becomes [`WITHHELD_TOOL_RESULT`]. User and assistant
+/// messages are always replayed. Returns the history and the withheld count.
+#[must_use]
+pub fn replay_history(
+    messages: &[RecordedMessage],
+    tool_results_allowed: bool,
+) -> (Vec<ConversationMessage>, usize) {
+    let mut withheld = 0_usize;
+    let history = messages
+        .iter()
+        .map(|message| match message.role {
+            MessageRole::User => ConversationMessage {
+                role: ConversationRole::User,
+                content: message.text.clone(),
+            },
+            MessageRole::Assistant => ConversationMessage {
+                role: ConversationRole::Assistant,
+                content: message.text.clone(),
+            },
+            // Stored tool text is already source-labelled untrusted data.
+            MessageRole::Tool if tool_results_allowed => ConversationMessage {
+                role: ConversationRole::User,
+                content: message.text.clone(),
+            },
+            MessageRole::Tool => {
+                withheld = withheld.saturating_add(1);
+                ConversationMessage {
+                    role: ConversationRole::User,
+                    content: WITHHELD_TOOL_RESULT.to_owned(),
+                }
+            }
+        })
+        .collect();
+    (history, withheld)
 }
 
 /// A session-owned turn runtime.
@@ -572,6 +624,7 @@ pub struct TurnRuntime<'a> {
     workspace_id: WorkspaceId,
     limits: TurnLimits,
     cancel: CancelToken,
+    tool_text_filter: Option<&'a dyn Fn(&str) -> String>,
 }
 
 impl<'a> TurnRuntime<'a> {
@@ -599,7 +652,20 @@ impl<'a> TurnRuntime<'a> {
             workspace_id,
             limits,
             cancel: CancelToken::new(),
+            tool_text_filter: None,
         })
+    }
+
+    /// Transform each tool result before it is limited, recorded, or sent.
+    ///
+    /// The runtime itself redacts nothing. A caller that knows a secret, such
+    /// as a provider token, supplies a filter which removes it. The filtered
+    /// text is the only form that reaches the journal and the model; its byte
+    /// count and digest are taken after filtering.
+    #[must_use]
+    pub fn with_tool_text_filter(mut self, filter: &'a dyn Fn(&str) -> String) -> Self {
+        self.tool_text_filter = Some(filter);
+        self
     }
 
     /// Return a token which requests cancellation at the next checkpoint.
@@ -642,21 +708,11 @@ impl<'a> TurnRuntime<'a> {
                 .collect(),
         );
 
-        let mut history: Vec<ConversationMessage> = self
-            .journal
-            .snapshot()
-            .messages
-            .iter()
-            .map(|message| ConversationMessage {
-                role: match message.role {
-                    MessageRole::User => ConversationRole::User,
-                    MessageRole::Assistant => ConversationRole::Assistant,
-                    // Stored tool text is already source-labelled untrusted data.
-                    MessageRole::Tool => ConversationRole::User,
-                },
-                content: message.text.clone(),
-            })
-            .collect();
+        // Saved tool results are replayed only under live read authority.
+        let (mut history, withheld_tool_results) = replay_history(
+            &self.journal.snapshot().messages,
+            self.tool_replay_allowed(),
+        );
         history.push(ConversationMessage {
             role: ConversationRole::User,
             content: user_text.to_owned(),
@@ -735,6 +791,8 @@ impl<'a> TurnRuntime<'a> {
                     tool_calls: total_calls,
                     tool_bytes,
                     manifest,
+                    finish_reason: reply.finish_reason,
+                    withheld_tool_results,
                 });
             }
 
@@ -822,12 +880,15 @@ impl<'a> TurnRuntime<'a> {
                 ) {
                     return Err(self.abort(request_id, "persistence", error.into()));
                 }
-                let execution = WorkspaceToolDispatcher {
+                let mut execution = WorkspaceToolDispatcher {
                     data_directory: self.data_directory,
                     session_id: self.journal.snapshot().session_id,
                     workspace_id: self.workspace_id,
                 }
                 .dispatch(call, self.limits.max_result_bytes);
+                if let Some(filter) = self.tool_text_filter {
+                    execution.text = filter(&execution.text);
+                }
                 let message_limit = self.limits.max_result_bytes.min(MAX_MESSAGE_BYTES);
                 if execution.text.len() > message_limit {
                     let error = TurnError::Limit(TurnLimit::ResultBytes);
@@ -902,6 +963,23 @@ impl<'a> TurnRuntime<'a> {
             return Err(TurnError::ActiveTurn);
         }
         Ok(())
+    }
+
+    /// Report whether live settings let the model see saved tool results.
+    ///
+    /// It needs the session workspace's `model_tools` and `read` preferences.
+    /// Any settings failure withholds them. The settings lock is released
+    /// before the first model request.
+    fn tool_replay_allowed(&self) -> bool {
+        match ControlStore::open_existing(self.data_directory) {
+            Ok(Some(control)) => control
+                .workspace(self.workspace_id)
+                .is_some_and(|workspace| {
+                    let permissions = workspace.permissions();
+                    permissions.model_tools && permissions.read
+                }),
+            Ok(None) | Err(_) => false,
+        }
     }
 
     /// Check cooperative cancellation and the turn deadline.
@@ -1034,6 +1112,18 @@ impl WorkspaceToolDispatcher<'_> {
                 );
             }
         };
+        // The persisted model-tool preference is rechecked on every call, so a
+        // change made during model I/O stops the next operation.
+        let model_tools = control
+            .workspace(self.workspace_id)
+            .is_some_and(|workspace| workspace.permissions().model_tools);
+        if !model_tools {
+            return ToolExecution::denied(
+                "model_tools_disabled",
+                call,
+                FileError::Denied(DecisionReason::PermissionDisabled),
+            );
+        }
         let target = FileTarget {
             session_id: self.session_id,
             workspace_id: self.workspace_id,

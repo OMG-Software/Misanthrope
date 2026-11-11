@@ -32,17 +32,18 @@ skill/tool/memory selections, or an account profile.
 
 The core turn/tool runtime records the exact tool schema version and tool names
 in a schema-version-2 request manifest. Its read/list results are appended as
-source-labelled user-level tool messages and are never system messages. The CLI
-does not expose this runtime: `chat` sends no tool definitions and rejects any
-provider tool call.
+source-labelled user-level tool messages and are never system messages. Chat
+runs this runtime only for a workspace that enables `model_tools`; otherwise it
+sends no tool definitions and rejects any provider tool call.
 
 Prompt assembly limits custom instruction text and each history message to 16
 KiB, history to 128 messages, and the assembled UTF-8 text to 256 KiB. The
 adapter applies a caller-supplied context budget using a byte-based estimate and
 fixed overhead. This is not an exact tokenizer or model-capacity check. The
 prototype has no settings UI, application/workspace/session preference store,
-preview UI, token-count display, compaction, skills, memories, tools, or
-provider-specific subscription routes. The current `--instructions` value is
+preview UI, token-count display, compaction, skills, memories, tools other
+than chat's read/list workspace tools, or provider-specific subscription
+routes. The current `--instructions` value is
 per invocation, not a saved preference with scope or revision history.
 
 These statements describe implemented prototype behavior. The sections below

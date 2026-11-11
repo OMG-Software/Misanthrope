@@ -92,9 +92,9 @@ not rewritten. See [workspace settings](workspace-permissions.md).
 ### Core turn/tool lifecycle
 
 The `omgcode-core` `turn` module runs one bounded model/tool turn through a
-caller-supplied model interface. It is library and test infrastructure: no CLI
-command exposes it, `chat` advertises no tools, and every real provider adapter
-still rejects tool calls. A caller must provide an open schema-version-2
+caller-supplied model interface. `chat` runs it with the local LM Studio
+adapter when the session's workspace enables `model_tools`; otherwise chat
+advertises no tools and rejects tool calls. A caller must provide an open schema-version-2
 journal, the current control-store writer, and the workspace ID from trusted
 settings. The journal's recorded workspace ID is only a coherence check.
 
@@ -114,7 +114,11 @@ fit, it fails the turn before recording an intent or opening the target. Every
 rendered tool message, including an error, must fit the selected per-message
 limit and the 16 KiB session message limit before it is recorded. Interim
 assistant text returned with tool calls is recorded and retained in the
-follow-up history. Call identifiers are scoped to one turn: a failed turn may
+follow-up history. Saved tool messages from earlier turns are sent again only
+while the live `model_tools` and `read` preferences both allow it, checked when
+the turn starts; otherwise each is replaced by a fixed withheld notice, and the
+journal keeps the original. Text-only chat always withholds them. Call
+identifiers are scoped to one turn: a failed turn may
 leave a pending intent, and a later turn may reuse that identifier.
 Cancellation and the deadline are checked between bounded operations; they do
 not preempt a broker call already in progress.
@@ -132,12 +136,14 @@ cannot become a system message. Only read and list can execute; writes,
 processes, Git, MCP, and network access remain unavailable. The separate
 [file-operation journal](file-access.md) remains the broker's operation ledger.
 
-The runtime does not redact any text. The caller must redact user text and
+The runtime does not redact by itself. The caller must redact user text and
 custom instructions before the call, and a provider integration must redact
-model text before recording. Workspace file content and native path names are
-returned and recorded without a core redaction hook; treat the
-schema-version-2 journal and its tool messages as private user data and add a
-reviewed transform before enabling real tool dispatch.
+model text before recording. A caller may supply a tool-text filter. It runs on
+each tool result before the size limit, digest, journal record, and next model
+request. Tool-enabled chat uses it to remove the configured LM Studio token.
+There is no other secret detection: workspace file content and native path
+names are otherwise recorded as read. Treat the schema-version-2 journal and
+its tool messages as private user data.
 
 The CLI supports `session new`, `inspect`, `archive`, `restore`, and
 `interrupt JOURNAL`. Interrupt marks a recorded active turn failed with the code

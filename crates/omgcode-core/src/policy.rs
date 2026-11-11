@@ -75,9 +75,13 @@ fn is_valid_workspace_uuid(value: Uuid) -> bool {
     !value.is_nil() && value.get_version() == Some(Version::Random)
 }
 
-/// User-configured permission flags for the four supported operation classes.
+/// User-configured permission flags for the four supported operation classes
+/// and the model read/list tool preference.
 ///
 /// These flags are policy inputs only. They do not mint execution grants.
+/// `model_tools` is omitted from persisted JSON while it is `false`, so
+/// settings written without it keep their exact bytes and older readers can
+/// still open them. Once enabled, older readers refuse the field.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PermissionSet {
@@ -89,16 +93,29 @@ pub struct PermissionSet {
     pub execute: bool,
     /// Whether policy permits task network access.
     pub task_network: bool,
+    /// Whether chat may offer the model the read and list workspace tools.
+    ///
+    /// Each model call still needs the live `read` preference and a fresh
+    /// binding, and stays confined to the session workspace.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub model_tools: bool,
+}
+
+/// Keep a disabled optional preference out of persisted settings records.
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde passes the field by reference.
+const fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl Default for PermissionSet {
-    /// Leave process execution and task networking disabled until configured.
+    /// Leave process execution, task networking, and model tools disabled until configured.
     fn default() -> Self {
         Self {
             read: true,
             write: true,
             execute: false,
             task_network: false,
+            model_tools: false,
         }
     }
 }
@@ -364,6 +381,7 @@ mod tests {
                     write: true,
                     execute: false,
                     task_network: false,
+                    model_tools: false,
                 },
             ),
             (
@@ -374,6 +392,7 @@ mod tests {
                     write: false,
                     execute: false,
                     task_network: false,
+                    model_tools: false,
                 },
             ),
             (
@@ -384,6 +403,7 @@ mod tests {
                     write: true,
                     execute: true,
                     task_network: false,
+                    model_tools: false,
                 },
             ),
             (
@@ -394,6 +414,7 @@ mod tests {
                     write: true,
                     execute: false,
                     task_network: true,
+                    model_tools: false,
                 },
             ),
         ];
@@ -609,6 +630,43 @@ mod tests {
         assert!("not-a-uuid".parse::<WorkspaceId>().is_err());
         assert!(WorkspaceId::from_uuid(Uuid::nil()).is_err());
         assert!(WorkspaceId::from_uuid(valid).is_ok());
+    }
+
+    /// Keep settings written without the model tool preference byte-compatible.
+    #[test]
+    fn model_tools_is_absent_while_disabled_and_explicit_when_enabled() {
+        let legacy = json!({
+            "read": true,
+            "write": true,
+            "execute": false,
+            "task_network": false
+        });
+        let parsed = serde_json::from_value::<PermissionSet>(legacy.clone()).expect("legacy set");
+        assert_eq!(parsed, PermissionSet::default());
+        assert!(!parsed.model_tools);
+        assert_eq!(serde_json::to_value(parsed).expect("encode"), legacy);
+
+        let enabled = PermissionSet {
+            model_tools: true,
+            ..PermissionSet::default()
+        };
+        let encoded = serde_json::to_value(enabled).expect("encode enabled");
+        assert_eq!(encoded["model_tools"], true);
+        assert_eq!(
+            serde_json::from_value::<PermissionSet>(encoded).expect("decode enabled"),
+            enabled
+        );
+        for operation in [
+            Operation::Read,
+            Operation::Write,
+            Operation::Execute,
+            Operation::TaskNetwork,
+        ] {
+            assert_eq!(
+                enabled.allows(operation),
+                PermissionSet::default().allows(operation)
+            );
+        }
     }
 
     /// Reject future or attacker-added permission fields instead of ignoring them.

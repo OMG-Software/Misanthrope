@@ -16,8 +16,10 @@ a project needs, including:
 | Testing and development support | Test runners, code generators, coverage tools, language servers |
 
 These are required tool categories and profile candidates, not a claim that
-every listed executable or version already works. The project has no runner
-implementation yet. Tool support must be qualified on the actual platform.
+every listed executable or version already works. The platform crate has an
+unexposed process-tree runner core with no confinement; see
+[command execution](execution.md). No command runs project tools yet. Tool
+support must be qualified on the actual platform.
 
 Provide a generic process runner and extensible toolchain registration.
 Do not make useful development depend on a fixed list of approved command names.

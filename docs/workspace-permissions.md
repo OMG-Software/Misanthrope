@@ -21,9 +21,11 @@ cannot set a development root, change permissions, or recreate a binding.
 
 Select an existing development root explicitly. Register an existing workspace
 beneath it, including the root itself. Each workspace gets a random UUIDv4.
-Read and write preferences default to enabled; process execution and task
-network access default to disabled. Provider connections remain separate from
-task networking. No operation class currently executes a tool.
+Read and write preferences default to enabled; process execution, task
+network access, and model tools default to disabled. Provider connections
+remain separate from task networking. No operation class executes a tool. The
+separate `model_tools` preference is described under
+[model read/list tools](#model-readlist-tools).
 
 Registration stores the canonical native path, volume/filesystem ID, 128-bit
 file ID, and directory creation timestamp. Canonicalization resolves a trusted
@@ -128,6 +130,61 @@ New Unix directories request mode 0700 and files 0600. Existing permissions are
 not changed. Windows inherits ACLs; explicit per-user ACL setup and power-loss
 durability remain unqualified. Parent paths must be trusted. Native file checks
 and locks do not protect against a hostile same-user application.
+
+## Model read/list tools
+
+`workspace permissions <id> --revision <n> --model-tools true` lets `chat` offer
+the local model two tools for that workspace: `workspace_read_file` and
+`workspace_list_directory`. The preference is off by default, and there is no
+per-run flag or per-call confirmation. It is a trusted settings change like the
+other flags. It needs the expected revision, appends `permissions_changed`, and
+increments the revision. It is not an operation class, so `workspace check` and
+policy audit records do not mention it.
+
+`workspace status` always reports `model_tools`. Persisted settings omit the
+field while it is `false`, so settings that never enable it keep their exact
+bytes and remain readable by version 0.11.0. Once a `true` value is written,
+version 0.11.0 refuses the settings log.
+
+Before each turn, `chat` reads current settings and offers the tools only when:
+
+- the build runs on Linux or Windows;
+- a control store exists;
+- the session's recorded workspace UUID matches a registered workspace;
+- that workspace's `model_tools` preference is enabled;
+- the session journal uses schema version 2.
+
+Otherwise chat stays text only and reports `model_tools.mode` as `disabled` with
+a `reason`: `platform_unsupported`, `settings_absent`,
+`workspace_unregistered`, `preference_disabled`, or `session_schema_v1`. Invalid settings fail with a
+`control` error before any model request. The recorded UUID only selects a
+registration. The workspace ID and preference used come from current settings.
+
+Before every call, the core runtime opens the settings again and creates a
+fresh binding. It denies the call with `model_tools_disabled` unless the
+preference is still enabled. The broker then requires the live `read`
+preference and denies the call with `permission_denied` otherwise. A denial
+ends the turn. A change made during model I/O applies to the next call.
+
+Earlier tool results stay in the journal. A turn sends them to the model again
+only while the live `model_tools` and `read` preferences both allow it, checked
+when the turn starts. Otherwise, including every text-only turn, each is
+replaced by a fixed withheld notice and the output reports
+`withheld_tool_results`. Revoking either preference therefore stops further
+disclosure of earlier reads; it cannot recall what the model already received.
+
+A model call never reads outside the session workspace, which is registered
+beneath the development root. Parsing rejects absolute, drive-qualified, root,
+current-directory, and parent paths before dispatch. The broker refuses links,
+junctions, hard links, and names outside the workspace. Results are
+source-labelled, untrusted user content; the compiled base prompt stays the
+only system message. Limits are four model rounds, eight calls per round,
+16 calls per turn, and 256 KiB of tool output per turn.
+
+The journal selects the workspace. A crafted journal can therefore select
+another registered workspace that has `model_tools` enabled. Calls remain inside
+that workspace and need its live preferences, and the output names the workspace
+ID used. See [ADR-0026](adr/0026-offer-read-list-tools-through-a-workspace-preference.md).
 
 ## Session compatibility
 
