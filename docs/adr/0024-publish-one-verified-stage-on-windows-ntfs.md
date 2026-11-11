@@ -114,7 +114,10 @@ Gaps that remain open:
 
 - A crash, or a failed restore, between applying the source security and the
   rename leaves a retained stage carrying the source DACL. This window follows
-  commit intent and is short, but it is not closed.
+  commit intent and is short, but it is not closed. Closing it would need
+  recovery to change the stage's ACL, and inspection and acknowledgement never
+  repair or mutate evidence. Tests inject a failed restore and recreate the
+  crash state by copying the exact source descriptor onto a retained stage.
 - Stage privacy is tested through its exact DACL, not by a second local user,
   because creating one needs elevation.
 - Audit SACLs cannot be observed unelevated and are not preserved.

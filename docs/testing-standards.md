@@ -273,7 +273,10 @@ the earlier checks before it can show a later one works: restore the file times
 after changing security, streams, or the name, and assert that the retained
 snapshot still matches. Check that the stage keeps its owner-only DACL through
 preparation, rechecks, conflicts, and failures before the rename, even when the
-source grants other principals. Tests do not cover audit SACLs, a foreign owner,
+source grants other principals. Inject a failed privacy restore, and recreate the
+crash state by copying the exact source descriptor onto a retained stage: recovery
+must accept it after commit intent and refuse it before. Tests do not cover
+audit SACLs, a foreign owner,
 a second local user, a real second volume, ReFS, filter drivers, or physical
 power loss.
 

@@ -145,19 +145,7 @@ fn icacls(arguments: &[&std::ffi::OsStr]) -> String {
 /// Gives the data root the private ACL the Windows store requires.
 #[cfg(windows)]
 fn make_private_root(data: &Path) {
-    let output = std::process::Command::new("whoami")
-        .args(["/user", "/fo", "csv", "/nh"])
-        .output()
-        .expect("whoami");
-    assert!(output.status.success(), "whoami fixture failed");
-    let identity = String::from_utf8_lossy(&output.stdout).into_owned();
-    let sid = identity
-        .trim()
-        .rsplit(',')
-        .next()
-        .expect("SID column")
-        .trim_matches('"')
-        .to_owned();
+    let sid = current_user_sid();
     fs::create_dir(data).expect("application data");
     icacls(&[
         data.as_os_str(),
@@ -165,6 +153,74 @@ fn make_private_root(data: &Path) {
         "/grant:r".as_ref(),
         format!("*{sid}:(OI)(CI)F").as_ref(),
     ]);
+}
+
+#[cfg(windows)]
+fn current_user_sid() -> String {
+    let output = std::process::Command::new("whoami")
+        .args(["/user", "/fo", "csv", "/nh"])
+        .output()
+        .expect("whoami");
+    assert!(output.status.success(), "whoami fixture failed");
+    let identity = String::from_utf8_lossy(&output.stdout).into_owned();
+    identity
+        .trim()
+        .rsplit(',')
+        .next()
+        .expect("SID column")
+        .trim_matches('"')
+        .to_owned()
+}
+
+/// Gives `path` an explicit protected DACL: full access for the current user
+/// and read access for BUILTIN\Users.
+#[cfg(windows)]
+fn grant_users_read(path: &Path) {
+    let sid = current_user_sid();
+    icacls(&[
+        path.as_os_str(),
+        "/inheritance:r".as_ref(),
+        "/grant:r".as_ref(),
+        format!("*{sid}:F").as_ref(),
+        "*S-1-5-32-545:R".as_ref(),
+    ]);
+}
+
+/// Reports whether `path` grants BUILTIN\Users access.
+#[cfg(windows)]
+fn grants_users(path: &Path) -> bool {
+    let output = std::process::Command::new("icacls")
+        .arg(path)
+        .args(["/findsid", "*S-1-5-32-545"])
+        .output()
+        .expect("icacls");
+    assert!(output.status.success(), "icacls fixture failed");
+    String::from_utf8_lossy(&output.stdout).contains(&*path.to_string_lossy())
+}
+
+/// Copies the owner, group, and protected DACL of `from` onto `to`, as an
+/// interrupted commit attempt would leave a stage.
+#[cfg(windows)]
+fn copy_security(from: &Path, to: &Path) {
+    let output = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            // Set-Acl would also write the audit SACL, which needs elevation.
+            "$a = New-Object System.Security.AccessControl.FileSecurity; \
+             $a.SetSecurityDescriptorSddlForm((Get-Acl -LiteralPath $env:OMG_FROM).Sddl, 'Owner,Group,Access'); \
+             [System.IO.File]::SetAccessControl($env:OMG_TO, $a)",
+        ])
+        .env("OMG_FROM", from)
+        .env("OMG_TO", to)
+        .output()
+        .expect("powershell");
+    assert!(
+        output.status.success() && output.stderr.is_empty(),
+        "security copy fixture failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn artifact(bytes: &[u8]) -> RecordedArtifact {
@@ -425,6 +481,80 @@ fn tampered_stage_metadata_fails_closed_and_preserves_the_bytes() {
         fs::read(fixture.workspace.join("source.txt")).unwrap(),
         ORIGINAL
     );
+}
+
+/// A crash after the stage takes the source security, but before the rename,
+/// leaves that security on a retained stage. Recovery accepts it only after
+/// commit intent.
+#[cfg(windows)]
+#[test]
+fn an_interrupted_attempt_with_the_source_security_reopens_after_commit_intent() {
+    let mut fixture = Fixture::new();
+    let binding = fixture.binding();
+    let source = fixture.workspace.join("source.txt");
+    let twin = fixture.workspace.join("twin.txt");
+    fs::write(&twin, b"twin").expect("twin");
+    grant_users_read(&source);
+    grant_users_read(&twin);
+    let id = uncertain_id(fixture.apply(&binding, |store| {
+        store.inject_publication_fault("before_native_commit");
+    }));
+    let stage = fixture.operation_dir(id).join("stage");
+    assert!(
+        !grants_users(&stage),
+        "the stage is private before the attempt"
+    );
+    copy_security(&twin, &stage);
+    assert!(grants_users(&stage), "fixture recreates the crash state");
+
+    let inspection = fixture
+        .inspect()
+        .expect("an interrupted attempt is accepted after commit intent");
+    assert_eq!(
+        operation(&inspection, id).progress,
+        ReplacementProgress::CommitIntended
+    );
+    assert_eq!(fs::read(&stage).expect("stage preserved"), PROPOSED);
+    assert_eq!(fs::read(&source).expect("target unchanged"), ORIGINAL);
+}
+
+/// Before commit intent the stage must still be private, even when its
+/// security exactly matches the source.
+#[cfg(windows)]
+#[test]
+fn a_conflict_stage_with_the_source_security_fails_closed() {
+    let mut fixture = Fixture::new();
+    let binding = fixture.binding();
+    let target = fixture.workspace.join("source.txt");
+    let twin = fixture.workspace.join("twin.txt");
+    fs::write(&twin, b"twin").expect("twin");
+    grant_users_read(&target);
+    grant_users_read(&twin);
+    let workspace = fixture.workspace.clone();
+    let result = fixture.apply(&binding, |_store| {
+        let replacement = workspace.join("independent.txt");
+        fs::write(&replacement, ORIGINAL).expect("write independent file");
+        fs::rename(replacement, workspace.join("source.txt")).expect("replace target");
+    });
+    assert!(matches!(
+        result,
+        Err(FileError::Checkpoint(CheckpointError::Conflict))
+    ));
+    let inspection = fixture.inspect().expect("inspect conflict evidence");
+    let id = inspection
+        .operations
+        .iter()
+        .find(|record| record.progress == ReplacementProgress::StagePrepared)
+        .expect("stage-prepared conflict record")
+        .operation_id;
+    let stage = fixture.operation_dir(id).join("stage");
+    assert!(!grants_users(&stage), "a conflict retains a private stage");
+    copy_security(&twin, &stage);
+    assert!(
+        fixture.inspect().is_err(),
+        "a non-private stage before commit intent fails closed"
+    );
+    assert_eq!(fs::read(&stage).expect("stage preserved"), PROPOSED);
 }
 
 #[test]

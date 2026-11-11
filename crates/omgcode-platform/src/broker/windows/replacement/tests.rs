@@ -409,6 +409,36 @@ fn the_stage_stays_private_until_commit_while_the_source_grants_others() {
 }
 
 #[test]
+fn a_failed_restore_is_reported_and_leaves_the_source_security() {
+    let fixture = Fixture::with_source(b"before");
+    let user = current_user_ace_sid(&fixture.path);
+    set_dacl(&fixture.path, &format!("P(A;;FA;;;{user})(A;;FR;;;BU)"));
+    let mut target = fixture.target();
+    target.hook = Some(Arc::new(|point| match point {
+        TestPoint::Rename => Err(io::Error::other("injected rename fault")),
+        TestPoint::RestorePrivacy => Err(io::Error::other("injected restore fault")),
+        _ => Ok(()),
+    }));
+    let source = descriptor(target.capture()).to_owned();
+    let mut stage = target
+        .prepare_stage(fixture.directory(), b"after")
+        .expect("stage");
+    let error = target
+        .commit(&mut stage, || Ok(()))
+        .expect_err("rename fault");
+    assert!(
+        error
+            .to_string()
+            .contains("the stage keeps the source security"),
+        "a failed restore must be reported: {error}"
+    );
+    assert_eq!(fs::read(&fixture.path).expect("unchanged"), b"before");
+    let retained = File::open(fixture.stage_path()).expect("open stage");
+    assert!(!is_private_file(&retained).expect("stage security"));
+    assert_eq!(read_security(&retained).expect("stage security"), source);
+}
+
+#[test]
 fn a_conflict_retains_a_private_stage() {
     let fixture = Fixture::with_source(b"same");
     let user = current_user_ace_sid(&fixture.path);

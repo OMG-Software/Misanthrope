@@ -87,6 +87,7 @@ enum TestPoint {
     StageSync,
     SourceParentSync,
     TargetParentSync,
+    RestorePrivacy,
 }
 
 /// One object and version. Access time is excluded because reads change it.
@@ -373,7 +374,7 @@ impl ReplacementTarget<'_> {
             rename_onto(&stage.file, &self.parent, &self.name)
         });
         if let Err(error) = attempt {
-            return Err(match restore_privacy(stage, &private) {
+            return Err(match self.restore_privacy(stage, &private) {
                 Ok(()) => error,
                 Err(restore) => io::Error::new(
                     error.kind(),
@@ -416,6 +417,26 @@ impl ReplacementTarget<'_> {
         Ok(())
     }
 
+    /// Put back the owner-only DACL after a failed attempt left the name
+    /// unchanged. Only the stage changes. The core accepts either state after
+    /// commit intent.
+    fn restore_privacy(
+        &self,
+        stage: &mut ReplacementStage,
+        private: &NativeSecurity,
+    ) -> io::Result<()> {
+        #[cfg(test)]
+        self.run_hook(TestPoint::RestorePrivacy)?;
+        apply_native_security(&stage.file, private)?;
+        stage.file.sync_all()?;
+        let metadata = stage_metadata(&stage.file)?;
+        if !is_private_file(&stage.file)? || metadata.security != *private {
+            return Err(invalid_data("replacement stage privacy was not restored"));
+        }
+        stage.metadata = metadata;
+        Ok(())
+    }
+
     #[cfg(test)]
     fn run_hook(&self, point: TestPoint) -> io::Result<()> {
         if let Some(hook) = &self.hook {
@@ -430,19 +451,6 @@ impl ReplacementStage {
     pub fn identity(&self) -> io::Result<PrivateFileIdentity> {
         Ok(stage_metadata(&self.file)?.identity)
     }
-}
-
-/// Put back the owner-only DACL after a failed attempt left the name unchanged.
-/// Only the stage changes. The core accepts either state after commit intent.
-fn restore_privacy(stage: &mut ReplacementStage, private: &NativeSecurity) -> io::Result<()> {
-    apply_native_security(&stage.file, private)?;
-    stage.file.sync_all()?;
-    let metadata = stage_metadata(&stage.file)?;
-    if !is_private_file(&stage.file)? || metadata.security != *private {
-        return Err(invalid_data("replacement stage privacy was not restored"));
-    }
-    stage.metadata = metadata;
-    Ok(())
 }
 
 fn validate_stage(stage: &ReplacementStage) -> io::Result<()> {
