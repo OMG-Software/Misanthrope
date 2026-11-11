@@ -2,11 +2,14 @@
 //!
 //! Linux requires openat2 and procfs. Other backends refuse before I/O until
 //! private ACL and directory persistence requirements have been qualified.
+//! The separate Windows backend is not yet wired to `PrivateDirectory`.
 
 #[cfg(target_os = "linux")]
 pub(crate) mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::PrivateDirectory;
+#[cfg(windows)]
+pub mod windows;
 
 /// Native identity metadata for one already-open private regular file.
 /// These values do not authorize access or prove checkpoint durability.

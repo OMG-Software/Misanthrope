@@ -102,9 +102,12 @@ authorization. See
   growth. This layout cannot detect complete erasure of both checkpoint paths.
   Operator inspection/acknowledgement cannot grant authority or expose payload
   bytes.
-  Windows private storage must refuse until ACL and directory persistence are
-  qualified; the older journal helper's Windows directory-sync no-op is not a
-  checkpoint durability primitive.
+  The core must keep refusing Windows private storage until capture and
+  publication are reviewed. The Windows backend must verify exact protected
+  per-user DACLs and refuse a failed directory flush. That flush has no Microsoft
+  durability contract, so it must not be described as power-loss safe. The older
+  journal helper's Windows directory-sync no-op is not a checkpoint durability
+  primitive.
 - Linux apply must retain the source and both parents, check the same ext4
   mount, preserve supported owner/group/mode, and refuse unsupported metadata.
   Verify the stage before syncing commit intent. Recheck the native objects and

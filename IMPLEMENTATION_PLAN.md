@@ -193,6 +193,13 @@ at that review boundary:
     metadata, durable intent, native publication, and uncertain-outcome recovery.
     Other filesystems and Windows refuse apply. Release filesystem and power-loss
     qualification, Windows ACLs, and restore remain open.
+  - **A3a (this branch, `codex/windows-private-store`):** Windows NTFS private
+    store with exact per-user DACLs, as a separate public type the core does not
+    use. No capture, publication, or behaviour change. See
+    [ADR-0023](docs/adr/0023-store-windows-checkpoints-with-verified-acls.md).
+  - **A3b (next):** Windows capture, security-metadata preservation, and
+    retained-handle publication, then wire the store to `PrivateDirectory` and
+    lift the core's refusal. ADR-0023 records the observed rename behaviour.
 
 Contract decisions accepted in A1:
 
@@ -299,4 +306,5 @@ release readiness remain separate gates.
 - The edit preview is a snapshot, not a lock or an apply token. A later
   replacement must recheck content identity.
 - Native containment, Windows ACL hardening, directory power-loss durability,
-  and release filesystem support remain unqualified.
+  and release filesystem support remain unqualified. The Windows directory flush
+  has no Microsoft durability contract; never describe it as power-loss safe.

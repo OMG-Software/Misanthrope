@@ -21,7 +21,7 @@ containment.
 | Workspace file broker | Bounded read/list/exclusive-create/single-directory creation through trusted CLI commands; release filesystem support is not qualified |
 | Model file tools | Disabled; `workspace_file_tools` remains false |
 | Linux broker prerequisites | Linux 5.6 or later for required `openat2`; `/proc/self/fd` must be available for pinned-file reads; unsupported features fail closed |
-| Checkpoint preparation/storage | Linux-only core API; openat2/procfs, current-user mode0700 directories/mode0600 files, native birth-time metadata and real file/directory sync required; Windows unavailable |
+| Checkpoint preparation/storage | Linux-only core API; openat2/procfs, current-user mode0700 directories/mode0600 files, native birth-time metadata and real file/directory sync required; Windows unavailable through the core, with an unwired NTFS private-store backend (ADR-0023) |
 | Trusted apply | Linux ext4 prototype only; positive statx mount ID (Linux 5.8 or later), same mount, supported file metadata, and file/parent sync required; Windows unavailable |
 | macOS | Outside the first-release target |
 

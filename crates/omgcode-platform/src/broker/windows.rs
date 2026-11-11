@@ -24,8 +24,9 @@ use windows_sys::Wdk::Storage::FileSystem::{
 };
 use windows_sys::Win32::Foundation::{
     HANDLE, NTSTATUS, OBJ_CASE_INSENSITIVE, OBJ_DONT_REPARSE, STATUS_NO_MORE_FILES,
-    STATUS_OBJECT_NAME_COLLISION, UNICODE_STRING,
+    STATUS_OBJECT_NAME_COLLISION, STATUS_OBJECT_NAME_NOT_FOUND, UNICODE_STRING,
 };
+use windows_sys::Win32::Security::SECURITY_DESCRIPTOR;
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_ACCESS_RIGHTS, FILE_ATTRIBUTE_DEVICE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
     FILE_ATTRIBUTE_REPARSE_POINT, FILE_BASIC_INFO, FILE_FLAG_BACKUP_SEMANTICS,
@@ -43,8 +44,8 @@ use super::{CreateError, DirectoryEntry, EntryKind, Listing, RelativePath};
 const WINDOWS_EPOCH_TICKS: i64 = 116_444_736_000_000_000;
 const DIRECTORY_BUFFER_BYTES: usize = 64 * 1024;
 const MAX_COMPONENT_UNITS: usize = 255;
-const SHARE_READ_WRITE: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE;
-const DIRECTORY_ACCESS: FILE_ACCESS_RIGHTS = FILE_LIST_DIRECTORY
+pub(crate) const SHARE_READ_WRITE: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE;
+pub(crate) const DIRECTORY_ACCESS: FILE_ACCESS_RIGHTS = FILE_LIST_DIRECTORY
     | FILE_TRAVERSE
     | FILE_READ_ATTRIBUTES
     | windows_sys::Win32::Storage::FileSystem::SYNCHRONIZE;
@@ -377,7 +378,7 @@ fn open_relative_file(parent: &File, name: &OsStr, volume: u64) -> io::Result<Fi
 ///
 /// `OBJ_DONT_REPARSE` is required for traversal. `FILE_OPEN_REPARSE_POINT`
 /// makes the final object inspectable rather than following its reparse data.
-fn open_relative(
+pub(crate) fn open_relative(
     parent: &File,
     name: &OsStr,
     access: FILE_ACCESS_RIGHTS,
@@ -394,6 +395,34 @@ fn open_relative(
         options,
         share_access,
         attributes,
+        std::ptr::null(),
+    )
+    .map_err(|failure| failure.error)
+}
+
+/// Exclusively create one entry with an explicit security descriptor.
+///
+/// The descriptor is applied by the same native create, so the entry never has
+/// an inherited ACL. `security` and everything it points to must stay valid for
+/// this synchronous call. An error may leave an entry; do not retry or delete it.
+pub(crate) fn create_relative_secured(
+    parent: &File,
+    name: &OsStr,
+    access: FILE_ACCESS_RIGHTS,
+    options: u32,
+    share_access: u32,
+    attributes: u32,
+    security: &SECURITY_DESCRIPTOR,
+) -> io::Result<File> {
+    open_relative_inner(
+        parent,
+        name,
+        access,
+        FILE_CREATE,
+        options,
+        share_access,
+        attributes,
+        security,
     )
     .map_err(|failure| failure.error)
 }
@@ -415,6 +444,7 @@ fn create_relative(
         options,
         share_access,
         attributes,
+        std::ptr::null(),
     )
     .map_err(|failure| create_error(failure.error, failure.may_have_created))
 }
@@ -425,6 +455,10 @@ struct RelativeOpenFailure {
 }
 
 #[allow(unsafe_code)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each value is a distinct NtCreateFile input at this FFI boundary"
+)]
 fn open_relative_inner(
     parent: &File,
     name: &OsStr,
@@ -433,6 +467,7 @@ fn open_relative_inner(
     options: u32,
     share_access: u32,
     attributes: u32,
+    security: *const SECURITY_DESCRIPTOR,
 ) -> Result<File, RelativeOpenFailure> {
     // Every returned handle must preserve the synchronous buffer-lifetime contract.
     if options & FILE_SYNCHRONOUS_IO_NONALERT == 0
@@ -471,7 +506,7 @@ fn open_relative_inner(
         RootDirectory: parent.as_raw_handle() as HANDLE,
         ObjectName: &mut name,
         Attributes: OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE,
-        SecurityDescriptor: std::ptr::null(),
+        SecurityDescriptor: security,
         SecurityQualityOfService: std::ptr::null(),
     };
     let mut raw = std::ptr::null_mut();
@@ -482,7 +517,8 @@ fn open_relative_inner(
     // validated component. The object-attributes and I/O-status structures
     // remain alive and writable for this synchronous call. The API receives no
     // borrowed data that outlives the call; successful handle ownership moves
-    // into `File` below. No ambient child-path reopen occurs. The documented
+    // into `File` below. `security` is null or, per `create_relative_secured`,
+    // valid for this call. No ambient child-path reopen occurs. The documented
     // NtCreateFile contract returns a final success or error status; this code
     // accepts only STATUS_SUCCESS and rejects STATUS_PENDING or other positive
     // values without reading output fields.
@@ -558,7 +594,7 @@ fn require_directory_identity(
     validate_directory(file, volume)
 }
 
-fn validate_directory(file: &File, volume: u64) -> io::Result<()> {
+pub(crate) fn validate_directory(file: &File, volume: u64) -> io::Result<()> {
     let attributes = query_attributes(file)?;
     let standard = query_standard(file)?;
     let identity = query_identity(file)?;
@@ -575,7 +611,7 @@ fn validate_directory(file: &File, volume: u64) -> io::Result<()> {
     Ok(())
 }
 
-fn validate_regular_file(file: &File, volume: u64) -> io::Result<()> {
+pub(crate) fn validate_regular_file(file: &File, volume: u64) -> io::Result<()> {
     let attributes = query_attributes(file)?;
     let standard = query_standard(file)?;
     let identity = query_identity(file)?;
@@ -663,7 +699,7 @@ fn query_standard(file: &File) -> io::Result<FILE_STANDARD_INFO> {
 }
 
 #[allow(unsafe_code)]
-fn query_identity(file: &File) -> io::Result<FILE_ID_INFO> {
+pub(crate) fn query_identity(file: &File) -> io::Result<FILE_ID_INFO> {
     // SAFETY: `FileIdInfo` returns exactly `FILE_ID_INFO`.
     unsafe { query_info(file, FileIdInfo) }
 }
@@ -674,7 +710,7 @@ fn query_basic(file: &File) -> io::Result<FILE_BASIC_INFO> {
     unsafe { query_info(file, FileBasicInfo) }
 }
 
-fn creation_time(file: &File) -> io::Result<SystemTime> {
+pub(crate) fn creation_time(file: &File) -> io::Result<SystemTime> {
     let info = query_basic(file)?;
     filetime_ticks_to_system_time(info.CreationTime)
 }
@@ -707,7 +743,10 @@ fn filetime_ticks_to_system_time(ticks: i64) -> io::Result<SystemTime> {
 }
 
 #[allow(unsafe_code)]
-fn query_directory_batch(directory: &File, restart: bool) -> io::Result<Vec<(OsString, u32)>> {
+pub(crate) fn query_directory_batch(
+    directory: &File,
+    restart: bool,
+) -> io::Result<Vec<(OsString, u32)>> {
     let units = DIRECTORY_BUFFER_BYTES / size_of::<u64>();
     let mut storage = vec![0u64; units];
     let mut io_status = IO_STATUS_BLOCK::default();
@@ -842,7 +881,7 @@ fn read_u32_field(bytes: &[u8], base: usize, field_offset: usize) -> io::Result<
     read_u32(bytes, offset)
 }
 
-fn is_dot_entry(name: &OsStr) -> bool {
+pub(crate) fn is_dot_entry(name: &OsStr) -> bool {
     let units: Vec<u16> = name.encode_wide().collect();
     units == [46] || units == [46, 46]
 }
@@ -854,10 +893,31 @@ fn native_error(status: NTSTATUS) -> io::Error {
             "workspace entry already exists",
         );
     }
-    io::Error::other(format!(
-        "Windows native file operation failed (NTSTATUS 0x{:08X})",
-        status as u32
-    ))
+    io::Error::other(NativeStatus(status))
+}
+
+/// Keeps the native status inside an unchanged `ErrorKind::Other` broker error.
+#[derive(Debug)]
+struct NativeStatus(NTSTATUS);
+
+impl std::fmt::Display for NativeStatus {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            output,
+            "Windows native file operation failed (NTSTATUS 0x{:08X})",
+            self.0 as u32
+        )
+    }
+}
+
+impl std::error::Error for NativeStatus {}
+
+/// Reports whether a native open failed because its single name was absent.
+pub(crate) fn is_name_not_found(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<NativeStatus>())
+        .is_some_and(|status| status.0 == STATUS_OBJECT_NAME_NOT_FOUND)
 }
 
 fn create_error(error: io::Error, may_have_created: bool) -> CreateError {
@@ -876,7 +936,7 @@ fn invalid_data(message: &'static str) -> io::Error {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
@@ -1182,7 +1242,7 @@ mod tests {
         assert!(!outside.join("new.txt").exists());
     }
 
-    fn create_junction_bounded(link: &Path, target: &Path) -> io::Result<()> {
+    pub(crate) fn create_junction_bounded(link: &Path, target: &Path) -> io::Result<()> {
         use std::os::windows::process::CommandExt;
         use std::process::{Command, Stdio};
         use std::thread;
