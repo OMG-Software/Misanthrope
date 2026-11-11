@@ -275,8 +275,10 @@ snapshot still matches. Check that the stage keeps its owner-only DACL through
 preparation, rechecks, conflicts, and failures before the rename, even when the
 source grants other principals. Inject a failed privacy restore, and recreate the
 crash state by copying the exact source descriptor onto a retained stage: recovery
-must accept it after commit intent and refuse it before. Tests do not cover
-audit SACLs, a foreign owner,
+must accept it after commit intent and refuse it before. Write the source DACL
+and the copy through the same API and assert the copy matches exactly: .NET
+`FileSecurity` reorders access entries, and an elevated runner adds its own
+default entries. Tests do not cover audit SACLs, a foreign owner,
 a second local user, a real second volume, ReFS, filter drivers, or physical
 power loss.
 

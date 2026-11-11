@@ -172,18 +172,18 @@ fn current_user_sid() -> String {
         .to_owned()
 }
 
-/// Gives `path` an explicit protected DACL: full access for the current user
-/// and read access for BUILTIN\Users.
+/// Gives `path` exactly this protected DACL: full access for the current user
+/// and read access for BUILTIN\Users. It replaces every existing entry, so the
+/// result does not depend on the runner's default ACL.
 #[cfg(windows)]
 fn grant_users_read(path: &Path) {
-    let sid = current_user_sid();
-    icacls(&[
-        path.as_os_str(),
-        "/inheritance:r".as_ref(),
-        "/grant:r".as_ref(),
-        format!("*{sid}:F").as_ref(),
-        "*S-1-5-32-545:R".as_ref(),
-    ]);
+    let dacl = format!("D:P(A;;FA;;;{})(A;;FR;;;BU)", current_user_sid());
+    run_security_script(
+        "$dacl = [System.Security.AccessControl.FileSecurity]::new(); \
+         $dacl.SetSecurityDescriptorSddlForm($env:OMG_SDDL, 'Access'); \
+         [System.IO.File]::SetAccessControl($env:OMG_TO, $dacl)",
+        &[("OMG_SDDL", dacl.as_ref()), ("OMG_TO", path.as_os_str())],
+    );
 }
 
 /// Reports whether `path` grants BUILTIN\Users access.
@@ -209,30 +209,39 @@ fn native_security(path: &Path) -> omgcode_platform::private_store::NativeSecuri
 
 /// Copies the owner, group, and protected DACL of `from` onto `to`, as an
 /// interrupted commit attempt would leave a stage.
+///
+/// .NET writes access entries in its own canonical order, while recovery
+/// compares descriptors exactly. `from` must have been written by
+/// `grant_users_read`, which uses the same API, so its order already matches.
 #[cfg(windows)]
 fn copy_security(from: &Path, to: &Path) {
+    run_security_script(
+        "$parts = [System.Security.AccessControl.AccessControlSections]'Owner,Group,Access'; \
+         $sddl = [System.IO.File]::GetAccessControl($env:OMG_FROM).GetSecurityDescriptorSddlForm($parts); \
+         $copy = [System.Security.AccessControl.FileSecurity]::new(); \
+         $copy.SetSecurityDescriptorSddlForm($sddl, $parts); \
+         [System.IO.File]::SetAccessControl($env:OMG_TO, $copy)",
+        &[("OMG_FROM", from.as_os_str()), ("OMG_TO", to.as_os_str())],
+    );
+}
+
+/// Runs a Windows PowerShell security fixture with values passed through the
+/// environment.
+///
+/// It uses .NET only, no cmdlets: a module path inherited from another shell
+/// can stop Windows PowerShell loading them. `Set-Acl` would also write the
+/// audit SACL, which needs elevation.
+#[cfg(windows)]
+fn run_security_script(script: &str, values: &[(&str, &std::ffi::OsStr)]) {
     let output = std::process::Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            // .NET only, no cmdlets: a module path inherited from another shell
-            // can stop Windows PowerShell loading them. Set-Acl would also
-            // write the audit SACL, which needs elevation.
-            "$parts = [System.Security.AccessControl.AccessControlSections]'Owner,Group,Access'; \
-             $sddl = [System.IO.File]::GetAccessControl($env:OMG_FROM).GetSecurityDescriptorSddlForm($parts); \
-             $copy = [System.Security.AccessControl.FileSecurity]::new(); \
-             $copy.SetSecurityDescriptorSddlForm($sddl, $parts); \
-             [System.IO.File]::SetAccessControl($env:OMG_TO, $copy)",
-        ])
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .env_remove("PSModulePath")
-        .env("OMG_FROM", from)
-        .env("OMG_TO", to)
+        .envs(values.iter().copied())
         .output()
         .expect("powershell");
     assert!(
         output.status.success() && output.stderr.is_empty(),
-        "security copy fixture failed: {}",
+        "security fixture failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 }
