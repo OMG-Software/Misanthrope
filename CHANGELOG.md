@@ -149,6 +149,9 @@ Changes are recorded here before a release version is assigned.
 
 ### Changed
 
+- The SonarQube Cloud project key is now `OMG-Software_OMGCode`, matching the
+  key a Sonar administrator set on the server. `sonar-project.properties` and
+  the repository-checks guide use the new key.
 - Rename the project and GitHub repository to OMGCode. Version 0.7.0 uses
   `omgcode-*` Rust crates, the `omgcode` command, `OMGCODE_LM_TOKEN`, the OMGCode
   application-data identity, and `omgcode-` session filenames. Prompt version
