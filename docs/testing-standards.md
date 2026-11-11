@@ -27,7 +27,12 @@ The 0.14.0 Linux confinement tests run that child under Landlock and seccomp
 and record each probe's errno: Landlock denials report `EACCES`, and socket
 denials report `EPERM`. A classic-BPF interpreter in the unit tests evaluates
 every filter branch. These tests ran on WSL 6.6 with Landlock ABI 3; they do not
-qualify other kernels. See [workspace permissions](workspace-permissions.md)
+qualify other kernels. The 0.15.0 Windows tests copy the test binary into a
+granted directory, run it in a fresh AppContainer, and record each probe as
+`ok`, `denied`, or the OS error. The same probes run unconfined as a positive
+control. Grant tests change real ACLs on temporary NTFS directories, and each
+test container deletes its profile when dropped, so runs leave no per-user
+AppContainer profiles. These tests ran on Windows 11 build 26300. See [workspace permissions](workspace-permissions.md)
 and the [workspace file-access contract](file-access.md) for their scope and
 current limits. [Repository review and analysis](repository-checks.md) have
 separate workflows.
@@ -132,6 +137,8 @@ As the relevant components are implemented, include:
 | Turn/tool lifecycle | Fresh bindings, strict schemas, unknown/malformed/duplicate calls, round/call/byte limits, cancellation, deadline, source labels, denial at the broker, no replay |
 | Process-tree runner | Exit codes, exact environment, argument quoting, bounded output, deadline, cancellation, descendant escape attempts, inherited handles, observed cleanup, invalid specifications |
 | Linux confinement | Read-only and read-write rules, path truncation, denied host files and directories, inheritance by descendants, IP and `io_uring` denial in both Unix-socket modes, Unix-socket and datagram-pair denial in `PairsOnly`, host Unix-socket connection, workspace socket binding, and datagram pairs in `HostServices`, unexecutable programs, missing/link/special confinement paths, ABI selection below and above the minimum |
+| Windows confinement | Granted read-only and read-write paths, denied host files, directories, named pipe, and loopback TCP, a writable container temporary directory, inheritance by descendants, the same probes unconfined, missing, weaker, and foreign grants, a missing profile, `LOCALAPPDATA`, or container name, refused `HostServices`, an ungranted program |
+| Container grants | SID derivation, propagation to existing and new children, exact read-back, protection state kept, junctions not followed, hard-link reach, refused replaced/junction/file/relative paths, profile creation and deletion, journal intent and outcome order, replay validation, revision rules, scope refusals, pending and revoking recovery, the revocation reserve, CLI grant/list/revoke, refusal off Windows |
 | Model tool chat | Preference off by default and rechecked per call, settings compatibility, confinement against parent, absolute, rooted, UNC, link, junction, and hard-link paths, strict provider tool-call parsing, token removal before journal and model, refusal of token-bearing calls, withheld replay after revocation, finish reason, one call per turn in escape cases |
 | MCP | Version/transport compatibility, authorization, untrusted content, local confinement, OAuth/redirects, cancellation |
 | LM Studio | Model discovery, token/no-token profiles, streamed tools, context limits, unavailable models, no hosted-tool bypass |

@@ -3,12 +3,14 @@
 //! The rules are an allowlist: a confined program can reach only the listed
 //! paths, cannot create IP sockets, follows the selected Unix-domain socket
 //! mode, and passes the same restrictions to every descendant. Linux
-//! applies them with Landlock and seccomp; Windows refuses confined runs until
-//! the AppContainer increment exists. See `docs/execution.md` and ADR-0028.
+//! applies them with Landlock and seccomp. Windows runs the tree in an
+//! AppContainer and checks that each listed path is already granted to it.
+//! See `docs/execution.md`, ADR-0028, and ADR-0029.
 
 use std::path::{Path, PathBuf};
 
 use super::{ProcessError, contains_nul};
+use crate::container::ContainerName;
 
 /// Largest number of paths, read-only and read-write together, in one confinement.
 pub const MAX_CONFINEMENT_PATHS: usize = 64;
@@ -25,6 +27,13 @@ pub const MAX_CONFINEMENT_PATHS: usize = 64;
 /// link, so a rule always names the object the caller checked. A directory
 /// rule covers everything beneath it. Rules are additive: a read-only entry
 /// inside a read-write directory is still writable.
+///
+/// On Windows the rules are not applied at start. Access comes from the
+/// persistent grants made with [`crate::container::grant`]; each listed path
+/// must already carry a grant of at least its listed level for
+/// [`Confinement::container`], or nothing starts. Paths every application
+/// package can read, such as the Windows directory, stay readable, and grants
+/// that are not listed still apply.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Confinement {
     /// Paths whose contents may be read and executed, and whose directories
@@ -36,7 +45,11 @@ pub struct Confinement {
     /// The workspace and a private scratch directory belong here.
     pub read_write: Vec<PathBuf>,
     /// Which Unix-domain sockets the tree may create. Defaults to pairs only.
+    /// Windows refuses [`UnixSocketAccess::HostServices`].
     pub unix_sockets: UnixSocketAccess,
+    /// The AppContainer identity for the run. Windows requires it; Linux
+    /// ignores it.
+    pub container: Option<ContainerName>,
 }
 
 /// Which Unix-domain sockets a confined tree may create. IP and every other
@@ -98,4 +111,9 @@ pub enum AppliedConfinement {
         /// The Unix-domain socket mode the seccomp filter enforced.
         unix_sockets: UnixSocketAccess,
     },
+    /// An AppContainer with no capabilities, derived from
+    /// [`Confinement::container`], inside the run's job object. It has no
+    /// network access, including loopback, and reaches only granted paths and
+    /// paths every application package can reach.
+    AppContainer,
 }

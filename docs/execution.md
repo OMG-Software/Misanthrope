@@ -13,14 +13,19 @@ Version 0.13.0 added the **process-tree runner core** in the
 `omgcode-platform` crate (`process::run`). It applies no filesystem or network
 confinement.
 
-Version 0.14.0 adds **`process::run_confined`**, which applies the
+Version 0.14.0 added **`process::run_confined`**, which applies the
 [Linux confinement](#linux-confinement) below: a Landlock filesystem allowlist
-and a seccomp socket filter. On Windows it returns `Unsupported` until C3.
+and a seccomp socket filter.
 
-No CLI command, model tool, or core API calls either function. Settings
-reports keep `execution_allowed: false`. Do not describe this as command
-support, and do not describe Linux confinement as qualified beyond the tested
-kernel.
+Version 0.15.0 adds [Windows confinement](#windows-confinement): the tree runs
+in a per-workspace AppContainer with no capabilities, and trusted CLI commands
+record and apply the [container grants](#container-grants) that decide what it
+can reach.
+
+No CLI command, model tool, or core API calls `run` or `run_confined`.
+Settings reports keep `execution_allowed: false`. Do not describe this as
+command support, and do not describe either confinement as qualified beyond
+the tested kernel and Windows build.
 
 ## Accepted decisions
 
@@ -90,9 +95,14 @@ specification and limits as `run`, plus a `Confinement`:
 | --- | --- |
 | `read_only` | Paths that may be read, listed, and executed. Toolchain roots, system libraries, and the program belong here. |
 | `read_write` | Paths that may also be written, created, renamed, truncated, and removed beneath. The workspace and a private scratch directory belong here. |
-| `unix_sockets` | `PairsOnly` (default) or `HostServices`; see below. |
+| `unix_sockets` | `PairsOnly` (default) or `HostServices`; see below. Windows refuses `HostServices`. |
+| `container` | The workspace container name. Windows requires it; Linux ignores it. |
 
-Rules:
+On Windows the paths are not applied at start: access comes from the
+persistent [container grants](#container-grants), and the paths are checked
+against them. See [Windows confinement](#windows-confinement).
+
+Linux rules:
 
 - Filesystem operations that Landlock handles are denied outside the listed
   paths, including in the user's home directory and other host data. Metadata
@@ -109,7 +119,8 @@ Rules:
   primitive, or an old kernel starts nothing. A program that the rules do not
   let the kernel execute fails as `Spawn` with `EACCES`.
 - The outcome's `confinement` field records what applied:
-  `Unconfined` for `run`, or `Landlock { abi, unix_sockets }`.
+  `Unconfined` for `run`, `Landlock { abi, unix_sockets }` on Linux, or
+  `AppContainer` on Windows.
 
 ### Unix-domain sockets
 
@@ -127,6 +138,51 @@ it also exposes the D-Bus session bus, SSH agents, and any other socket the
 user can open. Access to the Docker daemon is usually equivalent to root on the
 host. A later caller must make this an explicit, recorded operator choice and
 must never select it for a model.
+
+On Windows, `HostServices` is refused with `Unsupported`. In `PairsOnly` mode a
+host named pipe or Unix socket is reachable only when its own ACL admits the
+container or every application package; a pipe with the default security
+descriptor is not. The tree can still create pipes and sockets of its own.
+
+## Container grants
+
+A grant gives one workspace's container access to one directory and everything
+beneath it. Grants are lasting ACL entries, recorded in the control journal.
+
+| Command | Effect |
+| --- | --- |
+| `omgcode workspace container-grant <id> <path> --access read-write --revision <n>` | Grant the workspace directory itself. No other directory may be granted read-write. |
+| `omgcode workspace container-grant <id> <path> --access read-execute --revision <n>` | Grant the workspace, a directory inside it, or a directory outside the development root, such as `%USERPROFILE%\.cargo`. |
+| `omgcode workspace container-revoke <grant-id>` | Remove the entry and record it. Needs no revision. |
+| `omgcode workspace status` | Lists outstanding grants as `pending`, `active`, or `revoking`. |
+
+Rules:
+
+- The container is `OMGCode.Workspace.<workspace id as 32 hex digits>`. Its SID
+  is derived from that name, so it is stable for the workspace.
+- No grant may overlap application storage. A read grant may not cover the
+  development root or another workspace. One grant per workspace and directory;
+  revoke it before changing its level. At most 32 grants per workspace and 256
+  in all.
+- The journal syncs `container_grant_requested` before the ACL changes; it
+  needs the expected settings revision and advances it. After the change is
+  read back, `container_grant_applied` marks the grant `active`. If the change
+  fails, the grant stays `pending`, because the entry may exist; revoke it.
+- Revocation records `container_revoke_requested`, removes the entry, confirms
+  none remains, and records `container_grant_revoked`. If removal fails, the
+  grant stays `revoking`; running the revocation again retries it. Revocation
+  outcomes keep the revision.
+- Every other journal append must leave room, in events and bytes, for each
+  outstanding grant to reach a confirmed revocation, so a full journal never
+  strands container access.
+- The first grant creates the container's AppContainer profile. Revoking the
+  container's last grant deletes the profile and its folder. If that deletion
+  fails, the command reports an error after the revocation was recorded.
+- The granted directory must still be the recorded one, by volume and file
+  identity. A moved or replaced directory cannot be revoked through OMGCode
+  until it is back at its recorded path.
+- Grants work only on Windows. Elsewhere `container-grant` fails and records
+  nothing.
 
 ## Platform mechanics
 
@@ -147,6 +203,47 @@ must never select it for a model.
   are gone. A member's process object can become signaled shortly after the
   count reaches zero, while the kernel finishes its exit, so a check for that
   object must allow a short wait.
+
+### Windows confinement
+
+For `run_confined`, the runner checks before anything starts:
+
+1. `unix_sockets` is not `HostServices`; otherwise `Unsupported`.
+2. `container` is set; otherwise `InvalidSpec`.
+3. The container's profile exists; otherwise a `Confinement` error. The runner
+   never creates a profile.
+4. `LOCALAPPDATA` is in the environment; otherwise `InvalidSpec`. Windows needs
+   it to start an AppContainer process. It replaces it with the container's
+   folder, `%LOCALAPPDATA%\Packages\<name>\AC`, and sets `TEMP` and `TMP` to
+   `AC\Temp`, which the container can write.
+5. Each `read_only` path allows the container at least read-execute, and each
+   `read_write` path read-write. Each path is opened without following a final
+   reparse point. Allow entries for the container SID or for every application
+   package count, inherited or explicit, less deny entries for them.
+6. The program allows the container read-execute. `CreateProcessW` maps the
+   image with the caller's token, so without this check a program the container
+   cannot read would still start.
+
+A failed check starts nothing. The runner then passes
+`PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES` with the container SID and no
+capabilities, beside the job and handle lists above. Every descendant stays in
+the same container and job.
+
+Grants are applied by `container::grant`:
+
+- Read-execute is `FILE_GENERIC_READ | FILE_GENERIC_EXECUTE`. Read-write adds
+  `FILE_GENERIC_WRITE | DELETE`, without `WRITE_DAC`, `WRITE_OWNER`, or
+  `FILE_DELETE_CHILD`. Both are inherited by directories and files.
+- The directory is opened with backup semantics and without following a final
+  reparse point. It must be an NTFS directory with the recorded identity.
+- `SetEntriesInAclW` replaces any explicit entry for the SID, and
+  `SetSecurityInfo` writes the DACL through the same handle, keeping its
+  protected state. Windows propagates the entry to existing children; on a
+  large tree this takes time, and the control journal stays locked meanwhile.
+  Propagation does not follow junctions.
+- The entry is read back and must be exactly one allow entry with the expected
+  mask and inheritance. Revocation removes every explicit allow entry for the
+  SID and confirms none remains.
 
 ### Linux
 
@@ -199,14 +296,30 @@ sockets ignore it.
 
 ## Known limits
 
-These remain true after C2 and must be addressed or documented by the increments
+These remain true after C3 and must be addressed or documented by the increments
 that expose execution:
 
 - **`run` is unconfined.** A program started by `run` can read and write
   anything the user can, use the network, and talk to host services. Only
-  `run_confined` applies the rules above, and only on Linux.
-- **Windows confinement.** `run_confined` returns `Unsupported` on Windows
-  until C3.
+  `run_confined` applies the rules above.
+- **Windows grants are lasting and shared.** Grants are ACL entries that stay
+  until revoked. A run's `Confinement` is checked against them, but grants it
+  does not list still apply to it. Programs running as the same user can add or
+  remove entries; the journal records only changes made through OMGCode.
+- **Windows reads beyond grants.** Paths that every application package may
+  read stay readable inside the container, including the Windows directory,
+  `Program Files`, and many machine registry keys.
+- **Windows hard links.** A hard link shares one security descriptor, so a
+  grant reaches the file under every name, including names outside the granted
+  directory. Grant directories that contain no hard links to host data.
+- **Windows ancestors.** The container can open granted paths below
+  directories it cannot read, but it cannot list or read those ancestors. Tools
+  that search parent directories for configuration may fail; this was not
+  tested.
+- **Windows loopback.** Loopback traffic is dropped without a reply, so a
+  connect fails only after the system timeout (about 21 seconds), not at once.
+- **Windows build coverage.** Windows confinement was tested on Windows 11
+  build 26300 only.
 - **Linux kernel coverage.** Confinement needs Landlock ABI 3 (Linux 6.2 or
   later) with Landlock enabled. It was tested on WSL 6.6 (ABI 3) only.
 - **What Landlock does not cover.** Landlock up to ABI 6 does not restrict
@@ -243,7 +356,7 @@ that expose execution:
 | Increment | Scope | Must establish |
 | --- | --- | --- |
 | C2 (0.14.0) | Linux Landlock filesystem rules and seccomp network denial | Done: see [confined runs](#confined-runs) and ADR-0028 |
-| C3 | Windows AppContainer | A per-workspace container identity, recorded and reversible access entries on the workspace and scratch, no network capability, denied host data |
-| C4 | Trusted CLI `run` and the `execute` preference | Toolchain profiles, a curated environment, recorded profile with each result, journal records, an explicit recorded choice before `HostServices`, and the acceptance cases in the development-tool contract |
+| C3 (0.15.0) | Windows AppContainer | Done: see [Windows confinement](#windows-confinement), [container grants](#container-grants), and ADR-0029 |
+| C4 | Trusted CLI `run` and the `execute` preference | Toolchain profiles, a curated environment, recorded profile with each result, journal records, an explicit recorded choice before `HostServices`, confinement built from the recorded grants on Windows, and the acceptance cases in the development-tool contract |
 
 Live qualification on each supported OS remains a separate gate.

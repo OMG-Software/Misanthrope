@@ -19,6 +19,8 @@ use super::{
 
 #[cfg(target_os = "linux")]
 mod confinement;
+#[cfg(windows)]
+mod windows_confinement;
 
 const FIXTURE_ENV: &str = "OMGCODE_PROCESS_FIXTURE";
 const RECORD_ENV: &str = "OMGCODE_PROCESS_FIXTURE_RECORD";
@@ -84,6 +86,10 @@ fn fixture() {
         "probe" => confinement::probes(),
         #[cfg(target_os = "linux")]
         "probe-grandchild" => confinement::grandchild_probes(),
+        #[cfg(windows)]
+        "probe" => windows_confinement::probes(),
+        #[cfg(windows)]
+        "probe-grandchild" => windows_confinement::grandchild_probes(),
         #[cfg(target_os = "linux")]
         "signal" => {
             rustix::process::kill_process(rustix::process::getpid(), rustix::process::Signal::TERM)
@@ -515,18 +521,6 @@ fn malformed_confinement_is_refused_before_start() {
             "{name}: {error}"
         );
     }
-}
-
-#[cfg(windows)]
-#[test]
-fn windows_refuses_confined_runs_until_appcontainer_exists() {
-    let confinement = Confinement {
-        read_only: vec![env::current_dir().expect("current directory")],
-        ..Confinement::default()
-    };
-    let error = run_confined(&spec("echo"), &confinement, &limits(), &CancelSignal::new())
-        .expect_err("confinement is not implemented on Windows");
-    assert!(matches!(error, ProcessError::Unsupported(_)), "{error}");
 }
 
 #[cfg(windows)]

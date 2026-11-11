@@ -22,6 +22,15 @@ use crate::policy::{
 use crate::storage::{self, StorageError};
 use crate::workspace::DirectoryRecord;
 
+mod container;
+
+pub use container::{
+    ContainerGrant, ContainerGrantAccess, ContainerGrantState, ContainerGrantStatus,
+    ContainerRevocation, container_name,
+};
+/// Whether this platform can record and apply container grants.
+pub use omgcode_platform::container::CONTAINER_GRANTS_SUPPORTED;
+
 const FILE_NAME: &str = "control-v1.jsonl";
 const MAX_BYTES: usize = 8 * 1024 * 1024;
 const MAX_EVENT_BYTES: usize = 64 * 1024;
@@ -67,6 +76,20 @@ pub enum ControlError {
     /// A previous write or sync had an uncertain outcome.
     #[error("control journal writer is poisoned")]
     Poisoned,
+    /// A container grant or revocation could not be applied or confirmed.
+    /// The journal keeps the grant visible and revocable.
+    #[error("container access change failed: {0}")]
+    Container(#[source] io::Error),
+    /// The last grant was revoked and recorded, but the container profile
+    /// could not be deleted.
+    #[error("the grant was revoked, but the container profile could not be deleted: {0}")]
+    ProfileRemoval(#[source] io::Error),
+    /// No recorded container grant has this identifier.
+    #[error("container grant is not recorded")]
+    UnknownGrant,
+    /// The requested container grant is outside the allowed scope.
+    #[error("container grant refused: {0}")]
+    GrantRefused(&'static str),
 }
 
 impl From<StorageError> for ControlError {
@@ -118,6 +141,8 @@ pub struct ControlSnapshot {
     #[serde(serialize_with = "serialize_workspace_views")]
     workspaces: Vec<WorkspaceRegistration>,
     configuration_only: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    container_grants: Vec<ContainerGrantStatus>,
 }
 
 /// Operator-facing workspace view that reports every preference explicitly.
@@ -192,6 +217,18 @@ enum Action {
         binding_revision: u64,
         operation: Operation,
         reason: DecisionReason,
+    },
+    ContainerGrantRequested {
+        grant: ContainerGrant,
+    },
+    ContainerGrantApplied {
+        grant_id: Uuid,
+    },
+    ContainerRevokeRequested {
+        grant_id: Uuid,
+    },
+    ContainerGrantRevoked {
+        grant_id: Uuid,
     },
 }
 
@@ -350,6 +387,7 @@ impl ControlStore {
                 development_root: None,
                 workspaces: Vec::new(),
                 configuration_only: true,
+                container_grants: Vec::new(),
             },
             entries: Vec::new(),
             bytes: 0,
@@ -686,6 +724,22 @@ impl ControlStore {
         if encoded.len() > MAX_EVENT_BYTES || bytes > MAX_BYTES {
             return Err(ControlError::LimitReached);
         }
+        // Keep room for every outstanding grant to reach a confirmed
+        // revocation, so a full journal never strands container access.
+        if !container::uses_grant_reserve(&entry.action) {
+            let (events, reserve) = Self::grant_reserve(&next);
+            let events_after = self
+                .entries
+                .len()
+                .checked_add(1)
+                .and_then(|count| count.checked_add(events));
+            let bytes_after = bytes.checked_add(reserve);
+            if events_after.is_none_or(|count| count > MAX_EVENTS)
+                || bytes_after.is_none_or(|size| size > MAX_BYTES)
+            {
+                return Err(ControlError::LimitReached);
+            }
+        }
         let result = self
             .file
             .seek(SeekFrom::End(0))
@@ -728,8 +782,16 @@ impl ControlStore {
         {
             return Err(ControlError::Invalid("invalid envelope or sequence"));
         }
-        let configuration_change =
-            !matches!(entry.action, Action::Created | Action::PolicyChecked { .. });
+        // Grant outcomes and revocations remove or confirm authority that a
+        // revisioned request already recorded, so they keep the revision.
+        let configuration_change = !matches!(
+            entry.action,
+            Action::Created
+                | Action::PolicyChecked { .. }
+                | Action::ContainerGrantApplied { .. }
+                | Action::ContainerRevokeRequested { .. }
+                | Action::ContainerGrantRevoked { .. }
+        );
         let revision = if configuration_change {
             state
                 .revision
@@ -808,6 +870,10 @@ impl ControlStore {
                     return Err(ControlError::Invalid("inconsistent enabled policy audit"));
                 }
             }
+            Action::ContainerGrantRequested { .. }
+            | Action::ContainerGrantApplied { .. }
+            | Action::ContainerRevokeRequested { .. }
+            | Action::ContainerGrantRevoked { .. } => container::apply(state, &entry.action)?,
         }
         state.revision = revision;
         Ok(())

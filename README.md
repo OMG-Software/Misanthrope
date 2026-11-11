@@ -10,8 +10,9 @@ model read and list tools, only for a workspace that enables `model_tools`.
 Model write and process tools, a desktop interface, Git workflows, and an
 exposed command execution remain planned. The platform crate has a
 process-tree runner core for tests only. Its confined entry point applies
-Landlock and a seccomp socket filter on Linux, refuses on Windows, and nothing
-calls it.
+Landlock and a seccomp socket filter on Linux and a per-workspace AppContainer
+on Windows, and nothing calls it. Trusted CLI commands record and revoke the
+Windows container's directory grants.
 
 > **Status: early prototype, not release-ready.** The Rust CLI can inspect the
 > compiled prompt, report implemented capabilities, manage JSONL sessions and
@@ -239,9 +240,11 @@ processes, and host services.
 Linux confinement uses Landlock and seccomp
 ([ADR-0028](docs/adr/0028-confine-linux-runs-with-landlock-and-a-socket-filter.md));
 resource limits remain open.
-Windows isolation will evaluate AppContainer, restricted process permissions,
-filesystem grants, and Job Objects. Both backends must pass containment and
-development-tool compatibility tests before release.
+Windows confinement uses a per-workspace AppContainer with recorded ACL grants
+inside a Job Object
+([ADR-0029](docs/adr/0029-confine-windows-runs-in-a-workspace-appcontainer-with-recorded-grants.md)).
+Both backends must pass containment and development-tool compatibility tests
+before release.
 
 Development tools also need runtime files and temporary storage. These will be
 declared sandbox resources, with private scratch space and controlled toolchain

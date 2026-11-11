@@ -1,8 +1,9 @@
-//! Operator commands for workspace registration and configuration-only policy checks.
+//! Operator commands for workspace registration, configuration-only policy
+//! checks, and recorded AppContainer grants.
 #![forbid(unsafe_code)]
 
 use clap::{Args, Subcommand, ValueEnum};
-use omgcode_core::control::{ControlError, ControlStore};
+use omgcode_core::control::{ContainerGrantAccess, ControlError, ControlStore};
 use omgcode_core::policy::{Operation, PermissionSet, PolicyRequest, WorkspaceId};
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -36,6 +37,44 @@ pub(crate) enum WorkspaceCommand {
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
+    /// Grant the workspace's AppContainer access to a directory (Windows).
+    ///
+    /// Read-write grants are limited to the workspace directory. The grant
+    /// persists until it is revoked. Nothing runs in the container yet.
+    ContainerGrant(ContainerGrantArgs),
+    /// Revoke one recorded container grant. Needs no revision.
+    ContainerRevoke {
+        /// The grant identifier shown by `container-grant` and `status`.
+        grant: Uuid,
+    },
+}
+
+#[derive(Args)]
+pub(crate) struct ContainerGrantArgs {
+    /// The workspace identifier.
+    id: String,
+    /// The directory to grant.
+    path: PathBuf,
+    #[arg(long, value_enum)]
+    access: AccessArg,
+    #[arg(long)]
+    revision: u64,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+enum AccessArg {
+    ReadExecute,
+    ReadWrite,
+}
+
+impl From<AccessArg> for ContainerGrantAccess {
+    fn from(value: AccessArg) -> Self {
+        match value {
+            AccessArg::ReadExecute => Self::ReadExecute,
+            AccessArg::ReadWrite => Self::ReadWrite,
+        }
+    }
 }
 
 #[derive(Args)]
@@ -114,7 +153,30 @@ pub(crate) fn run(action: WorkspaceCommand, data_root: &Path) -> Result<(), CliE
         WorkspaceCommand::Permissions(args) => set_permissions(args, data_root),
         WorkspaceCommand::Check(args) => check(args, data_root),
         WorkspaceCommand::Audit { limit } => audit(limit, data_root),
+        WorkspaceCommand::ContainerGrant(args) => container_grant(args, data_root),
+        WorkspaceCommand::ContainerRevoke { grant } => {
+            let mut store = open_existing(data_root)?
+                .ok_or_else(|| CliError::new("control", "Workspace control is not initialized"))?;
+            let revocation = store.revoke_container_grant(grant).map_err(control_error)?;
+            print_json(&json!({
+                "revocation": revocation,
+                "snapshot": store.snapshot(),
+            }))
+        }
     }
+}
+
+fn container_grant(args: ContainerGrantArgs, data_root: &Path) -> Result<(), CliError> {
+    let id = parse_workspace_id(&args.id)?;
+    let mut store = open_existing(data_root)?
+        .ok_or_else(|| CliError::new("control", "Workspace control is not initialized"))?;
+    let grant = store
+        .grant_container_access(id, &args.path, args.access.into(), args.revision)
+        .map_err(control_error)?;
+    print_json(&json!({
+        "grant_id": grant.id(),
+        "snapshot": store.snapshot(),
+    }))
 }
 
 fn set_permissions(args: PermissionsArgs, data_root: &Path) -> Result<(), CliError> {

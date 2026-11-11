@@ -6,6 +6,26 @@ Changes are recorded here before a release version is assigned.
 
 ### Added
 
+- Version 0.15.0 adds Windows AppContainer confinement to
+  `process::run_confined`, for tests only. Each workspace has one container,
+  `OMGCode.Workspace.<id>`, with no capabilities, so it has no network access,
+  including loopback. It reaches only directories granted to it and paths that
+  every application package can read, such as the Windows directory. Before
+  anything starts, Windows checks that the container profile exists, that
+  `LOCALAPPDATA` is in the environment, that each listed path and the program
+  are granted at their level, and refuses `HostServices` with `Unsupported`.
+  New trusted CLI commands, `workspace container-grant` and
+  `workspace container-revoke`, give and remove persistent ACL grants:
+  read-write only on the workspace directory, read-execute on the workspace,
+  inside it, or outside the development root. The control journal records each
+  intent before the ACL change and each outcome after it, keeps unconfirmed
+  grants visible and revocable, and keeps room to revoke every outstanding
+  grant when it is otherwise full. The first grant creates the container
+  profile and revoking the last one deletes it. `workspace status` lists
+  outstanding grants and `capabilities` reports `workspace_container_grants`.
+  Settings logs that record a grant cannot be read by 0.14.0. A grant also
+  reaches hard-linked files under their other names. Nothing runs in the
+  container from the CLI yet. See ADR-0029 and `docs/execution.md`.
 - Version 0.14.0 adds `process::run_confined` to the platform crate, for tests
   only. On Linux it applies a Landlock filesystem allowlist of read-only and
   read-write paths and a seccomp filter that refuses IP and other non-Unix

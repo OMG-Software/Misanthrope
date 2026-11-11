@@ -443,7 +443,155 @@ fn capabilities_report_configuration_only_policy_without_execution_tools() {
     assert_eq!(capabilities["permission_audit"], true);
     assert_eq!(capabilities["policy_decision"], "configuration_only");
     assert_eq!(capabilities["workspace_file_tools"], false);
+    assert_eq!(capabilities["workspace_container_grants"], cfg!(windows));
     assert_eq!(capabilities["process_execution"], false);
     assert_eq!(capabilities["sandbox_backend"], "unavailable");
     assert!(!data_root.exists());
+}
+
+fn register(data_root: &Path, workspace: &Path, revision: u64) -> String {
+    let output = run_cli(
+        data_root,
+        &[
+            "workspace",
+            "register",
+            path_arg(workspace),
+            "--revision",
+            &revision.to_string(),
+        ],
+    );
+    assert_success(&output);
+    json_output(&output)["registration_id"]
+        .as_str()
+        .expect("registration ID")
+        .to_owned()
+}
+
+#[cfg(windows)]
+#[test]
+fn container_grants_are_recorded_listed_and_revoked() {
+    // Given a registered workspace and a toolchain directory outside the root.
+    let temporary = TempDir::new().expect("private temporary directory");
+    let data_root = temporary.path().join("application-data");
+    let development_root = temporary.path().join("development");
+    let workspace = development_root.join("app");
+    let toolchain = temporary.path().join("toolchain");
+    fs::create_dir_all(&workspace).expect("create workspace");
+    fs::create_dir_all(&toolchain).expect("create toolchain");
+    set_root(&data_root, &development_root);
+    let id = register(&data_root, &workspace, 1);
+
+    // When the workspace and the toolchain are granted to its container.
+    let write = run_cli(
+        &data_root,
+        &[
+            "workspace",
+            "container-grant",
+            &id,
+            path_arg(&workspace),
+            "--access",
+            "read-write",
+            "--revision",
+            "2",
+        ],
+    );
+    assert_success(&write);
+    let write_id = json_output(&write)["grant_id"]
+        .as_str()
+        .expect("grant ID")
+        .to_owned();
+    let refused = run_cli(
+        &data_root,
+        &[
+            "workspace",
+            "container-grant",
+            &id,
+            path_arg(&toolchain),
+            "--access",
+            "read-write",
+            "--revision",
+            "3",
+        ],
+    );
+    assert_control_error(&refused);
+    let read = run_cli(
+        &data_root,
+        &[
+            "workspace",
+            "container-grant",
+            &id,
+            path_arg(&toolchain),
+            "--access",
+            "read-execute",
+            "--revision",
+            "3",
+        ],
+    );
+    assert_success(&read);
+    let read_id = json_output(&read)["grant_id"]
+        .as_str()
+        .expect("grant ID")
+        .to_owned();
+
+    // Then status lists both as active, with the workspace container.
+    let status = run_cli(&data_root, &["workspace", "status"]);
+    assert_success(&status);
+    let status = json_output(&status);
+    assert_eq!(status["revision"], 4);
+    let grants = status["container_grants"].as_array().expect("grants");
+    assert_eq!(grants.len(), 2);
+    for grant in grants {
+        assert_eq!(grant["state"], "active");
+        assert_eq!(grant["workspace_id"], id.as_str());
+        let container = grant["container"].as_str().expect("container");
+        assert_eq!(
+            container,
+            format!("OMGCode.Workspace.{}", id.replace('-', ""))
+        );
+        assert!(grant["sid"].as_str().expect("SID").starts_with("S-1-15-2-"));
+    }
+
+    // And revocation needs no revision; the last one deletes the profile.
+    let first = run_cli(&data_root, &["workspace", "container-revoke", &write_id]);
+    assert_success(&first);
+    assert_eq!(json_output(&first)["revocation"]["profile_deleted"], false);
+    let last = run_cli(&data_root, &["workspace", "container-revoke", &read_id]);
+    assert_success(&last);
+    let last = json_output(&last);
+    assert_eq!(last["revocation"]["profile_deleted"], true);
+    assert_eq!(last["snapshot"]["revision"], 4);
+    assert!(last["snapshot"].get("container_grants").is_none());
+    let again = run_cli(&data_root, &["workspace", "container-revoke", &read_id]);
+    assert_control_error(&again);
+}
+
+#[cfg(not(windows))]
+#[test]
+fn container_grants_are_refused_without_appcontainer_support() {
+    let temporary = TempDir::new().expect("private temporary directory");
+    let data_root = temporary.path().join("application-data");
+    let development_root = temporary.path().join("development");
+    let workspace = development_root.join("app");
+    fs::create_dir_all(&workspace).expect("create workspace");
+    set_root(&data_root, &development_root);
+    let id = register(&data_root, &workspace, 1);
+    let output = run_cli(
+        &data_root,
+        &[
+            "workspace",
+            "container-grant",
+            &id,
+            path_arg(&workspace),
+            "--access",
+            "read-write",
+            "--revision",
+            "2",
+        ],
+    );
+    assert_control_error(&output);
+    let status = run_cli(&data_root, &["workspace", "status"]);
+    assert_success(&status);
+    let status = json_output(&status);
+    assert_eq!(status["revision"], 2);
+    assert!(status.get("container_grants").is_none());
 }

@@ -93,14 +93,14 @@ const FILE_SYSTEM_NAME_UNITS: usize = 32;
 
 /// An owned copy of a native SID in aligned storage.
 #[derive(Clone)]
-struct Sid {
+pub(crate) struct Sid {
     storage: Vec<u64>,
 }
 
 impl Sid {
     /// Copies a validated SID so its lifetime no longer depends on `raw`.
     #[allow(unsafe_code)]
-    fn copy_from(raw: PSID) -> io::Result<Self> {
+    pub(crate) fn copy_from(raw: PSID) -> io::Result<Self> {
         // SAFETY: callers pass a SID pointer returned by a successful Windows
         // call. `IsValidSid` validates its structure before its length is used.
         let length = unsafe {
@@ -124,7 +124,7 @@ impl Sid {
 
     /// Builds one machine-independent well-known SID.
     #[allow(unsafe_code)]
-    fn well_known(kind: WELL_KNOWN_SID_TYPE) -> io::Result<Self> {
+    pub(crate) fn well_known(kind: WELL_KNOWN_SID_TYPE) -> io::Result<Self> {
         let mut size = SECURITY_MAX_SID_SIZE;
         let capacity = usize::try_from(size).map_err(|_| invalid_data("SID size overflow"))?;
         let mut storage = vec![0u64; capacity.div_ceil(size_of::<u64>())];
@@ -145,7 +145,7 @@ impl Sid {
     }
 
     /// Exposes the SID for read-only native calls while `self` is alive.
-    fn as_psid(&self) -> PSID {
+    pub(crate) fn as_psid(&self) -> PSID {
         self.storage.as_ptr().cast_mut().cast()
     }
 
@@ -157,7 +157,7 @@ impl Sid {
     }
 
     #[allow(unsafe_code)]
-    fn equals(&self, other: &Sid) -> bool {
+    pub(crate) fn equals(&self, other: &Sid) -> bool {
         // SAFETY: both values hold valid SIDs that outlive this call.
         unsafe { EqualSid(self.as_psid(), other.as_psid()) != 0 }
     }
@@ -187,7 +187,7 @@ impl Principals {
 
 /// Reads the process token's user SID.
 #[allow(unsafe_code)]
-fn current_user_sid() -> io::Result<Sid> {
+pub(crate) fn current_user_sid() -> io::Result<Sid> {
     let storage = token_information(TokenUser)?;
     // SAFETY: success wrote a `TOKEN_USER` at the start of aligned `storage`,
     // and its SID pointer refers into `storage`, which is still alive here.
@@ -329,15 +329,16 @@ impl ExplicitDescriptor {
     }
 }
 
-/// One decoded ACE. Only the fields used by the privacy checks are kept.
-enum Ace {
+/// One decoded ACE. Only the fields used by the privacy and container checks
+/// are kept.
+pub(crate) enum Ace {
     Allowed { flags: u32, mask: u32, sid: Sid },
-    Denied,
+    Denied { flags: u32, mask: u32, sid: Sid },
     Other { flags: u32 },
 }
 
 /// A security descriptor read from an open handle; freed exactly once on drop.
-struct ObjectSecurity {
+pub(crate) struct ObjectSecurity {
     descriptor: PSECURITY_DESCRIPTOR,
     owner: PSID,
     group: PSID,
@@ -346,7 +347,7 @@ struct ObjectSecurity {
 
 impl ObjectSecurity {
     /// Reads the owner and DACL of the object behind this same open handle.
-    fn read(file: &File) -> io::Result<Self> {
+    pub(crate) fn read(file: &File) -> io::Result<Self> {
         let security = Self::query(file, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION)?;
         if security.descriptor.is_null() || security.owner.is_null() || security.dacl.is_null() {
             return Err(invalid_data("object has no owner or DACL"));
@@ -393,7 +394,7 @@ impl ObjectSecurity {
     }
 
     #[allow(unsafe_code)]
-    fn dacl_protected(&self) -> io::Result<bool> {
+    pub(crate) fn dacl_protected(&self) -> io::Result<bool> {
         let mut control = 0u16;
         let mut revision = 0u32;
         // SAFETY: `descriptor` is live until drop; both outputs are writable.
@@ -405,8 +406,18 @@ impl ObjectSecurity {
         Ok(control & SE_DACL_PROTECTED != 0)
     }
 
-    #[allow(unsafe_code)]
+    /// The DACL pointer, valid while `self` is alive.
+    pub(crate) const fn dacl(&self) -> *mut ACL {
+        self.dacl
+    }
+
     fn aces(&self) -> io::Result<Vec<Ace>> {
+        self.aces_within(MAX_ROOT_ACES)
+    }
+
+    /// Decodes at most `limit` ACEs; a longer DACL is refused, not truncated.
+    #[allow(unsafe_code)]
+    pub(crate) fn aces_within(&self, limit: u32) -> io::Result<Vec<Ace>> {
         let mut information = ACL_SIZE_INFORMATION {
             AceCount: 0,
             AclBytesInUse: 0,
@@ -426,7 +437,7 @@ impl ObjectSecurity {
         if read == 0 {
             return Err(io::Error::last_os_error());
         }
-        if information.AceCount > MAX_ROOT_ACES {
+        if information.AceCount > limit {
             return Err(invalid_data("object DACL has too many entries"));
         }
         let mut aces = Vec::new();
@@ -447,22 +458,27 @@ impl ObjectSecurity {
             let header = unsafe { std::ptr::read_unaligned(raw.cast::<ACE_HEADER>()) };
             let flags = u32::from(header.AceFlags);
             let kind = u32::from(header.AceType);
-            aces.push(if kind == ACCESS_ALLOWED_ACE_TYPE {
-                let ace = raw.cast::<ACCESS_ALLOWED_ACE>();
-                // SAFETY: the type check confirms this layout. `SidStart` is
-                // the first word of a SID that `copy_from` validates.
-                let (mask, sid) = unsafe {
-                    (
-                        std::ptr::read_unaligned(std::ptr::addr_of!((*ace).Mask)),
-                        Sid::copy_from(std::ptr::addr_of!((*ace).SidStart).cast_mut().cast())?,
-                    )
-                };
-                Ace::Allowed { flags, mask, sid }
-            } else if kind == ACCESS_DENIED_ACE_TYPE {
-                Ace::Denied
-            } else {
-                Ace::Other { flags }
-            });
+            aces.push(
+                if kind == ACCESS_ALLOWED_ACE_TYPE || kind == ACCESS_DENIED_ACE_TYPE {
+                    // Allowed and denied ACEs share the `ACCESS_ALLOWED_ACE` layout.
+                    let ace = raw.cast::<ACCESS_ALLOWED_ACE>();
+                    // SAFETY: the type check confirms this layout. `SidStart` is
+                    // the first word of a SID that `copy_from` validates.
+                    let (mask, sid) = unsafe {
+                        (
+                            std::ptr::read_unaligned(std::ptr::addr_of!((*ace).Mask)),
+                            Sid::copy_from(std::ptr::addr_of!((*ace).SidStart).cast_mut().cast())?,
+                        )
+                    };
+                    if kind == ACCESS_ALLOWED_ACE_TYPE {
+                        Ace::Allowed { flags, mask, sid }
+                    } else {
+                        Ace::Denied { flags, mask, sid }
+                    }
+                } else {
+                    Ace::Other { flags }
+                },
+            );
         }
         Ok(aces)
     }
@@ -510,7 +526,7 @@ fn require_trusted_root(file: &File, principals: &Principals) -> io::Result<()> 
         let acceptable = match ace {
             Ace::Allowed { flags, .. } if flags & INHERIT_ONLY_ACE != 0 => true,
             Ace::Allowed { sid, .. } => principals.trusted(&sid),
-            Ace::Denied => true,
+            Ace::Denied { .. } => true,
             Ace::Other { flags } => flags & INHERIT_ONLY_ACE != 0,
         };
         if !acceptable {
@@ -958,7 +974,7 @@ fn invalid_input(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
 }
 
-fn invalid_data(message: &'static str) -> io::Error {
+pub(crate) fn invalid_data(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
