@@ -22,7 +22,12 @@ a local mock server. The v0.5.0 CLI adds a
 read-only edit preview that compares a broker-read file with trusted proposed
 content and never writes or checkpoints. These features do not provide an
 execution sandbox. The 0.13.0 platform crate adds an unexposed process-tree
-runner core; its tests re-execute the unit-test binary as the child program. See [workspace permissions](workspace-permissions.md)
+runner core; its tests re-execute the unit-test binary as the child program.
+The 0.14.0 Linux confinement tests run that child under Landlock and seccomp
+and record each probe's errno: Landlock denials report `EACCES`, and socket
+denials report `EPERM`. A classic-BPF interpreter in the unit tests evaluates
+every filter branch. These tests ran on WSL 6.6 with Landlock ABI 3; they do not
+qualify other kernels. See [workspace permissions](workspace-permissions.md)
 and the [workspace file-access contract](file-access.md) for their scope and
 current limits. [Repository review and analysis](repository-checks.md) have
 separate workflows.
@@ -126,6 +131,7 @@ As the relevant components are implemented, include:
 | Sessions | Concurrent edits/worktrees, JSONL naming/schema/durability, index rebuild, archive/restore, safe resume, v1/v2 boundaries |
 | Turn/tool lifecycle | Fresh bindings, strict schemas, unknown/malformed/duplicate calls, round/call/byte limits, cancellation, deadline, source labels, denial at the broker, no replay |
 | Process-tree runner | Exit codes, exact environment, argument quoting, bounded output, deadline, cancellation, descendant escape attempts, inherited handles, observed cleanup, invalid specifications |
+| Linux confinement | Read-only and read-write rules, path truncation, denied host files and directories, inheritance by descendants, IP, Unix, and `io_uring` denial in each Unix-socket mode, unexecutable programs, missing/link/special confinement paths, ABI selection below and above the minimum |
 | Model tool chat | Preference off by default and rechecked per call, settings compatibility, confinement against parent, absolute, rooted, UNC, link, junction, and hard-link paths, strict provider tool-call parsing, token removal before journal and model, refusal of token-bearing calls, withheld replay after revocation, finish reason, one call per turn in escape cases |
 | MCP | Version/transport compatibility, authorization, untrusted content, local confinement, OAuth/redirects, cancellation |
 | LM Studio | Model discovery, token/no-token profiles, streamed tools, context limits, unavailable models, no hosted-tool bypass |

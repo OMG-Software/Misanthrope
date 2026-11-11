@@ -8,8 +8,10 @@ native workspace file broker is available through trusted CLI commands. A core
 turn/tool runtime and schema-v2 session format let chat offer the local LM Studio
 model read and list tools, only for a workspace that enables `model_tools`.
 Model write and process tools, a desktop interface, Git workflows, and an
-execution sandbox remain planned. The platform crate has a process-tree runner
-core for tests only; it applies no confinement and nothing calls it.
+exposed command execution remain planned. The platform crate has a
+process-tree runner core for tests only. Its confined entry point applies
+Landlock and a seccomp socket filter on Linux, refuses on Windows, and nothing
+calls it.
 
 > **Status: early prototype, not release-ready.** The Rust CLI can inspect the
 > compiled prompt, report implemented capabilities, manage JSONL sessions and
@@ -234,7 +236,9 @@ OMGCode will own its permission policy and sandbox lifecycle. The design will
 use operating-system isolation to enforce restrictions on files, networking,
 processes, and host services.
 
-Linux isolation will evaluate namespaces, Landlock, seccomp, and resource limits.
+Linux confinement uses Landlock and seccomp
+([ADR-0028](docs/adr/0028-confine-linux-runs-with-landlock-and-a-socket-filter.md));
+resource limits remain open.
 Windows isolation will evaluate AppContainer, restricted process permissions,
 filesystem grants, and Job Objects. Both backends must pass containment and
 development-tool compatibility tests before release.

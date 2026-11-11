@@ -12,9 +12,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::{
-    CancelSignal, MAX_CAPTURE_BYTES, MAX_CLEANUP_TIMEOUT, MAX_DEADLINE, ProcessError,
-    ProcessLimits, ProcessSpec, Termination, run,
+    AppliedConfinement, CancelSignal, Confinement, MAX_CAPTURE_BYTES, MAX_CLEANUP_TIMEOUT,
+    MAX_CONFINEMENT_PATHS, MAX_DEADLINE, ProcessError, ProcessLimits, ProcessSpec, Termination,
+    run, run_confined,
 };
+
+#[cfg(target_os = "linux")]
+mod confinement;
 
 const FIXTURE_ENV: &str = "OMGCODE_PROCESS_FIXTURE";
 const RECORD_ENV: &str = "OMGCODE_PROCESS_FIXTURE_RECORD";
@@ -76,6 +80,10 @@ fn fixture() {
             thread::sleep(Duration::from_secs(120));
             0
         }
+        #[cfg(target_os = "linux")]
+        "probe" => confinement::probes(),
+        #[cfg(target_os = "linux")]
+        "probe-grandchild" => confinement::grandchild_probes(),
         #[cfg(target_os = "linux")]
         "signal" => {
             rustix::process::kill_process(rustix::process::getpid(), rustix::process::Signal::TERM)
@@ -184,6 +192,7 @@ fn text(bytes: &[u8]) -> String {
 fn exit_code_and_both_streams_are_captured() {
     let outcome = run(&spec("echo"), &limits(), &CancelSignal::new()).expect("run fixture");
     assert_eq!(outcome.termination, Termination::Exited { code: 7 });
+    assert_eq!(outcome.confinement, AppliedConfinement::Unconfined);
     assert!(text(&outcome.stdout.bytes).contains("out-marker"));
     assert!(text(&outcome.stderr.bytes).contains("err-marker"));
     assert!(!outcome.stdout.truncated());
@@ -437,6 +446,62 @@ fn out_of_range_limits_are_refused_before_start() {
         let error = run(&spec("echo"), &limits, &CancelSignal::new()).expect_err("limits");
         assert!(matches!(error, ProcessError::InvalidLimits(_)), "{error}");
     }
+}
+
+#[test]
+fn malformed_confinement_is_refused_before_start() {
+    let absolute = env::current_dir().expect("current directory");
+    let cases = [
+        (
+            "relative read-only path",
+            Confinement {
+                read_only: vec![PathBuf::from("usr")],
+                ..Confinement::default()
+            },
+        ),
+        (
+            "relative read-write path",
+            Confinement {
+                read_write: vec![PathBuf::from("workspace")],
+                ..Confinement::default()
+            },
+        ),
+        (
+            "NUL in a path",
+            Confinement {
+                read_write: vec![absolute.join("a\0b")],
+                ..Confinement::default()
+            },
+        ),
+        (
+            "too many paths",
+            Confinement {
+                read_only: vec![absolute.clone(); MAX_CONFINEMENT_PATHS],
+                read_write: vec![absolute.clone()],
+                ..Confinement::default()
+            },
+        ),
+    ];
+    for (name, confinement) in cases {
+        let error = run_confined(&spec("echo"), &confinement, &limits(), &CancelSignal::new())
+            .expect_err(name);
+        assert!(
+            matches!(error, ProcessError::InvalidSpec(_)),
+            "{name}: {error}"
+        );
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_refuses_confined_runs_until_appcontainer_exists() {
+    let confinement = Confinement {
+        read_only: vec![env::current_dir().expect("current directory")],
+        ..Confinement::default()
+    };
+    let error = run_confined(&spec("echo"), &confinement, &limits(), &CancelSignal::new())
+        .expect_err("confinement is not implemented on Windows");
+    assert!(matches!(error, ProcessError::Unsupported(_)), "{error}");
 }
 
 #[cfg(windows)]

@@ -152,11 +152,17 @@ for current native operations, failure states, and explicit recovery.
 ## Process and sandbox boundary
 
 The [execution guide](execution.md) owns the runner contract. Version 0.13.0
-has only a process-tree runner core with no confinement. Do not call it from the
-CLI, a model tool, or the core until that platform's confinement is implemented
-and tested. Its Windows `CreateProcessW` and job wrappers and its Linux
-pre-exec `prctl`, seccomp, and `close_range` calls are reviewed unsafe code in
-the platform crate.
+added an unconfined process-tree runner core. Version 0.14.0 adds
+`run_confined`, with Landlock and a seccomp socket filter on Linux only. Never
+call the unconfined `run` from the CLI, a model tool, or the core. Do not call
+`run_confined` on a platform until its confinement is implemented and tested.
+Its Windows `CreateProcessW` and job wrappers and its Linux pre-exec `prctl`,
+seccomp, `close_range`, and Landlock calls are reviewed unsafe code in the
+platform crate.
+- Default to `UnixSocketAccess::PairsOnly`. `HostServices` exposes every
+  pathname Unix socket the user can reach, including container daemons and
+  credential agents. Select it only on an explicit, recorded operator decision,
+  never for a model.
 
 - Apply policy and operating-system restrictions before untrusted code starts.
   Never fall back to unrestricted execution when setup or a capability fails.

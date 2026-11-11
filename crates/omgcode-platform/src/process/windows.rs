@@ -39,8 +39,8 @@ use windows_sys::Win32::System::Threading::{
 };
 
 use super::{
-    CancelSignal, Capture, ProcessError, ProcessLimits, ProcessOutcome, ProcessSpec, ProcessTree,
-    Termination, is_batch_script, stop_tree, supervise,
+    AppliedConfinement, CancelSignal, Capture, ProcessError, ProcessLimits, ProcessOutcome,
+    ProcessSpec, ProcessTree, Termination, is_batch_script, stop_tree, supervise,
 };
 
 /// Longest command line accepted by `CreateProcessW`, including the final NUL.
@@ -154,7 +154,14 @@ pub(super) fn run(
             return Err(ProcessError::Supervision(error));
         }
     };
-    supervise(&mut tree, capture, started, limits, cancel)
+    supervise(
+        &mut tree,
+        capture,
+        started,
+        limits,
+        cancel,
+        AppliedConfinement::Unconfined,
+    )
 }
 
 struct WindowsTree {

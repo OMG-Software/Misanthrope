@@ -1,14 +1,18 @@
-//! Linux process-tree supervision with a process group and seccomp.
+//! Linux process-tree supervision with a process group, seccomp, and Landlock.
 //!
 //! The program starts as the leader of a new process group. Before `exec`, the
 //! child sets `PR_SET_PDEATHSIG`, marks every inherited descriptor above
-//! standard error close-on-exec, sets `no_new_privs`, and installs a seccomp
-//! filter that makes `setsid` and `setpgid` fail with `EPERM`. Descendants
-//! inherit the filter, so none can leave the group, and `kill(-pgid)` reaches
-//! the whole tree. No Landlock ruleset is applied yet; this is not filesystem
-//! or network confinement.
+//! standard error close-on-exec, sets `no_new_privs`, applies the Landlock
+//! ruleset for a confined run, and installs a seccomp filter. The filter makes
+//! `setsid` and `setpgid` fail with `EPERM`, so `kill(-pgid)` reaches the whole
+//! tree; for a confined run it also refuses sockets and `io_uring`. Descendants
+//! inherit both the ruleset and the filter.
+
+mod landlock;
+mod seccomp;
 
 use std::io;
+use std::os::fd::RawFd;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::{Child, Command, Stdio};
 use std::time::Instant;
@@ -16,45 +20,41 @@ use std::time::Instant;
 use rustix::io::Errno;
 use rustix::process::{Pid, Signal};
 
+use self::landlock::Ruleset;
+use self::seccomp::FilterScope;
 use super::{
-    CancelSignal, Capture, ProcessError, ProcessLimits, ProcessOutcome, ProcessSpec, ProcessTree,
-    Termination, stop_tree, supervise,
+    AppliedConfinement, CancelSignal, Capture, Confinement, ProcessError, ProcessLimits,
+    ProcessOutcome, ProcessSpec, ProcessTree, Termination, stop_tree, supervise,
 };
 
-// Stable kernel ABI values for a classic BPF seccomp program, combined from
-// the class, size, mode, and operation bits in `linux/bpf_common.h`.
-/// `BPF_LD (0x00) | BPF_W (0x00) | BPF_ABS (0x20)`.
-const BPF_LD_W_ABS: u16 = 0x20;
-/// `BPF_JMP (0x05) | BPF_JEQ (0x10) | BPF_K (0x00)`.
-const BPF_JMP_JEQ_K: u16 = 0x15;
-/// `BPF_JMP (0x05) | BPF_JGE (0x30) | BPF_K (0x00)`.
-#[cfg(target_arch = "x86_64")]
-const BPF_JMP_JGE_K: u16 = 0x35;
-/// `BPF_RET (0x06) | BPF_K (0x00)`.
-const BPF_RET_K: u16 = 0x06;
-const SECCOMP_RET_KILL_PROCESS: u32 = 0x8000_0000;
-const SECCOMP_RET_ERRNO: u32 = 0x0005_0000;
-const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
 const SECCOMP_MODE_FILTER: libc::c_ulong = 2;
-/// `offsetof(struct seccomp_data, nr)` and `offsetof(struct seccomp_data, arch)`.
-const SECCOMP_DATA_NR: u32 = 0;
-const SECCOMP_DATA_ARCH: u32 = 4;
 const CLOSE_RANGE_CLOEXEC: libc::c_uint = 1 << 2;
-
-#[cfg(target_arch = "x86_64")]
-const AUDIT_ARCH: u32 = 0xc000_003e;
-#[cfg(target_arch = "aarch64")]
-const AUDIT_ARCH: u32 = 0xc000_00b7;
-/// System calls with this bit set use the x32 ABI, which the filter refuses.
-#[cfg(target_arch = "x86_64")]
-const X32_SYSCALL_BIT: u32 = 0x4000_0000;
 
 pub(super) fn run(
     spec: &ProcessSpec,
+    confinement: Option<&Confinement>,
     limits: ProcessLimits,
     cancel: &CancelSignal,
 ) -> Result<ProcessOutcome, ProcessError> {
-    let filter = group_filter()?;
+    let (filter, ruleset, applied) = match confinement {
+        None => (
+            seccomp::filter(FilterScope::ProcessGroup)?,
+            None,
+            AppliedConfinement::Unconfined,
+        ),
+        Some(confinement) => {
+            let filter = seccomp::filter(FilterScope::Confined(confinement.unix_sockets))?;
+            let ruleset = Ruleset::prepare(confinement)?;
+            let applied = AppliedConfinement::Landlock {
+                abi: ruleset.abi(),
+                unix_sockets: confinement.unix_sockets,
+            };
+            (filter, Some(ruleset), applied)
+        }
+    };
+    // The parent keeps `ruleset` open until `spawn` returns; the child uses
+    // its inherited copy of the descriptor, which closes at `exec`.
+    let ruleset_fd = ruleset.as_ref().map(Ruleset::raw_fd);
     let parent = rustix::process::getpid();
     let mut command = Command::new(&spec.program);
     command
@@ -69,12 +69,15 @@ pub(super) fn run(
         .process_group(0);
     // SAFETY: the hook runs in the forked child before `exec`. It only makes
     // raw system calls through rustix and libc, allocates nothing, takes no
-    // locks, and reads only the filter moved into the closure.
+    // locks, and reads only the filter and descriptor number moved into the
+    // closure.
     #[allow(unsafe_code)]
     unsafe {
-        command.pre_exec(move || prepare_child(parent, &filter));
+        command.pre_exec(move || prepare_child(parent, &filter, ruleset_fd));
     }
-    let mut child = command.spawn().map_err(ProcessError::Spawn)?;
+    let spawned = command.spawn();
+    drop(ruleset);
+    let mut child = spawned.map_err(ProcessError::Spawn)?;
     let started = Instant::now();
     let group = Pid::from_child(&child);
     let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
@@ -94,15 +97,20 @@ pub(super) fn run(
             return Err(ProcessError::Supervision(error));
         }
     };
-    let result = supervise(&mut tree, capture, started, limits, cancel);
+    let result = supervise(&mut tree, capture, started, limits, cancel, applied);
     if !matches!(result, Err(ProcessError::CleanupUnconfirmed(_))) {
         tree.confirmed = true;
     }
     result
 }
 
-/// Steps run in the child between `fork` and `exec`.
-fn prepare_child(parent: Pid, filter: &[libc::sock_filter]) -> io::Result<()> {
+/// Steps run in the child between `fork` and `exec`. Landlock follows
+/// `no_new_privs`, which it requires, and precedes the seccomp filter.
+fn prepare_child(
+    parent: Pid,
+    filter: &[libc::sock_filter],
+    ruleset: Option<RawFd>,
+) -> io::Result<()> {
     rustix::process::set_parent_process_death_signal(Some(Signal::KILL))?;
     // The death signal is armed only for the current parent; if it already
     // exited, the child must not run unsupervised.
@@ -111,6 +119,9 @@ fn prepare_child(parent: Pid, filter: &[libc::sock_filter]) -> io::Result<()> {
     }
     mark_descriptors_close_on_exec()?;
     set_no_new_privs()?;
+    if let Some(ruleset) = ruleset {
+        landlock::restrict_self(ruleset)?;
+    }
     install_filter(filter)
 }
 
@@ -174,72 +185,6 @@ fn install_filter(filter: &[libc::sock_filter]) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     Ok(())
-}
-
-const fn statement(code: u16, k: u32) -> libc::sock_filter {
-    libc::sock_filter {
-        code,
-        jt: 0,
-        jf: 0,
-        k,
-    }
-}
-
-const fn jump(code: u16, k: u32, jt: u8, jf: u8) -> libc::sock_filter {
-    libc::sock_filter { code, jt, jf, k }
-}
-
-fn syscall_number(number: libc::c_long) -> Result<u32, ProcessError> {
-    u32::try_from(number)
-        .map_err(|_| ProcessError::Unsupported("system call number is out of range"))
-}
-
-/// A filter that denies leaving the process group and kills any other ABI.
-#[cfg(target_arch = "x86_64")]
-fn group_filter() -> Result<Vec<libc::sock_filter>, ProcessError> {
-    let setsid = syscall_number(libc::SYS_setsid)?;
-    let setpgid = syscall_number(libc::SYS_setpgid)?;
-    Ok(vec![
-        statement(BPF_LD_W_ABS, SECCOMP_DATA_ARCH),
-        jump(BPF_JMP_JEQ_K, AUDIT_ARCH, 1, 0),
-        statement(BPF_RET_K, SECCOMP_RET_KILL_PROCESS),
-        statement(BPF_LD_W_ABS, SECCOMP_DATA_NR),
-        jump(BPF_JMP_JGE_K, X32_SYSCALL_BIT, 0, 1),
-        statement(BPF_RET_K, SECCOMP_RET_KILL_PROCESS),
-        jump(BPF_JMP_JEQ_K, setsid, 2, 0),
-        jump(BPF_JMP_JEQ_K, setpgid, 1, 0),
-        statement(BPF_RET_K, SECCOMP_RET_ALLOW),
-        statement(BPF_RET_K, SECCOMP_RET_ERRNO | errno_data(libc::EPERM)),
-    ])
-}
-
-/// A filter that denies leaving the process group and kills any other ABI.
-#[cfg(target_arch = "aarch64")]
-fn group_filter() -> Result<Vec<libc::sock_filter>, ProcessError> {
-    let setsid = syscall_number(libc::SYS_setsid)?;
-    let setpgid = syscall_number(libc::SYS_setpgid)?;
-    Ok(vec![
-        statement(BPF_LD_W_ABS, SECCOMP_DATA_ARCH),
-        jump(BPF_JMP_JEQ_K, AUDIT_ARCH, 1, 0),
-        statement(BPF_RET_K, SECCOMP_RET_KILL_PROCESS),
-        statement(BPF_LD_W_ABS, SECCOMP_DATA_NR),
-        jump(BPF_JMP_JEQ_K, setsid, 2, 0),
-        jump(BPF_JMP_JEQ_K, setpgid, 1, 0),
-        statement(BPF_RET_K, SECCOMP_RET_ALLOW),
-        statement(BPF_RET_K, SECCOMP_RET_ERRNO | errno_data(libc::EPERM)),
-    ])
-}
-
-#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-fn group_filter() -> Result<Vec<libc::sock_filter>, ProcessError> {
-    Err(ProcessError::Unsupported(
-        "the process-group filter supports only x86_64 and aarch64",
-    ))
-}
-
-const fn errno_data(errno: libc::c_int) -> u32 {
-    // SECCOMP_RET_DATA is the low 16 bits; EPERM fits.
-    (errno as u32) & 0xffff
 }
 
 struct LinuxTree {

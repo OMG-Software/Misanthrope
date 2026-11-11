@@ -6,6 +6,18 @@ Changes are recorded here before a release version is assigned.
 
 ### Added
 
+- Version 0.14.0 adds `process::run_confined` to the platform crate, for tests
+  only. On Linux it applies a Landlock filesystem allowlist of read-only and
+  read-write paths and a seccomp filter that refuses IP and other non-Unix
+  sockets and `io_uring`. Everything not listed is denied, and descendants
+  inherit the rules. It needs Landlock ABI 3 or later and starts nothing
+  otherwise, or when a path is missing, is a symbolic link, or has an
+  unsupported type. A per-run `UnixSocketAccess` mode defaults to `PairsOnly`,
+  which allows only stream and sequenced-packet `socketpair`; `HostServices`
+  also allows connecting to host Unix sockets such as the Docker daemon and is
+  for explicit operator use. The outcome records the Landlock ABI and the mode.
+  Windows returns `Unsupported` until AppContainer confinement exists. No CLI
+  command or model tool calls it. See ADR-0028 and `docs/execution.md`.
 - Version 0.13.0 adds a process-tree runner core to the platform crate, for
   tests only. It starts one absolute-path program with an exact environment,
   null input, and bounded output. It ends the whole tree on exit, deadline, or
