@@ -303,6 +303,7 @@ fn commit_runs_each_step_in_order_and_cannot_repeat() {
         *events.lock().expect("events"),
         vec![
             TestPoint::AfterFinalCheck,
+            TestPoint::PublishDescriptor,
             TestPoint::Rename,
             TestPoint::PublishedCheck,
             TestPoint::StageSync,
@@ -453,13 +454,62 @@ fn a_failed_restore_is_reported_and_leaves_the_source_security() {
     assert!(
         error
             .to_string()
-            .contains("the stage keeps the source security"),
+            .contains("the stage may keep the source security"),
         "a failed restore must be reported: {error}"
     );
     assert_eq!(fs::read(&fixture.path).expect("unchanged"), b"before");
     let retained = File::open(fixture.stage_path()).expect("open stage");
     assert!(!is_private_file(&retained).expect("stage security"));
     assert_eq!(read_security(&retained).expect("stage security"), source);
+}
+
+/// The opt-out changes while the stage is still private, so a crash between
+/// the two metadata writes cannot leave the source DACL with the old opt-out.
+#[test]
+fn the_indexing_opt_out_changes_only_while_the_stage_is_private() {
+    let fixture = Fixture::with_source(b"before");
+    let user = current_user_ace_sid(&fixture.path);
+    set_dacl(&fixture.path, &format!("P(A;;FA;;;{user})(A;;FR;;;BU)"));
+    set_indexing_opt_out(&fixture.path, true);
+    set_indexing_opt_out(&fixture.storage, false);
+    let stage_path = fixture.stage_path();
+    let observed = Arc::new(Mutex::new(None));
+    let seen = Arc::clone(&observed);
+    let mut target = fixture.target();
+    target.hook = Some(Arc::new(move |point| {
+        if point != TestPoint::PublishDescriptor {
+            return Ok(());
+        }
+        let stage = OpenOptions::new()
+            .access_mode(READ_CONTROL)
+            .open(&stage_path)?;
+        *seen.lock().expect("observation") =
+            Some((is_private_file(&stage)?, has_indexing_opt_out(&stage_path)));
+        Err(io::Error::other(
+            "injected crash between the metadata writes",
+        ))
+    }));
+    let mut stage = target
+        .prepare_stage(fixture.directory(), b"after")
+        .expect("stage");
+    assert!(
+        !has_indexing_opt_out(&fixture.stage_path()),
+        "the stage must start with the other opt-out"
+    );
+    target
+        .commit(&mut stage, || Ok(()))
+        .expect_err("injected fault");
+    assert_eq!(
+        *observed.lock().expect("observation"),
+        Some((true, true)),
+        "between the writes the stage is private and has the source opt-out"
+    );
+    assert_eq!(fs::read(&fixture.path).expect("unchanged"), b"before");
+    assert_stage_is_private(&fixture);
+    assert!(
+        !has_indexing_opt_out(&fixture.stage_path()),
+        "restoring privacy also restores the stage's opt-out"
+    );
 }
 
 #[test]

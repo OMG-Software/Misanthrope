@@ -54,8 +54,13 @@ establishes the result. Then check live authority and rename. If any step
 before the rename fails, put the owner-only DACL back and verify it. If that
 also fails, the error says so. The core requires a private stage before commit
 intent and accepts either state after it, because a crash can fall between
-the two steps. `SetSecurityInfo` is not used because it recomputes inheritance
-and would change inherited entries.
+the two steps. The descriptor and the opt-out are separate writes, so the
+opt-out changes only while the DACL is owner-only. Publication sets the opt-out
+first, and restoration puts back the DACL first. A crash between the writes
+therefore leaves a private stage or an exact source copy, never the source DACL
+with the stage's old opt-out, which recovery would refuse.
+`SetSecurityInfo` is not used because it recomputes inheritance and would change
+inherited entries.
 
 Publish with one `FileRenameInformationEx` call using replace-if-exists and POSIX
 semantics, from the retained stage handle to the retained target parent. Flush
