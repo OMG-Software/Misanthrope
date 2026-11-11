@@ -3,22 +3,26 @@
 mod support;
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(target_os = "linux")]
+use std::path::PathBuf;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
 use omgcode_core::control::ControlStore;
 #[cfg(target_os = "linux")]
 use omgcode_core::files::{FileBroker, FileTarget};
-use omgcode_core::policy::{PermissionSet, WorkspaceId};
+#[cfg(target_os = "linux")]
+use omgcode_core::policy::PermissionSet;
 #[cfg(target_os = "linux")]
 use omgcode_core::replacement::RecordedArtifact;
 use serde_json::{Value, json};
-use tempfile::TempDir;
 use uuid::Uuid;
 
 use support::spawn_gate::without_child_spawns;
+use support::workspace_fixture::Fixture;
 use support::{
     assert_control_error, assert_error_code, assert_success, json_output, path_arg, run_cli,
 };
@@ -27,58 +31,7 @@ const ORIGINAL: &[u8] = b"private_original_payload_9fb26b\n";
 #[cfg(target_os = "linux")]
 const PROPOSED: &[u8] = b"private_proposed_payload_a827d4\n";
 
-/// Owns all files used by CLI subprocesses so each test starts from isolated state.
-struct Fixture {
-    _temporary: TempDir,
-    data: PathBuf,
-    workspace: PathBuf,
-    workspace_id: WorkspaceId,
-    session_id: Uuid,
-}
-
 impl Fixture {
-    /// Creates settings, a registered workspace, permissions, and one source file.
-    fn new() -> Self {
-        let temporary = tempfile::tempdir().expect("private fixture root");
-        let data = temporary.path().join("application-data");
-        let development = temporary.path().join("development");
-        let workspace = development.join("project");
-        fs::create_dir_all(&workspace).expect("workspace directories");
-        fs::write(workspace.join("note.txt"), ORIGINAL).expect("original workspace file");
-
-        let workspace_id = without_child_spawns(|| {
-            let mut control = ControlStore::open(&data).expect("private control store");
-            control
-                .set_development_root(&development, control.revision())
-                .expect("development root");
-            let workspace_id = control
-                .register_workspace(&workspace, control.revision())
-                .expect("registered workspace")
-                .id();
-            control
-                .set_permissions(
-                    workspace_id,
-                    PermissionSet {
-                        read: true,
-                        write: true,
-                        execute: false,
-                        task_network: false,
-                    },
-                    control.revision(),
-                )
-                .expect("explicit file preferences");
-            workspace_id
-        });
-
-        Self {
-            _temporary: temporary,
-            data,
-            workspace,
-            workspace_id,
-            session_id: Uuid::new_v4(),
-        }
-    }
-
     /// Runs the public read command in a fresh process against the same settings.
     fn read(&self) -> std::process::Output {
         run_cli(
@@ -185,7 +138,7 @@ fn checkpoint_recovery_requires_existing_settings_without_initializing_them() {
 /// Unused inspection and wrong-ID acknowledgement preserve settings, entries,
 /// and source bytes while leaving ordinary reads available.
 fn unused_checkpoint_inspection_and_refused_acknowledgement_create_no_storage() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new(ORIGINAL);
     let before_names = child_names(&fixture.data);
     let before_settings = fs::read(fixture.data.join("control-v1.jsonl")).expect("settings bytes");
 
@@ -225,7 +178,7 @@ fn unused_checkpoint_inspection_and_refused_acknowledgement_create_no_storage() 
 #[test]
 /// Rejects unsupported preparation and restore routes without side effects.
 fn checkpoint_recovery_commands_do_not_add_prepare_or_restore_routes() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new(ORIGINAL);
     let before = child_names(&fixture.data);
     for command in ["prepare", "restore"] {
         let output = run_cli(
@@ -250,7 +203,7 @@ fn checkpoint_recovery_commands_do_not_add_prepare_or_restore_routes() {
 /// A pending checkpoint blocks reads; trusted acknowledgement clears only that
 /// blocker. Inspection omits both payloads; workspace and payload bytes stay unchanged.
 fn pending_checkpoint_blocks_file_reads_until_trusted_acknowledgement_without_application() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new(ORIGINAL);
     let operation_id = fixture.prepare();
     let before_settings = fs::read(fixture.data.join("control-v1.jsonl")).expect("settings bytes");
     assert_eq!(
@@ -331,7 +284,7 @@ fn pending_checkpoint_blocks_file_reads_until_trusted_acknowledgement_without_ap
 /// Acknowledgement resolves checkpoint admission but does not restore permission
 /// that a separate settings update has revoked.
 fn checkpoint_acknowledgement_does_not_restore_revoked_workspace_permissions() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new(ORIGINAL);
     let operation_id = fixture.prepare();
     without_child_spawns(|| {
         let mut control = ControlStore::open_existing(&fixture.data)
@@ -368,7 +321,7 @@ fn checkpoint_acknowledgement_does_not_restore_revoked_workspace_permissions() {
 /// Existing unsupported storage must cause inspection and acknowledgement to
 /// fail without changing settings, entries, or the workspace source.
 fn present_checkpoint_storage_refuses_an_unqualified_backend_without_mutation() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new(ORIGINAL);
     let storage = fixture.data.join("replacement-v1");
     fs::create_dir(&storage).expect("existing unsupported storage marker");
     let before = child_names(&fixture.data);

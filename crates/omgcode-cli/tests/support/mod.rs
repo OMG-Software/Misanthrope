@@ -1,6 +1,11 @@
 //! Shared bounded subprocess and JSON helpers for real CLI workflow tests.
 
 pub(crate) mod spawn_gate;
+#[allow(
+    dead_code,
+    reason = "only checkpointed file test binaries register workspaces"
+)]
+pub(crate) mod workspace_fixture;
 
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
