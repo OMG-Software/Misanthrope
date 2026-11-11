@@ -615,9 +615,11 @@ parent directories do not hide a file whose own DACL admits other principals.
 The stage therefore keeps the private store's owner-only DACL until the commit
 attempt. After commit intent and the final check, apply copies the source
 security to the stage, verifies it, checks authority, and renames. A failure
-before the rename restores the owner-only DACL. A crash in that short window
-can leave a retained stage with the source DACL; recovery accepts either state
-only after commit intent.
+before the rename attempts to restore the owner-only DACL and reports when that
+restore fails. A crash, or a failed restore, in that short window can leave a
+retained stage with the source DACL. Principals that DACL admits may then read
+unpublished bytes. Recovery accepts either state only after commit intent and
+does not repair it.
 
 The data root must meet the
 [ADR-0023](adr/0023-store-windows-checkpoints-with-verified-acls.md) rule. Any
