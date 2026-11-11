@@ -6,6 +6,17 @@ Changes are recorded here before a release version is assigned.
 
 ### Added
 
+- Version 0.11.0 adds trusted `file restore` and
+  `file delete-checkpoint --permanent` on Linux ext4 and Windows NTFS. Restore
+  writes a retained checkpoint's original bytes back through the normal apply
+  path. It requires the current file's digest and size and a stopped-writers
+  acknowledgement, and it records the replaced bytes in a new checkpoint.
+  Deletion removes one resolved checkpoint's fixed files without recursion. It
+  keeps the operation's history and frees its retained slot. An interrupted
+  deletion blocks other file work until the same request finishes it. Version
+  0.10.0 refuses a ledger that contains deletion records. `capabilities` reports
+  `checkpoint_restore` and `checkpoint_deletion`. Neither command is power-loss
+  qualified; see ADR-0025.
 - Version 0.10.0 enables checkpoint storage and trusted `file apply` on Windows
   NTFS. Apply preserves the owner, group, DACL, and content-indexing opt-out, and
   refuses metadata it cannot reproduce. The stage stays owner-only until the

@@ -7,8 +7,8 @@ use super::*;
 use crate::control::ControlStore;
 use crate::policy::{PermissionSet, SessionBinding, WorkspaceId};
 use crate::replacement::{
-    CheckpointError, CheckpointInspection, RecordedArtifact, ReplacementOutcome,
-    ReplacementProgress,
+    CheckpointDeletion, CheckpointError, CheckpointInspection, CheckpointRetention,
+    RecordedArtifact, ReplacementOutcome, ReplacementProgress,
 };
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -645,4 +645,376 @@ fn apply_rejects_foreign_and_stale_bindings_and_either_denied_preference() {
     assert!(!fixture.data.join("replacement-init-v1.jsonl").exists());
     assert!(!fixture.data.join("replacement-v1").exists());
     assert!(!fixture.data.join("file-operations-v1.jsonl").exists());
+}
+
+fn apply_bytes(
+    fixture: &mut Fixture,
+    current: &[u8],
+    proposed: &[u8],
+) -> Result<ReplacementReceipt, FileError> {
+    let binding = fixture.binding();
+    let target = fixture.target();
+    FileBroker::new(&mut fixture.control).apply_replacement(
+        &binding,
+        &target,
+        &artifact(current),
+        proposed,
+    )
+}
+
+fn applied_id(fixture: &mut Fixture, current: &[u8], proposed: &[u8]) -> Uuid {
+    apply_bytes(fixture, current, proposed)
+        .expect("apply")
+        .operation_id
+        .expect("changed bytes create an operation")
+}
+
+fn restore(
+    fixture: &mut Fixture,
+    checkpoint: Uuid,
+    current: &[u8],
+) -> Result<ReplacementReceipt, FileError> {
+    let binding = fixture.binding();
+    let target = fixture.target();
+    FileBroker::new(&mut fixture.control).restore_checkpoint(
+        &binding,
+        &target,
+        checkpoint,
+        &artifact(current),
+    )
+}
+
+fn delete(fixture: &mut Fixture, id: Uuid) -> Result<CheckpointDeletion, FileError> {
+    FileBroker::new(&mut fixture.control).checkpoint_delete(id)
+}
+
+fn checkpoint_error<T: std::fmt::Debug>(result: Result<T, FileError>) -> CheckpointError {
+    match result {
+        Err(FileError::Checkpoint(error)) => error,
+        other => panic!("expected a checkpoint error: {other:?}"),
+    }
+}
+
+#[test]
+fn restore_reverts_through_a_new_checkpoint_and_preserves_security() {
+    let mut fixture = Fixture::new();
+    let target = fixture.workspace.join("source.txt");
+    let security = source_security(&target);
+    let applied = applied_id(&mut fixture, ORIGINAL, PROPOSED);
+    assert_eq!(fs::read(&target).unwrap(), PROPOSED);
+
+    let receipt = restore(&mut fixture, applied, PROPOSED).expect("restore");
+    assert!(receipt.changed && receipt.applied);
+    assert_eq!(receipt.original, artifact(PROPOSED));
+    assert_eq!(receipt.proposed, artifact(ORIGINAL));
+    let restored = receipt.operation_id.expect("restore is a new operation");
+    assert_ne!(restored, applied);
+    assert_eq!(fs::read(&target).unwrap(), ORIGINAL);
+    assert_eq!(source_security(&target), security);
+
+    // The bytes that the restore replaced are themselves checkpointed.
+    let directory = fixture.operation_dir(restored);
+    assert_eq!(fs::read(directory.join("original")).unwrap(), PROPOSED);
+    assert_eq!(fs::read(directory.join("proposed")).unwrap(), ORIGINAL);
+    assert_payloads(&fixture, applied);
+    let inspection = fixture.inspect().expect("inspect restore");
+    assert_eq!(inspection.pending, None);
+    assert_eq!(
+        operation(&inspection, restored).outcome,
+        Some(ReplacementOutcome::Succeeded)
+    );
+    assert_eq!(
+        operation(&inspection, applied).retention,
+        CheckpointRetention::Retained
+    );
+
+    // Restoring bytes equal to the current file changes nothing.
+    let unchanged = restore(&mut fixture, applied, ORIGINAL).expect("unchanged restore");
+    assert!(!unchanged.changed && !unchanged.applied);
+    assert_eq!(unchanged.operation_id, None);
+    assert_eq!(fixture.inspect().expect("inspect").operations.len(), 2);
+}
+
+#[test]
+fn restore_refuses_stale_content_foreign_targets_and_missing_checkpoints() {
+    let mut fixture = Fixture::new();
+    let target = fixture.workspace.join("source.txt");
+    let applied = applied_id(&mut fixture, ORIGINAL, PROPOSED);
+
+    // A later edit is never overwritten merely because a checkpoint exists.
+    let later = b"later independent edit\n".as_slice();
+    fs::write(&target, later).expect("later edit");
+    assert!(matches!(
+        checkpoint_error(restore(&mut fixture, applied, PROPOSED)),
+        CheckpointError::Conflict
+    ));
+    assert_eq!(fs::read(&target).unwrap(), later);
+    assert!(matches!(
+        checkpoint_error(restore(&mut fixture, Uuid::new_v4(), later)),
+        CheckpointError::Unavailable
+    ));
+
+    // A checkpoint restores only its recorded workspace and exact target.
+    let other_path = fixture.workspace.join("other.txt");
+    fs::write(&other_path, later).expect("other target");
+    let binding = fixture.binding();
+    let other = FileTarget {
+        path: PathBuf::from("other.txt"),
+        ..fixture.target()
+    };
+    assert!(matches!(
+        checkpoint_error(FileBroker::new(&mut fixture.control).restore_checkpoint(
+            &binding,
+            &other,
+            applied,
+            &artifact(later),
+        )),
+        CheckpointError::TargetMismatch
+    ));
+    assert_eq!(fs::read(&other_path).unwrap(), later);
+
+    // There is no restore-as-create.
+    fs::remove_file(&target).expect("remove target");
+    assert!(restore(&mut fixture, applied, later).is_err());
+    assert!(!target.exists());
+
+    // Current preferences still apply.
+    fs::write(&target, later).expect("recreate target");
+    fixture
+        .control
+        .set_permissions(
+            fixture.workspace_id,
+            PermissionSet {
+                read: true,
+                write: false,
+                ..PermissionSet::default()
+            },
+            fixture.control.revision(),
+        )
+        .expect("deny write");
+    assert!(matches!(
+        checkpoint_error(restore(&mut fixture, applied, later)),
+        CheckpointError::Denied(_)
+    ));
+    assert_eq!(fs::read(&target).unwrap(), later);
+    assert_eq!(fixture.inspect().expect("inspect").operations.len(), 1);
+    assert_payloads(&fixture, applied);
+}
+
+#[test]
+fn deletion_removes_resolved_entries_and_keeps_their_history() {
+    let mut fixture = Fixture::new();
+    let binding = fixture.binding();
+    let target = fixture.workspace.join("source.txt");
+    let workspace = fixture.workspace.clone();
+    // A conflict retains its stage; deletion removes it with the entry.
+    let conflict = fixture.apply(&binding, |_| {
+        let replacement = workspace.join("independent.txt");
+        fs::write(&replacement, ORIGINAL).expect("independent inode");
+        set_source_security(&replacement);
+        fs::rename(replacement, workspace.join("source.txt")).expect("swap target");
+    });
+    assert!(matches!(
+        checkpoint_error(conflict),
+        CheckpointError::Conflict
+    ));
+    let conflict = fixture.inspect().expect("inspect conflict").operations[0].operation_id;
+    assert_stage(&fixture, conflict, true);
+    let applied = applied_id(&mut fixture, ORIGINAL, PROPOSED);
+    let before = fixture.inspect().expect("inspect").managed_bytes;
+
+    for id in [conflict, applied] {
+        let deleted = delete(&mut fixture, id).expect("delete resolved entry");
+        assert_eq!(deleted.operation_id, id);
+        assert!(!deleted.resumed);
+        assert!(!fixture.operation_dir(id).exists());
+    }
+    let inspection = fixture.inspect().expect("inspect deletions");
+    assert!(inspection.managed_bytes < before);
+    assert_eq!(inspection.pending_deletion, None);
+    for (id, outcome) in [
+        (conflict, ReplacementOutcome::Conflict),
+        (applied, ReplacementOutcome::Succeeded),
+    ] {
+        let record = operation(&inspection, id);
+        assert_eq!(record.retention, CheckpointRetention::Deleted);
+        assert_eq!(record.outcome, Some(outcome));
+    }
+    assert_eq!(fs::read(&target).unwrap(), PROPOSED);
+    assert!(matches!(
+        checkpoint_error(delete(&mut fixture, applied)),
+        CheckpointError::Unavailable
+    ));
+    assert!(matches!(
+        checkpoint_error(restore(&mut fixture, applied, PROPOSED)),
+        CheckpointError::Unavailable
+    ));
+    applied_id(&mut fixture, PROPOSED, ORIGINAL);
+}
+
+#[test]
+fn deletion_frees_a_retained_slot_without_evicting_history() {
+    let mut fixture = Fixture::new();
+    let mut first = None;
+    for index in 0..64 {
+        let (current, proposed) = if index % 2 == 0 {
+            (ORIGINAL, PROPOSED)
+        } else {
+            (PROPOSED, ORIGINAL)
+        };
+        let id = applied_id(&mut fixture, current, proposed);
+        first.get_or_insert(id);
+    }
+    assert!(matches!(
+        checkpoint_error(apply_bytes(&mut fixture, ORIGINAL, PROPOSED)),
+        CheckpointError::Limit
+    ));
+    delete(&mut fixture, first.expect("first operation")).expect("free one slot");
+    applied_id(&mut fixture, ORIGINAL, PROPOSED);
+    assert_eq!(fixture.inspect().expect("inspect").operations.len(), 65);
+}
+
+#[test]
+fn unresolved_operations_must_be_acknowledged_before_deletion() {
+    let mut fixture = Fixture::new();
+    let binding = fixture.binding();
+    let id = uncertain_id(fixture.apply(&binding, |store| {
+        store.inject_publication_fault("after_native_commit");
+    }));
+    assert!(matches!(
+        checkpoint_error(delete(&mut fixture, id)),
+        CheckpointError::Pending(pending) if pending == id
+    ));
+    assert_payloads(&fixture, id);
+    FileBroker::new(&mut fixture.control)
+        .checkpoint_acknowledge(id)
+        .expect("acknowledge");
+    assert!(!delete(&mut fixture, id).expect("delete").resumed);
+    let inspection = fixture.inspect().expect("inspect");
+    let record = operation(&inspection, id);
+    assert!(record.acknowledged);
+    assert_eq!(record.outcome, None);
+    assert_eq!(record.retention, CheckpointRetention::Deleted);
+    assert!(!fixture.operation_dir(id).exists());
+}
+
+#[test]
+fn an_interrupted_deletion_blocks_other_work_until_repeated() {
+    for fault in [
+        "deletion_intent_sync",
+        "deletion_artifact",
+        "deletion_directory",
+    ] {
+        let mut fixture = Fixture::new();
+        let target = fixture.workspace.join("source.txt");
+        let first = applied_id(&mut fixture, ORIGINAL, PROPOSED);
+        let second = applied_id(&mut fixture, PROPOSED, ORIGINAL);
+        let error = crate::replacement::store::delete_with_fault(&fixture.control, first, fault)
+            .expect_err(fault);
+        assert!(
+            matches!(
+                error,
+                CheckpointError::Uncertain {
+                    operation_id: Some(id),
+                    ..
+                } if id == first
+            ),
+            "{fault}: {error:?}"
+        );
+        let inspection = fixture.inspect().expect("reopen");
+        assert_eq!(inspection.pending_deletion, Some(first), "{fault}");
+        assert_eq!(inspection.pending, None);
+        assert_eq!(
+            operation(&inspection, first).retention,
+            CheckpointRetention::Deleting
+        );
+
+        let blocked = |error: CheckpointError| matches!(error, CheckpointError::DeletionPending(id) if id == first);
+        assert!(blocked(checkpoint_error(apply_bytes(
+            &mut fixture,
+            ORIGINAL,
+            PROPOSED
+        ))));
+        assert!(blocked(checkpoint_error(restore(
+            &mut fixture,
+            second,
+            ORIGINAL
+        ))));
+        assert!(blocked(checkpoint_error(delete(&mut fixture, second))));
+        assert!(
+            FileBroker::new(&mut fixture.control)
+                .checkpoint_acknowledge(first)
+                .is_err()
+        );
+        assert_eq!(fs::read(&target).unwrap(), ORIGINAL);
+        assert!(fixture.operation_dir(second).join("original").exists());
+
+        let finished = delete(&mut fixture, first).expect("repeat the same deletion");
+        assert!(finished.resumed, "{fault}");
+        assert!(!fixture.operation_dir(first).exists());
+        let inspection = fixture.inspect().expect("inspect");
+        assert_eq!(inspection.pending_deletion, None);
+        assert_eq!(
+            operation(&inspection, first).retention,
+            CheckpointRetention::Deleted
+        );
+        assert_eq!(
+            operation(&inspection, second).retention,
+            CheckpointRetention::Retained
+        );
+    }
+
+    // A completion record that became visible despite a sync error stands.
+    let mut fixture = Fixture::new();
+    let id = applied_id(&mut fixture, ORIGINAL, PROPOSED);
+    let error =
+        crate::replacement::store::delete_with_fault(&fixture.control, id, "deletion_outcome_sync")
+            .expect_err("outcome sync fault");
+    assert_eq!(error.code(), "checkpoint_uncertain");
+    let inspection = fixture.inspect().expect("inspect");
+    assert_eq!(inspection.pending_deletion, None);
+    assert_eq!(
+        operation(&inspection, id).retention,
+        CheckpointRetention::Deleted
+    );
+    assert!(!fixture.operation_dir(id).exists());
+}
+
+#[test]
+fn partial_deletion_records_fail_closed_without_further_removal() {
+    for (fault, removed) in [
+        ("deletion_intent_partial_write", false),
+        ("deletion_outcome_partial_write", true),
+    ] {
+        let mut fixture = Fixture::new();
+        let id = applied_id(&mut fixture, ORIGINAL, PROPOSED);
+        let error = crate::replacement::store::delete_with_fault(&fixture.control, id, fault)
+            .expect_err(fault);
+        assert_eq!(error.code(), "checkpoint_uncertain", "{fault}");
+        let ledger = fixture.data.join("replacement-v1").join("ledger.jsonl");
+        let before = fs::read(&ledger).expect("partial ledger evidence");
+        assert!(fixture.inspect().is_err(), "{fault} must not replay");
+        assert!(delete(&mut fixture, id).is_err(), "{fault}");
+        assert_eq!(fs::read(&ledger).expect("ledger preserved"), before);
+        assert_eq!(fixture.operation_dir(id).exists(), !removed, "{fault}");
+        if !removed {
+            assert_payloads(&fixture, id);
+        }
+    }
+}
+
+#[test]
+fn deletion_never_removes_an_unknown_name() {
+    let mut fixture = Fixture::new();
+    let id = applied_id(&mut fixture, ORIGINAL, PROPOSED);
+    crate::replacement::store::delete_with_fault(&fixture.control, id, "deletion_artifact")
+        .expect_err("interrupted deletion");
+    let unexpected = fixture.operation_dir(id).join("unexpected");
+    fs::write(&unexpected, b"operator data").expect("unknown name");
+    assert_eq!(
+        checkpoint_error(delete(&mut fixture, id)).code(),
+        "checkpoint_invalid"
+    );
+    assert_eq!(fs::read(&unexpected).unwrap(), b"operator data");
+    assert!(fixture.inspect().is_err());
 }

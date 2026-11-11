@@ -46,10 +46,13 @@ use windows_sys::Win32::Security::{
 };
 use windows_sys::Win32::Storage::FileSystem::{
     DELETE, FILE_ACCESS_RIGHTS, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_ALL_ACCESS,
-    FILE_APPEND_DATA, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_APPEND_DATA, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
+    FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE,
+    FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO_EX, FILE_FLAG_BACKUP_SEMANTICS,
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_DELETE,
-    FILE_SHARE_READ, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, GetVolumeInformationByHandleW,
-    READ_CONTROL, SYNCHRONIZE, WRITE_DAC, WRITE_OWNER,
+    FILE_SHARE_READ, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FileDispositionInfoEx,
+    GetVolumeInformationByHandleW, READ_CONTROL, SYNCHRONIZE, SetFileInformationByHandle,
+    WRITE_DAC, WRITE_OWNER,
 };
 use windows_sys::Win32::System::SystemServices::{
     ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE, SECURITY_DESCRIPTOR_REVISION,
@@ -72,6 +75,9 @@ pub(crate) const FILE_READ_ACCESS: FILE_ACCESS_RIGHTS =
 const FILE_WRITE_ACCESS: FILE_ACCESS_RIGHTS =
     FILE_READ_ACCESS | FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_ATTRIBUTES;
 const STAGE_ACCESS: FILE_ACCESS_RIGHTS = FILE_WRITE_ACCESS | DELETE | WRITE_DAC | WRITE_OWNER;
+/// Enough to validate an entry and mark it for deletion; no data access.
+const REMOVE_ACCESS: FILE_ACCESS_RIGHTS =
+    DELETE | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE;
 pub(crate) const STAGE_NAME: &str = "stage";
 pub(crate) const DIRECTORY_OPTIONS: u32 =
     FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT;
@@ -765,6 +771,64 @@ impl WindowsPrivateDirectory {
         }
     }
 
+    /// Removes one regular single-link file in this directory without following
+    /// a reparse point. The caller flushes this directory afterwards.
+    ///
+    /// The checked handle itself is marked for POSIX-semantics deletion, so no
+    /// pathname lookup selects the removed object. The file's own DACL is not
+    /// required to be private: a stage can carry its source's security, and the
+    /// private parent's delete-child right permits the open. A read-only
+    /// attribute does not prevent removal. Nothing is retried.
+    pub fn remove_file(&self, name: &OsStr) -> io::Result<()> {
+        validate_name(name)?;
+        self.validate()?;
+        let file = open_relative(
+            &self.file,
+            name,
+            REMOVE_ACCESS,
+            FILE_OPEN,
+            FILE_OPTIONS,
+            SHARE_READ_WRITE | FILE_SHARE_DELETE,
+            0,
+        )
+        .map_err(map_missing)?;
+        validate_regular_file(&file, self.volume)?;
+        mark_for_deletion(&file)?;
+        drop(file);
+        self.require_removed(name)
+    }
+
+    /// Removes one empty private child directory through its checked handle.
+    /// A nonempty directory fails; contents are never removed. The caller
+    /// flushes this directory afterwards.
+    pub fn remove_dir(&self, name: &OsStr) -> io::Result<()> {
+        validate_name(name)?;
+        self.validate()?;
+        let file = open_relative(
+            &self.file,
+            name,
+            REMOVE_ACCESS,
+            FILE_OPEN,
+            DIRECTORY_OPTIONS,
+            SHARE_READ_WRITE | FILE_SHARE_DELETE,
+            FILE_ATTRIBUTE_DIRECTORY,
+        )
+        .map_err(map_missing)?;
+        validate_directory(&file, self.volume)?;
+        require_private(&file, &self.principals)?;
+        mark_for_deletion(&file)?;
+        drop(file);
+        self.require_removed(name)
+    }
+
+    /// POSIX-semantics deletion unlinks the name when the marked handle closes.
+    fn require_removed(&self, name: &OsStr) -> io::Result<()> {
+        if self.exists(name)? {
+            return Err(invalid_data("removed private entry is still present"));
+        }
+        Ok(())
+    }
+
     /// Flushes this directory handle. A failed flush is an error, never a no-op.
     ///
     /// Microsoft does not state that this persists directory entries or renames,
@@ -820,6 +884,37 @@ pub fn file_identity(file: &File) -> io::Result<PrivateFileIdentity> {
         volume: identity.VolumeSerialNumber,
         file_id: identity.FileId.Identifier,
     })
+}
+
+/// Marks an open handle for POSIX-semantics deletion, ignoring read-only.
+///
+/// The handle must have DELETE access. Microsoft documents that the name is
+/// removed when this handle closes, even if other handles remain open. A
+/// nonempty directory fails with `ERROR_DIR_NOT_EMPTY`.
+#[allow(unsafe_code)]
+fn mark_for_deletion(file: &File) -> io::Result<()> {
+    let information = FILE_DISPOSITION_INFO_EX {
+        Flags: FILE_DISPOSITION_FLAG_DELETE
+            | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS
+            | FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE,
+    };
+    let length = u32::try_from(size_of::<FILE_DISPOSITION_INFO_EX>())
+        .map_err(|_| invalid_data("disposition information is too large"))?;
+    // SAFETY: `file` is a live handle opened with DELETE access, and
+    // `information` is a complete structure for FileDispositionInfoEx that
+    // stays alive for this synchronous call. The call retains no pointer.
+    let set = unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle() as HANDLE,
+            FileDispositionInfoEx,
+            std::ptr::from_ref(&information).cast(),
+            length,
+        )
+    };
+    if set == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 fn open_root_handle(path: &Path) -> io::Result<File> {
@@ -1156,6 +1251,108 @@ pub(crate) mod tests {
             WindowsPrivateDirectory::open(&link).is_err(),
             "a junction must not open as a private root"
         );
+    }
+
+    /// Creates a file in `entry` with an optional read-only attribute and a
+    /// replacement DACL, as a retained stage can carry its source security.
+    fn file_with_security(
+        entry: &WindowsPrivateDirectory,
+        path: &Path,
+        readonly: bool,
+        dacl: &str,
+    ) {
+        let name = path.file_name().expect("fixture name");
+        let file = create_relative_secured(
+            &entry.file,
+            name,
+            STAGE_ACCESS,
+            FILE_OPTIONS,
+            FILE_SHARE_READ | FILE_SHARE_DELETE,
+            FILE_ATTRIBUTE_NORMAL,
+            &ExplicitDescriptor::private_to(&user())
+                .expect("descriptor")
+                .descriptor,
+        )
+        .expect("fixture file");
+        if readonly {
+            // Set before the DACL can remove write-attributes access.
+            let mut permissions = fs::metadata(path).expect("metadata").permissions();
+            permissions.set_readonly(true);
+            fs::set_permissions(path, permissions).expect("read-only attribute");
+        }
+        let current = read_security(&file).expect("current security");
+        let prefix = current.split("D:").next().expect("owner and group");
+        apply_security(&file, &format!("{prefix}D:{dacl}")).expect("fixture DACL");
+    }
+
+    #[test]
+    fn removal_is_single_entry_nonrecursive_and_refuses_links() {
+        let fixture = fixture();
+        let entry = fixture.root.create_dir(OsStr::new("entry")).expect("entry");
+        let entry_path = fixture.path.join("entry");
+        drop(entry.create_file(OsStr::new("original")).expect("payload"));
+        // The private parent's delete-child right permits removing a stage
+        // whose own DACL grants nothing, and a read-only attribute whose
+        // DACL still lets the owner change attributes.
+        file_with_security(&entry, &entry_path.join(STAGE_NAME), false, "P(A;;FR;;;WD)");
+        file_with_security(&entry, &entry_path.join("proposed"), true, "P(A;;FA;;;OW)");
+        // Read-only with no write-attributes grant is refused, not repaired.
+        file_with_security(
+            &entry,
+            &entry_path.join("manifest.json"),
+            true,
+            "P(A;;FR;;;WD)",
+        );
+        // Retained private-directory handles deny delete sharing.
+        drop(entry);
+
+        let error = fixture
+            .root
+            .remove_dir(OsStr::new("entry"))
+            .expect_err("nonempty directory");
+        assert_eq!(
+            error.raw_os_error(),
+            Some(i32::try_from(windows_sys::Win32::Foundation::ERROR_DIR_NOT_EMPTY).unwrap())
+        );
+        assert!(entry_path.join("original").exists());
+        assert!(fixture.root.remove_file(OsStr::new("entry")).is_err());
+
+        let entry = fixture.root.open_dir(OsStr::new("entry")).expect("reopen");
+        for name in [STAGE_NAME, "proposed", "original"] {
+            entry
+                .remove_file(OsStr::new(name))
+                .unwrap_or_else(|error| panic!("remove {name}: {error:?}"));
+            assert!(!entry_path.join(name).exists(), "{name}");
+        }
+        assert_eq!(
+            entry
+                .remove_file(OsStr::new("manifest.json"))
+                .expect_err("read-only without write-attributes access")
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert!(entry_path.join("manifest.json").exists());
+        assert_eq!(
+            entry
+                .remove_file(OsStr::new("original"))
+                .expect_err("already removed")
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+        drop(entry);
+        assert!(fixture.root.remove_dir(OsStr::new("entry")).is_err());
+        assert!(entry_path.join("manifest.json").exists());
+
+        drop(fixture.root.create_file(OsStr::new("file")).expect("file"));
+        fs::hard_link(fixture.path.join("file"), fixture.path.join("alias")).expect("hard link");
+        assert!(fixture.root.remove_file(OsStr::new("file")).is_err());
+        assert!(fixture.path.join("file").exists());
+        let outside = tempfile::tempdir().expect("outside");
+        create_junction_bounded(&fixture.path.join("junction"), outside.path()).expect("junction");
+        assert!(fixture.root.remove_dir(OsStr::new("junction")).is_err());
+        assert!(fixture.root.remove_file(OsStr::new("junction")).is_err());
+        assert!(fixture.path.join("junction").exists());
+        assert!(outside.path().exists());
     }
 
     #[test]

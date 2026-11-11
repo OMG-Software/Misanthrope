@@ -94,6 +94,13 @@ authorization. See
   against independent writers. Preserve uncertain outcomes without automatic
   retry, cleanup, or restore. A restore needs fresh current-content checks and
   must checkpoint later user work before replacing it.
+- Checkpoint deletion is an explicit trusted-operator action for one resolved,
+  retained checkpoint. Record a durable deletion intent before removing anything.
+  Remove only the fixed artifact names, one native entry at a time, without
+  recursion or following links, and refuse hard-linked or substituted entries.
+  Never repair ACLs, clear attributes, evict history, or delete as a side effect
+  of inspection, acknowledgement, admission, or quota pressure. An interrupted
+  deletion blocks other file work until the same request finishes it.
 - Checkpoint preparation requires fresh read/write authority and a source
   capture whose bytes, identity, and supported security metadata came from the
   same pinned file. Keep private initialization separate from an unused-store

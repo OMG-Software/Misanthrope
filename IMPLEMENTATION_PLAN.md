@@ -36,8 +36,12 @@ This is a resume guide, not a replacement for the owning contracts in
 - **PR #16** merged at `b7fbc0b`: fixes that test race, with tests and
   documentation only.
 - **PR #17** merged at `ddfc90a`: **Phase A3a**, the Windows NTFS private store.
-- This branch, `codex/windows-apply`: **Phase A3b**, version **0.10.0**, with
-  Windows NTFS checkpoint storage and trusted apply.
+- **PR #18**, `codex/windows-apply`: **Phase A3b**, version **0.10.0**, with
+  Windows NTFS checkpoint storage and trusted apply. Open and unmerged when A4
+  started from its `2dc3b50` head.
+- This branch, `codex/checkpoint-restore-delete`: **Phase A4**, version
+  **0.11.0**, with explicit restore and checkpoint deletion. It is stacked on
+  PR #18. Retarget its PR to `main` after PR #18 merges.
 
 Implemented today:
 
@@ -75,11 +79,15 @@ Implemented today:
   and verified sync/outcome ordering. See [ADR-0022](docs/adr/0022-publish-one-verified-stage-on-linux-ext4.md).
 - Windows NTFS checkpoint storage and trusted `file apply`, with no power-loss
   claim. See [ADR-0024](docs/adr/0024-publish-one-verified-stage-on-windows-ntfs.md).
+- Trusted `file restore` through a new checkpoint and
+  `file delete-checkpoint --permanent` for one resolved checkpoint, on the same
+  filesystems as apply. Neither is power-loss qualified. See
+  [ADR-0025](docs/adr/0025-restore-and-delete-checkpoints-explicitly.md).
 
 Not implemented:
 
-- Apply on other filesystems, restore, deletion, and standalone CLI checkpoint
-  preparation.
+- Apply or restore on other filesystems, workspace file deletion, ledger
+  compaction, and standalone CLI checkpoint preparation.
 - CLI or real-provider model tool dispatch.
 - Process execution, execution containment, Git, MCP, runtime skills, memories,
   desktop/UI panels, compaction, or caches.
@@ -192,8 +200,8 @@ at that review boundary:
   Review platform wrappers and storage compatibility before enabling a trusted
   CLI apply command. An unqualified backend must refuse replacement. Do not
   treat passing existing read/create tests as replacement evidence. The first
-  recovery surface is inspection and acknowledgement. Explicit restore remains
-  a later feature with its own current-content and checkpoint tests.
+  recovery surface is inspection and acknowledgement. Explicit restore was
+  left to A4, with its own current-content and checkpoint tests.
 
   - **A2a (merged as PR #11):** read-only byte-input initialization/ledger validation.
     Preserve recorded uncertainty and test malformed, incomplete, and bounded
@@ -215,7 +223,16 @@ at that review boundary:
     security-metadata preservation, and retained-handle publication, with the
     store wired to `PrivateDirectory` and the core's refusal lifted. See
     [ADR-0024](docs/adr/0024-publish-one-verified-stage-on-windows-ntfs.md).
-    Release qualification, power-loss evidence, and restore remain open.
+    Release qualification and power-loss evidence remain open.
+  - **A4 (this branch, `codex/checkpoint-restore-delete`, stacked on PR #18):**
+    explicit trusted restore through the apply path and a new checkpoint, and
+    permanent deletion of one resolved checkpoint. Deletion uses intent and
+    outcome ledger records and non-recursive single-entry native removal. It
+    keeps history and frees a retained slot. Inspection and acknowledgement
+    stay read-only. See
+    [ADR-0025](docs/adr/0025-restore-and-delete-checkpoints-explicitly.md).
+    Ledger compaction, release qualification, and power-loss evidence remain
+    open.
 
 Contract decisions accepted in A1:
 

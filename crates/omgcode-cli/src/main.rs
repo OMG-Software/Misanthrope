@@ -206,6 +206,8 @@ fn run(cli: Cli) -> Result<(), CliError> {
                 serde_json::Value::Bool(false)
             },
             "existing_file_replacement": cfg!(any(target_os = "linux", target_os = "windows")),
+            "checkpoint_restore": cfg!(any(target_os = "linux", target_os = "windows")),
+            "checkpoint_deletion": cfg!(any(target_os = "linux", target_os = "windows")),
             "edit_previews": cfg!(any(target_os = "linux", target_os = "windows")),
             "workspace_file_tools": false,
             "process_execution": false,

@@ -14,8 +14,9 @@ use super::{FileOperation, FileOutcome};
 use crate::policy::Operation;
 use crate::policy::SessionBinding;
 #[cfg(any(target_os = "linux", windows))]
-use crate::replacement::store::Store;
+use crate::replacement::store::{self, Store};
 use crate::replacement::{CheckpointError, RecordedArtifact, ReplacementReceipt};
+use uuid::Uuid;
 
 #[cfg(all(test, any(target_os = "linux", windows)))]
 mod tests;
@@ -48,6 +49,43 @@ impl FileBroker<'_> {
             Err(CheckpointError::Io(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "native replacement is not qualified on this platform",
+            ))
+            .into())
+        }
+    }
+
+    /// Restore one retained checkpoint's original bytes through the apply path.
+    ///
+    /// `expected` describes the *current* target, never the checkpoint: a later
+    /// edit causes a controlled conflict, not an overwrite. The checkpoint must
+    /// be prepared, retained, and recorded for this workspace and exact native
+    /// target path; its bytes are reread and checked against the record. The
+    /// current bytes are then checkpointed again as a new operation, under the
+    /// same live-binding, permission, stopped-writers, and no-CAS contract as
+    /// `apply_replacement`. A missing target is refused; there is no
+    /// restore-as-create. Nothing restores automatically.
+    pub fn restore_checkpoint(
+        &mut self,
+        binding: &SessionBinding,
+        target: &FileTarget,
+        checkpoint: Uuid,
+        expected: &RecordedArtifact,
+    ) -> Result<ReplacementReceipt, FileError> {
+        #[cfg(any(target_os = "linux", windows))]
+        {
+            validate_request(target, expected, &[])?;
+            check_permissions(self.control, binding, target)?;
+            // The store opens read-only and closes before apply reopens it, so
+            // the lock order stays control, then one subordinate journal.
+            let original = store::read_original(self.control, checkpoint, target)?;
+            self.apply_with_preparation_hook(binding, target, expected, &original, |_| {})
+        }
+        #[cfg(not(any(target_os = "linux", windows)))]
+        {
+            let _ = (binding, target, checkpoint, expected);
+            Err(CheckpointError::Io(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "native restore is not qualified on this platform",
             ))
             .into())
         }

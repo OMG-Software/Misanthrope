@@ -17,8 +17,10 @@ execution sandbox remain planned.
 > against trusted proposed content, and send one non-streaming chat request to
 > an explicitly selected local LM Studio model.
 > Chat still has no file tools. The core has a bounded read/list turn runtime
-> exercised with a scripted model, but the CLI does not expose it. Existing
-> files cannot be replaced or deleted, commands cannot be run, and no execution
+> exercised with a scripted model, but the CLI does not expose it. The trusted
+> CLI can replace or restore one existing file through a checkpoint on qualified
+> Linux ext4 or Windows NTFS, and can permanently delete one resolved checkpoint.
+> Workspace files cannot be deleted, commands cannot be run, and no execution
 > sandbox is implemented.
 
 ## Goals
@@ -78,8 +80,12 @@ Linux and Windows checkpoints through its authorized library API. The CLI can
 inspect and acknowledge existing checkpoint state. Trusted `file apply` can
 publish one checkpointed replacement on a qualified Linux ext4 mount or on
 Windows NTFS. Stop independent writers first: a content check and rename cannot
-guarantee no lost updates. Windows makes no power-loss claim. Restore, deletion,
-and CLI/provider model-dispatched file tools remain unavailable.
+guarantee no lost updates. Windows makes no power-loss claim. Trusted
+`file restore` writes a retained original back through a new checkpoint after
+an explicit current-content check. Trusted `file delete-checkpoint --permanent`
+removes one resolved checkpoint's files and keeps its ledger history. Neither
+command is power-loss qualified. CLI/provider model-dispatched file tools
+remain unavailable.
 Process/network confinement, Git, MCP, and memories remain planned. See the
 [workspace settings contract](docs/workspace-permissions.md), the
 [workspace file-access guide](docs/file-access.md), and the [development

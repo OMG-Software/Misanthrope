@@ -16,8 +16,10 @@ Linux and Windows through a live authorized binding. The CLI provides
 existing-only checkpoint inspection and acknowledgement. Trusted CLI apply can
 replace an existing file on a qualified Linux ext4 mount or on Windows NTFS
 under the file-access contract. It requires the operator to stop other writers.
-Windows makes no power-loss claim. Restore and checkpoint deletion remain
-disabled.
+Windows makes no power-loss claim. Trusted CLI restore writes a retained
+original back through the same apply path and a new checkpoint. Trusted CLI
+checkpoint deletion removes one resolved checkpoint and keeps its history.
+Neither is power-loss qualified.
 Repository review and analysis are defined in
 [docs/repository-checks.md](docs/repository-checks.md).
 Do not describe planned features or security controls as implemented. Do not

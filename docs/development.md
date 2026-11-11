@@ -1,15 +1,16 @@
 # Build and run the core prototype
 
-OMGCode 0.10.0 is a developer CLI prototype with workspace permission
+OMGCode 0.11.0 is a developer CLI prototype with workspace permission
 settings and bounded native file operations through trusted operator commands.
 It can send a text conversation to an explicitly selected local LM Studio model
 and save that conversation. It can read/list files, exclusively create new
 files/directories, and preview a bounded diff against trusted proposed content
 in a registered workspace. The core also has a bounded turn/tool runtime for
 library callers and tests, but no CLI command exposes it. Trusted CLI apply can
-replace an existing file on Linux ext4 or Windows NTFS. The CLI cannot restore
-or delete files,
-run commands, use Git, or connect to MCP servers.
+replace an existing file on Linux ext4 or Windows NTFS. Trusted restore puts a
+retained checkpoint's original bytes back through apply, and trusted checkpoint
+deletion removes one resolved private entry. The CLI cannot delete workspace
+files, run commands, use Git, or connect to MCP servers.
 CLI/provider model tool dispatch and an execution sandbox are not implemented.
 
 The core's byte-input replacement inspectors remain read-only. Its file broker
@@ -47,6 +48,27 @@ or make the rename conditional on the expected bytes. A reported uncertainty
 requires inspection of the target and retained checkpoint evidence before
 acknowledgement or any new apply. See the
 [native apply contract](file-access.md#implemented-native-apply-phase-a2c).
+
+To restore a retained checkpoint, read the file's current SHA-256 and byte count
+first. Those values describe the current file, not the checkpoint. The restore
+checkpoints the current bytes as a new operation before it publishes:
+
+```text
+omgcode --data-dir /private/omgcode-data file restore WORKSPACE_UUID notes.txt --session SESSION_UUID --checkpoint OPERATION_UUID --expected-sha256 CURRENT_SHA256 --expected-bytes CURRENT_BYTES --writers-stopped
+```
+
+A checkpoint restores only the workspace and exact path it recorded. A later
+edit causes `checkpoint_conflict` without mutation. To free checkpoint capacity,
+acknowledge any unresolved operation, then permanently delete one entry:
+
+```text
+omgcode --data-dir /private/omgcode-data file delete-checkpoint OPERATION_UUID --permanent
+```
+
+Deletion removes the entry's payloads, manifest, and any retained stage. The
+ledger keeps its history. If deletion is interrupted, every file operation is
+refused until the same command is repeated. See the
+[restore and deletion contract](file-access.md#implemented-restore-and-checkpoint-deletion-phase-a4).
 
 ## Build
 
@@ -127,14 +149,16 @@ folder/session tree remain future work.
 
 ## Workspace files
 
-Scoped file commands (`read`, `list`, `create`, `mkdir`, `diff`, and `apply`) require
+Scoped file commands (`read`, `list`, `create`, `mkdir`, `diff`, `apply`, and
+`restore`) require
 existing workspace settings, a configured development root, a registered
 workspace ID, and an explicit session UUID. They do not initialize settings,
 infer a root, or treat a journal's workspace metadata as a grant. `read`, `list`,
 and `diff` require the read preference. `create` and `mkdir` require the write
-preference. `apply` requires both preferences and a supported native mount.
-Execute remains disabled. The `audit`, `acknowledge`, `checkpoints`, and
-`acknowledge-checkpoint` recovery commands require existing workspace settings.
+preference. `apply` and `restore` require both preferences and a supported
+native mount. Execute remains disabled. The `audit`, `acknowledge`,
+`checkpoints`, `acknowledge-checkpoint`, and `delete-checkpoint` commands require
+existing workspace settings.
 They do not require a configured root, workspace registration, or session
 selection. Chat advertises no file tools.
 
@@ -147,7 +171,9 @@ and native requirements when it runs. These values do not promise that an
 operation can proceed. `edit_previews` is `true` on Linux and Windows for the
 trusted CLI preview. `existing_file_replacement` is `true` on Linux and Windows to indicate
 implementation, and `false` elsewhere. The CLI does not probe the mount, metadata,
-or permissions for that flag. `workspace_file_tools` remains `false`.
+or permissions for that flag. `checkpoint_restore` and `checkpoint_deletion`
+follow the same rule for `file restore` and `file delete-checkpoint`.
+`workspace_file_tools` remains `false`.
 
 ```text
 omgcode --data-dir C:\omgcode-data file read WORKSPACE_ID --session SESSION_UUID src\main.rs --max-bytes 65536
