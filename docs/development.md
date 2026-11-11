@@ -1,18 +1,20 @@
 # Build and run the core prototype
 
-OMGCode 0.9.0 is a developer CLI prototype with workspace permission
+OMGCode 0.10.0 is a developer CLI prototype with workspace permission
 settings and bounded native file operations through trusted operator commands.
 It can send a text conversation to an explicitly selected local LM Studio model
 and save that conversation. It can read/list files, exclusively create new
 files/directories, and preview a bounded diff against trusted proposed content
 in a registered workspace. The core also has a bounded turn/tool runtime for
 library callers and tests, but no CLI command exposes it. Trusted CLI apply can
-replace an existing file on Linux ext4. The CLI cannot restore or delete files,
+replace an existing file on Linux ext4 or Windows NTFS. The CLI cannot restore
+or delete files,
 run commands, use Git, or connect to MCP servers.
 CLI/provider model tool dispatch and an execution sandbox are not implemented.
 
 The core's byte-input replacement inspectors remain read-only. Its file broker
-also provides Linux-only `checkpoint_prepare` with fresh read/write authority.
+also provides `checkpoint_prepare` on Linux and Windows with fresh read/write
+authority.
 Private initialization, exact manifest/payload validation, bounded retention,
 and synced journal appends are implemented. No CLI command creates a standalone
 checkpoint. The CLI provides existing-only inspection and acknowledgement:
@@ -26,8 +28,10 @@ These commands require existing workspace settings, but no workspace/session
 selection. Inspection never initializes storage and returns metadata only.
 Acknowledgement never applies, restores, deletes, retries, or grants access.
 A standalone prepared checkpoint remains unresolved until acknowledged.
-Windows can report unused state but refuses present checkpoint storage,
-preparation, and apply. See the
+On Windows the data folder must grant access only to the current user, SYSTEM,
+and Administrators, including through inherited grants. Otherwise checkpoint
+storage is refused; choose a private `--data-dir` or remove the extra grant.
+See the
 [checkpoint storage contract](file-access.md#implemented-checkpoint-storage-phase-a2b).
 
 For a trusted apply, stop all independent writers before starting. Use the
@@ -141,7 +145,7 @@ other platforms, all three values are `false`. The CLI does not probe the ambien
 filesystem for capability reporting. A command checks settings, scope, policy,
 and native requirements when it runs. These values do not promise that an
 operation can proceed. `edit_previews` is `true` on Linux and Windows for the
-trusted CLI preview. `existing_file_replacement` is `true` on Linux to indicate
+trusted CLI preview. `existing_file_replacement` is `true` on Linux and Windows to indicate
 implementation, and `false` elsewhere. The CLI does not probe the mount, metadata,
 or permissions for that flag. `workspace_file_tools` remains `false`.
 

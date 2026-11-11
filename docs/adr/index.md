@@ -38,3 +38,4 @@ meaningful alternative does not need an ADR.
 | [0021: Store checkpoints with native private handles](0021-store-checkpoints-with-native-private-handles.md) | Accepted | 2026-11-10 |
 | [0022: Publish one verified stage on Linux ext4](0022-publish-one-verified-stage-on-linux-ext4.md) | Accepted | 2026-11-10 |
 | [0023: Store Windows checkpoints with verified ACLs](0023-store-windows-checkpoints-with-verified-acls.md) | Accepted | 2026-11-11 |
+| [0024: Publish one verified stage on Windows NTFS](0024-publish-one-verified-stage-on-windows-ntfs.md) | Accepted | 2026-11-11 |

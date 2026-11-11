@@ -12,11 +12,12 @@ does not expose model-dispatched file tools through the CLI or a real provider
 adapter, process execution, or an execution sandbox.
 The bundled web interface and most planned features are not implemented.
 The core validates replacement records and can prepare protected checkpoints on
-Linux through a live authorized binding. The CLI provides existing-only
-checkpoint inspection and acknowledgement. Trusted CLI apply can replace an
-existing file on a qualified Linux ext4 mount under the file-access contract.
-It requires the operator to stop other writers. Windows checkpoint storage and
-apply are unsupported. Restore and checkpoint deletion remain disabled.
+Linux and Windows through a live authorized binding. The CLI provides
+existing-only checkpoint inspection and acknowledgement. Trusted CLI apply can
+replace an existing file on a qualified Linux ext4 mount or on Windows NTFS
+under the file-access contract. It requires the operator to stop other writers.
+Windows makes no power-loss claim. Restore and checkpoint deletion remain
+disabled.
 Repository review and analysis are defined in
 [docs/repository-checks.md](docs/repository-checks.md).
 Do not describe planned features or security controls as implemented. Do not

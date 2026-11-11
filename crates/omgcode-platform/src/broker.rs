@@ -1,7 +1,7 @@
 //! Native, handle-relative workspace I/O. This is not process containment.
 //!
 //! Callers must separately authorize operations and verify creation times.
-//! Linux provides a native replacement boundary through retained handles;
+//! Linux and Windows provide a native replacement boundary through retained handles;
 //! ordinary create operations never replace existing files. Concurrent
 //! hostile same-user mutation of filesystem namespaces remains outside this boundary.
 
@@ -14,7 +14,7 @@ use crate::DirectoryIdentity;
 
 #[cfg(target_os = "linux")]
 mod linux;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 mod replacement;
 #[cfg(windows)]
 pub(crate) mod windows;
@@ -24,7 +24,7 @@ use linux::NativeWorkspace;
 #[cfg(windows)]
 use windows::NativeWorkspace;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 pub use replacement::{ReplacementStage, ReplacementTarget};
 
 /// Maximum bytes read or supplied to a single new-file operation.
@@ -227,12 +227,8 @@ pub struct FileCapture {
     pub volume: u64,
     /// Native file ID in the existing 16-byte representation.
     pub file_id: [u8; 16],
-    /// Unix owner ID from that file.
-    pub owner: u32,
-    /// Unix group ID from that file.
-    pub group: u32,
-    /// Unix permission bits. Special bits and extended attributes are refused.
-    pub mode: u32,
+    /// Native security from that file. Unsupported metadata is refused.
+    pub security: crate::private_store::NativeSecurity,
 }
 
 /// An anchored workspace. Policy and session checks belong to the trusted core.
@@ -281,11 +277,11 @@ impl Workspace {
         if max_bytes == 0 || max_bytes > MAX_FILE_BYTES {
             return Err(invalid("invalid checkpoint capture limit"));
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         {
             self.native.capture(path, max_bytes)
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", windows)))]
         {
             Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -294,9 +290,9 @@ impl Workspace {
         }
     }
 
-    /// Prepare a retained Linux target for the native replacement protocol.
+    /// Prepare a retained target for the native replacement protocol.
     /// This does not authorize publication; callers must check live authority.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     pub fn replacement_target(
         &self,
         path: &RelativePath,

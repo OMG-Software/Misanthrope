@@ -51,9 +51,11 @@ pub(super) fn stage_metadata(file: &File) -> io::Result<super::StageMetadata> {
             volume: metadata.dev(),
             file_id: u128::from(metadata.ino()).to_le_bytes(),
         },
-        owner: metadata.uid(),
-        group: metadata.gid(),
-        mode: metadata.mode() & 0o777,
+        security: super::NativeSecurity::Unix {
+            owner: metadata.uid(),
+            group: metadata.gid(),
+            mode: metadata.mode() & 0o777,
+        },
     })
 }
 

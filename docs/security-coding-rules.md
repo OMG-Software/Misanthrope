@@ -102,8 +102,7 @@ authorization. See
   growth. This layout cannot detect complete erasure of both checkpoint paths.
   Operator inspection/acknowledgement cannot grant authority or expose payload
   bytes.
-  The core must keep refusing Windows private storage until capture and
-  publication are reviewed. The Windows backend must verify exact protected
+  The Windows backend must verify exact protected
   per-user DACLs and refuse a failed directory flush. That flush has no Microsoft
   durability contract, so it must not be described as power-loss safe. The older
   journal helper's Windows directory-sync no-op is not a checkpoint durability

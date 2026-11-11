@@ -41,6 +41,8 @@ use crate::{DirectoryIdentity, directory_identity};
 
 use super::{CreateError, DirectoryEntry, EntryKind, Listing, RelativePath};
 
+pub(super) mod replacement;
+
 const WINDOWS_EPOCH_TICKS: i64 = 116_444_736_000_000_000;
 const DIRECTORY_BUFFER_BYTES: usize = 64 * 1024;
 const MAX_COMPONENT_UNITS: usize = 255;
@@ -685,7 +687,7 @@ unsafe fn query_info<T: Copy>(file: &File, class: i32) -> io::Result<T> {
 }
 
 #[allow(unsafe_code)]
-fn query_attributes(
+pub(crate) fn query_attributes(
     file: &File,
 ) -> io::Result<windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_TAG_INFO> {
     // SAFETY: `FileAttributeTagInfo` returns exactly `FILE_ATTRIBUTE_TAG_INFO`.
@@ -886,7 +888,7 @@ pub(crate) fn is_dot_entry(name: &OsStr) -> bool {
     units == [46] || units == [46, 46]
 }
 
-fn native_error(status: NTSTATUS) -> io::Error {
+pub(crate) fn native_error(status: NTSTATUS) -> io::Error {
     if status == STATUS_OBJECT_NAME_COLLISION {
         return io::Error::new(
             io::ErrorKind::AlreadyExists,

@@ -918,10 +918,11 @@ fn legacy_world_accessible_data_directory_keeps_no_state_reads_available() {
 
 #[cfg(windows)]
 #[test]
-/// Confirms this unsupported backend reports unused state and refuses before
-/// mutating private storage or changing the workspace source.
-fn windows_reports_unused_state_and_rejects_preparation_before_creating_files() {
+/// An Everyone grant is broader than the store accepts, so the root is refused
+/// before any storage exists, and ordinary reads continue.
+fn windows_refuses_an_untrusted_data_root_before_creating_files() {
     let mut fixture = Fixture::new();
+    grant_everyone_read(&fixture.data);
     let original = b"existing Windows source";
     fs::write(fixture.workspace.join("source.bin"), original).expect("write source file");
     let binding = fixture.binding();
@@ -941,12 +942,33 @@ fn windows_reports_unused_state_and_rejects_preparation_before_creating_files() 
             },
             b"proposal",
         )
-        .expect_err("Windows checkpoint backend is unsupported");
-    assert!(
-        matches!(error, FileError::Checkpoint(error) if error.code() == "checkpoint_unsupported")
-    );
+        .expect_err("an Everyone grant is not private");
+    assert!(matches!(error, FileError::Checkpoint(error) if error.code() == "checkpoint_io"));
     for path in fixture.replacement_paths() {
-        assert!(!path.exists(), "unsupported preparation created {path:?}");
+        assert!(!path.exists(), "refused preparation created {path:?}");
     }
     read_bytes_are_unchanged(&mut fixture, &binding, original);
+}
+
+/// Grants Everyone read access to `path` and confirms that the grant is present.
+#[cfg(windows)]
+fn grant_everyone_read(path: &std::path::Path) {
+    use std::process::Command;
+
+    let granted = Command::new("icacls")
+        .arg(path)
+        .args(["/grant", "*S-1-1-0:(R)"])
+        .output()
+        .expect("run icacls");
+    assert!(granted.status.success(), "ACL fixture applies");
+    let found = Command::new("icacls")
+        .arg(path)
+        .args(["/findsid", "*S-1-1-0"])
+        .output()
+        .expect("run icacls");
+    assert!(
+        found.status.success()
+            && String::from_utf8_lossy(&found.stdout).contains(&*path.to_string_lossy()),
+        "the data root grants Everyone access"
+    );
 }

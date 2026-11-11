@@ -4,19 +4,19 @@ mod support;
 
 use std::fs;
 use std::path::Path;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use std::path::PathBuf;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::Duration;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use omgcode_core::control::ControlStore;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use omgcode_core::files::{FileBroker, FileTarget};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use omgcode_core::policy::PermissionSet;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use omgcode_core::replacement::RecordedArtifact;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -28,7 +28,7 @@ use support::{
 };
 
 const ORIGINAL: &[u8] = b"private_original_payload_9fb26b\n";
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 const PROPOSED: &[u8] = b"private_proposed_payload_a827d4\n";
 
 impl Fixture {
@@ -47,8 +47,8 @@ impl Fixture {
         )
     }
 
-    #[cfg(target_os = "linux")]
-    /// Prepares real Linux checkpoint evidence through a live binding and returns
+    #[cfg(any(target_os = "linux", windows))]
+    /// Prepares real native checkpoint evidence through a live binding and returns
     /// its operation ID; the CLI itself has no preparation command.
     fn prepare(&self) -> Uuid {
         without_child_spawns(|| {
@@ -198,7 +198,7 @@ fn checkpoint_recovery_commands_do_not_add_prepare_or_restore_routes() {
     );
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 /// A pending checkpoint blocks reads; trusted acknowledgement clears only that
 /// blocker. Inspection omits both payloads; workspace and payload bytes stay unchanged.
@@ -279,7 +279,7 @@ fn pending_checkpoint_blocks_file_reads_until_trusted_acknowledgement_without_ap
     );
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 /// Acknowledgement resolves checkpoint admission but does not restore permission
 /// that a separate settings update has revoked.
@@ -318,28 +318,31 @@ fn checkpoint_acknowledgement_does_not_restore_revoked_workspace_permissions() {
 
 #[cfg(windows)]
 #[test]
-/// Existing unsupported storage must cause inspection and acknowledgement to
-/// fail without changing settings, entries, or the workspace source.
-fn present_checkpoint_storage_refuses_an_unqualified_backend_without_mutation() {
+/// A data root that also grants another principal is refused without mutation.
+fn present_checkpoint_storage_refuses_an_untrusted_root_without_mutation() {
     let fixture = Fixture::new(ORIGINAL);
-    let storage = fixture.data.join("replacement-v1");
-    fs::create_dir(&storage).expect("existing unsupported storage marker");
+    let operation_id = fixture.prepare();
+    let mut icacls = std::process::Command::new("icacls");
+    icacls.arg(&fixture.data).args(["/grant", "*S-1-1-0:(R)"]);
+    let granted =
+        support::run_with_deadline(icacls, support::CLI_DEADLINE).expect("broaden fixture ACL");
+    assert!(!granted.timed_out, "ACL fixture timed out");
+    assert!(granted.output.status.success(), "ACL fixture applies");
     let before = child_names(&fixture.data);
     let settings = fs::read(fixture.data.join("control-v1.jsonl")).expect("settings bytes");
 
-    let inspection = run_cli(&fixture.data, &["file", "checkpoints"]);
-    assert_error_code(&inspection, "checkpoint_unsupported");
-    let acknowledgement = run_cli(
-        &fixture.data,
-        &[
-            "file",
-            "acknowledge-checkpoint",
-            &Uuid::new_v4().to_string(),
-        ],
+    assert_error_code(
+        &run_cli(&fixture.data, &["file", "checkpoints"]),
+        "checkpoint_io",
     );
-    assert_error_code(&acknowledgement, "checkpoint_unsupported");
+    assert_error_code(
+        &run_cli(
+            &fixture.data,
+            &["file", "acknowledge-checkpoint", &operation_id.to_string()],
+        ),
+        "checkpoint_io",
+    );
     assert_eq!(child_names(&fixture.data), before);
-    assert!(child_names(&storage).is_empty());
     assert_eq!(
         fs::read(fixture.data.join("control-v1.jsonl")).expect("settings"),
         settings

@@ -7,7 +7,7 @@ use omgcode_core::control::ControlStore;
 use omgcode_core::edit::{self, EditError};
 use omgcode_core::files::{FileBroker, FileError, FileTarget};
 use omgcode_core::policy::WorkspaceId;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use omgcode_core::replacement::RecordedArtifact;
 use serde_json::json;
 use uuid::Uuid;
@@ -204,15 +204,15 @@ pub(crate) fn run(command: FileCommand, data_root: &Path) -> Result<(), CliError
             expected_bytes,
             writers_stopped: _,
         } => {
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(any(target_os = "linux", windows)))]
             {
                 let _ = (scope, path, content_file, expected_sha256, expected_bytes);
                 Err(CliError::new(
                     "file_unsupported",
-                    "File replacement is available only on Linux",
+                    "File replacement is available only on Linux and Windows",
                 ))
             }
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", windows))]
             {
                 let binding = control
                     .bind_session(scope.session, scope.workspace)

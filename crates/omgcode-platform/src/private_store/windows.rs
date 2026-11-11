@@ -1,17 +1,24 @@
 //! Windows private storage with verified per-user ACLs on NTFS.
 //!
-//! This backend is not yet reachable from the core or CLI. `PrivateDirectory`
-//! still refuses on Windows, so no checkpoint or replacement is enabled here.
-//!
 //! Every entry this store creates carries an explicit protected DACL granting
 //! only the current user, applied by the same native create. The application
 //! data root inherits its ACL, so it instead must grant nothing beyond the
 //! current user, SYSTEM, and Administrators. ACLs are verified from the open
-//! handle and never repaired.
+//! handle and never repaired. A replacement stage is the one exception: it is
+//! created private, then takes its source's security before publication.
 //!
 //! Directory durability has no Microsoft contract. `sync` flushes the directory
 //! handle and refuses on failure, but no page states that this persists entries
 //! or renames. See ADR-0023. Same-user and administrator actors are not isolated.
+
+mod metadata;
+#[cfg(test)]
+pub(crate) use metadata::read_security;
+pub(super) use metadata::stage_metadata;
+pub(crate) use metadata::{
+    apply_security, read_native_security, set_content_indexing, split_native_security,
+    validate_file_metadata,
+};
 
 use std::ffi::{OsStr, OsString, c_void};
 use std::fs::{File, OpenOptions};
@@ -34,17 +41,18 @@ use windows_sys::Win32::Security::{
     AddAccessAllowedAce, CreateWellKnownSid, DACL_SECURITY_INFORMATION, EqualSid, GetAce,
     GetAclInformation, GetLengthSid, GetSecurityDescriptorControl, GetTokenInformation,
     INHERIT_ONLY_ACE, InitializeAcl, InitializeSecurityDescriptor, IsValidSid,
-    OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED, SECURITY_DESCRIPTOR,
-    SECURITY_MAX_SID_SIZE, SetSecurityDescriptorControl, SetSecurityDescriptorDacl,
-    SetSecurityDescriptorOwner, TOKEN_QUERY, TOKEN_USER, TokenUser, WELL_KNOWN_SID_TYPE,
+    OBJECT_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+    SE_DACL_PROTECTED, SECURITY_DESCRIPTOR, SECURITY_MAX_SID_SIZE, SetSecurityDescriptorControl,
+    SetSecurityDescriptorDacl, SetSecurityDescriptorOwner, TOKEN_INFORMATION_CLASS, TOKEN_OWNER,
+    TOKEN_QUERY, TOKEN_USER, TokenOwner, TokenUser, WELL_KNOWN_SID_TYPE,
     WinBuiltinAdministratorsSid, WinLocalSystemSid,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    FILE_ACCESS_RIGHTS, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_ALL_ACCESS, FILE_APPEND_DATA,
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_BACKUP_SEMANTICS,
+    DELETE, FILE_ACCESS_RIGHTS, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_ALL_ACCESS,
+    FILE_APPEND_DATA, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_BACKUP_SEMANTICS,
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_DELETE,
     FILE_SHARE_READ, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, GetVolumeInformationByHandleW,
-    READ_CONTROL, SYNCHRONIZE,
+    READ_CONTROL, SYNCHRONIZE, WRITE_DAC, WRITE_OWNER,
 };
 use windows_sys::Win32::System::SystemServices::{
     ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE, SECURITY_DESCRIPTOR_REVISION,
@@ -62,13 +70,15 @@ use crate::{DirectoryIdentity, directory_identity};
 
 const PRIVATE_DIRECTORY_ACCESS: FILE_ACCESS_RIGHTS =
     DIRECTORY_ACCESS | READ_CONTROL | FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY;
-const FILE_READ_ACCESS: FILE_ACCESS_RIGHTS =
+pub(crate) const FILE_READ_ACCESS: FILE_ACCESS_RIGHTS =
     FILE_READ_DATA | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE;
 const FILE_WRITE_ACCESS: FILE_ACCESS_RIGHTS =
     FILE_READ_ACCESS | FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_ATTRIBUTES;
-const DIRECTORY_OPTIONS: u32 =
+const STAGE_ACCESS: FILE_ACCESS_RIGHTS = FILE_WRITE_ACCESS | DELETE | WRITE_DAC | WRITE_OWNER;
+pub(crate) const STAGE_NAME: &str = "stage";
+pub(crate) const DIRECTORY_OPTIONS: u32 =
     FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT;
-const FILE_OPTIONS: u32 =
+pub(crate) const FILE_OPTIONS: u32 =
     FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT;
 const MAX_COMPONENT_UNITS: usize = 255;
 const MAX_ROOT_ACES: u32 = 64;
@@ -172,6 +182,24 @@ impl Principals {
 /// Reads the process token's user SID.
 #[allow(unsafe_code)]
 fn current_user_sid() -> io::Result<Sid> {
+    let storage = token_information(TokenUser)?;
+    // SAFETY: success wrote a `TOKEN_USER` at the start of aligned `storage`,
+    // and its SID pointer refers into `storage`, which is still alive here.
+    Sid::copy_from(unsafe { (*storage.as_ptr().cast::<TOKEN_USER>()).User.Sid })
+}
+
+/// Reads the owner the process token assigns to objects it creates.
+#[allow(unsafe_code)]
+fn default_owner_sid() -> io::Result<Sid> {
+    let storage = token_information(TokenOwner)?;
+    // SAFETY: success wrote a `TOKEN_OWNER` at the start of aligned `storage`,
+    // and its SID pointer refers into `storage`, which is still alive here.
+    Sid::copy_from(unsafe { (*storage.as_ptr().cast::<TOKEN_OWNER>()).Owner })
+}
+
+/// Reads one bounded token information class into aligned storage.
+#[allow(unsafe_code)]
+fn token_information(class: TOKEN_INFORMATION_CLASS) -> io::Result<Vec<u64>> {
     let mut raw: HANDLE = std::ptr::null_mut();
     // SAFETY: the pseudo-handle is always valid and `raw` is writable.
     if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut raw) } == 0 {
@@ -184,7 +212,7 @@ fn current_user_sid() -> io::Result<Sid> {
     let sized = unsafe {
         GetTokenInformation(
             token.as_raw_handle() as HANDLE,
-            TokenUser,
+            class,
             std::ptr::null_mut(),
             0,
             &mut needed,
@@ -195,7 +223,7 @@ fn current_user_sid() -> io::Result<Sid> {
         || size_error.raw_os_error() != i32::try_from(ERROR_INSUFFICIENT_BUFFER).ok()
         || !(1..=MAX_TOKEN_USER_BYTES).contains(&needed)
     {
-        return Err(invalid_data("process token user size is invalid"));
+        return Err(invalid_data("process token information size is invalid"));
     }
     let bytes = usize::try_from(needed).map_err(|_| invalid_data("token size overflow"))?;
     let mut storage = vec![0u64; bytes.div_ceil(size_of::<u64>())];
@@ -203,7 +231,7 @@ fn current_user_sid() -> io::Result<Sid> {
     let read = unsafe {
         GetTokenInformation(
             token.as_raw_handle() as HANDLE,
-            TokenUser,
+            class,
             storage.as_mut_ptr().cast(),
             needed,
             &mut needed,
@@ -212,9 +240,7 @@ fn current_user_sid() -> io::Result<Sid> {
     if read == 0 {
         return Err(io::Error::last_os_error());
     }
-    // SAFETY: success wrote a `TOKEN_USER` at the start of aligned `storage`,
-    // and its SID pointer refers into `storage`, which is still alive here.
-    Sid::copy_from(unsafe { (*storage.as_ptr().cast::<TOKEN_USER>()).User.Sid })
+    Ok(storage)
 }
 
 /// An absolute security descriptor and the buffers it points into.
@@ -308,14 +334,25 @@ enum Ace {
 struct ObjectSecurity {
     descriptor: PSECURITY_DESCRIPTOR,
     owner: PSID,
+    group: PSID,
     dacl: *mut ACL,
 }
 
 impl ObjectSecurity {
     /// Reads the owner and DACL of the object behind this same open handle.
-    #[allow(unsafe_code)]
     fn read(file: &File) -> io::Result<Self> {
+        let security = Self::query(file, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION)?;
+        if security.descriptor.is_null() || security.owner.is_null() || security.dacl.is_null() {
+            return Err(invalid_data("object has no owner or DACL"));
+        }
+        Ok(security)
+    }
+
+    /// Reads the requested parts of the object's descriptor from this handle.
+    #[allow(unsafe_code)]
+    fn query(file: &File, information: OBJECT_SECURITY_INFORMATION) -> io::Result<Self> {
         let mut owner: PSID = std::ptr::null_mut();
+        let mut group: PSID = std::ptr::null_mut();
         let mut dacl: *mut ACL = std::ptr::null_mut();
         let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
         // SAFETY: `file` is a live handle opened with READ_CONTROL, and every
@@ -324,9 +361,9 @@ impl ObjectSecurity {
             GetSecurityInfo(
                 file.as_raw_handle() as HANDLE,
                 SE_FILE_OBJECT,
-                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                information,
                 &mut owner,
-                std::ptr::null_mut(),
+                &mut group,
                 &mut dacl,
                 std::ptr::null_mut(),
                 &mut descriptor,
@@ -337,15 +374,12 @@ impl ObjectSecurity {
                 i32::try_from(status).map_err(|_| invalid_data("native error out of range"))?,
             ));
         }
-        let security = Self {
+        Ok(Self {
             descriptor,
             owner,
+            group,
             dacl,
-        };
-        if security.descriptor.is_null() || security.owner.is_null() || security.dacl.is_null() {
-            return Err(invalid_data("object has no owner or DACL"));
-        }
-        Ok(security)
+        })
     }
 
     fn owner(&self) -> io::Result<Sid> {
@@ -482,7 +516,7 @@ fn require_trusted_root(file: &File, principals: &Principals) -> io::Result<()> 
 
 /// Refuses anything except NTFS, the only filesystem this backend has tested.
 #[allow(unsafe_code)]
-fn require_ntfs(file: &File) -> io::Result<()> {
+pub(crate) fn require_ntfs(file: &File) -> io::Result<()> {
     let mut name = [0u16; FILE_SYSTEM_NAME_UNITS];
     let capacity = u32::try_from(name.len()).map_err(|_| invalid_data("name buffer too large"))?;
     // SAFETY: `file` is live and `name` is writable for `capacity` units. The
@@ -647,6 +681,46 @@ impl WindowsPrivateDirectory {
         Ok(file)
     }
 
+    /// Exclusively creates the private replacement stage and flushes its parent.
+    ///
+    /// The handle keeps the rights to write, take the source's security, and be
+    /// renamed. Those rights stay with this handle after its DACL changes.
+    pub fn create_stage(&self) -> io::Result<File> {
+        self.validate()?;
+        let security = ExplicitDescriptor::private_to(&self.principals.user)?;
+        let file = create_relative_secured(
+            &self.file,
+            OsStr::new(STAGE_NAME),
+            STAGE_ACCESS,
+            FILE_OPTIONS,
+            FILE_SHARE_READ | FILE_SHARE_DELETE,
+            FILE_ATTRIBUTE_NORMAL,
+            &security.descriptor,
+        )?;
+        self.validate_child_file(&file)?;
+        self.sync()?;
+        Ok(file)
+    }
+
+    /// Opens the stage read-only. Its DACL may already match its source, so
+    /// the private-file rule does not apply; unsupported metadata is refused.
+    pub fn open_stage(&self) -> io::Result<File> {
+        self.validate()?;
+        let file = open_relative(
+            &self.file,
+            OsStr::new(STAGE_NAME),
+            FILE_READ_ACCESS,
+            FILE_OPEN,
+            FILE_OPTIONS,
+            SHARE_READ_WRITE | FILE_SHARE_DELETE,
+            0,
+        )
+        .map_err(map_missing)?;
+        validate_regular_file(&file, self.volume)?;
+        stage_metadata(&file)?;
+        Ok(file)
+    }
+
     /// Observes whether one name exists without following a reparse point.
     /// This observation does not validate or authorize a later open.
     pub fn exists(&self, name: &OsStr) -> io::Result<bool> {
@@ -729,6 +803,16 @@ impl WindowsPrivateDirectory {
     }
 }
 
+/// Reports whether `file` has exactly the private owner and DACL this store
+/// creates. Only a mismatch is `false`; a failed query is returned.
+pub fn is_private_file(file: &File) -> io::Result<bool> {
+    match require_private(file, &Principals::current()?) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::InvalidData => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 /// Checks privacy on the opened file before returning its native identity.
 /// The handle must have READ_CONTROL. No pathname lookup or reopen occurs.
 pub fn file_identity(file: &File) -> io::Result<PrivateFileIdentity> {
@@ -784,7 +868,7 @@ fn invalid_data(message: &'static str) -> io::Error {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::broker::windows::tests::create_junction_bounded;
     use std::fs;
@@ -796,8 +880,8 @@ mod tests {
     use windows_sys::Win32::Security::WinWorldSid;
 
     /// Declares `root` before `temporary` so handles close before cleanup.
-    struct Fixture {
-        root: WindowsPrivateDirectory,
+    pub(crate) struct Fixture {
+        pub(crate) root: WindowsPrivateDirectory,
         path: PathBuf,
         _temporary: tempfile::TempDir,
     }
@@ -826,7 +910,29 @@ mod tests {
         parent.join(name)
     }
 
-    fn fixture() -> Fixture {
+    /// Creates a private store root that other test modules can open.
+    pub(crate) fn private_root(parent: &Path, name: &str) -> PathBuf {
+        let security = ExplicitDescriptor::private_to(&user()).expect("descriptor");
+        create_directory_with(parent, name, &security)
+    }
+
+    /// Creates a file in `fixture` whose explicit DACL is not protected.
+    pub(crate) fn create_unprotected_file(fixture: &Fixture, name: &str) -> File {
+        let user = user();
+        let security = ExplicitDescriptor::new(&user, &[&user], false).expect("descriptor");
+        create_relative_secured(
+            &fixture.root.file,
+            OsStr::new(name),
+            FILE_WRITE_ACCESS,
+            FILE_OPTIONS,
+            FILE_SHARE_READ,
+            FILE_ATTRIBUTE_NORMAL,
+            &security.descriptor,
+        )
+        .expect("fixture file")
+    }
+
+    pub(crate) fn fixture() -> Fixture {
         let temporary = tempfile::tempdir().expect("fixture");
         let user = user();
         let security = ExplicitDescriptor::private_to(&user).expect("descriptor");

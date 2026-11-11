@@ -880,7 +880,13 @@ fn inventory(
         if let Some(identity) = &operation.stage_identity {
             if entry.exists(OsStr::new("stage"))? {
                 let security = security.ok_or(CheckpointError::Invalid("stage lacks manifest"))?;
-                validate_stage(&entry, identity, &operation.proposed, security)?;
+                validate_stage(
+                    &entry,
+                    identity,
+                    &operation.proposed,
+                    security,
+                    operation.progress == ReplacementProgress::CommitIntended,
+                )?;
             } else if operation.progress != ReplacementProgress::CommitIntended {
                 return Err(CheckpointError::Invalid("recorded stage is missing"));
             }
@@ -933,20 +939,23 @@ fn validate_prepared(
     Ok(security)
 }
 
-/// Validate the exact retained stage against its identity and source metadata.
-fn validate_stage(
+/// Validate the exact retained stage against its identity and the security its
+/// progress permits. See `SecurityMetadata::permits_stage`.
+pub(super) fn validate_stage(
     entry: &PrivateDirectory,
     identity: &super::RecordedFileIdentity,
     proposed: &RecordedArtifact,
     security: SecurityMetadata,
+    after_commit_intent: bool,
 ) -> Result<u64, CheckpointError> {
     let mut file = entry.open_stage()?;
     let bytes = read_stage(&mut file)?;
     let actual = stage_metadata(&file)?;
+    let private = stage_is_private(&file)?;
     let content = descriptor(&bytes)?;
     if actual.identity.volume != identity.volume
         || actual.identity.file_id != identity.file_id
-        || !security.matches_stage(&actual)
+        || !security.permits_stage(&actual, private, after_commit_intent)
         || content != *proposed
     {
         return Err(CheckpointError::Invalid(
@@ -954,6 +963,18 @@ fn validate_stage(
         ));
     }
     Ok(content.bytes)
+}
+
+/// Windows keeps a stage owner-only until its commit attempt.
+#[cfg(windows)]
+fn stage_is_private(file: &File) -> Result<bool, CheckpointError> {
+    Ok(omgcode_platform::private_store::is_private_file(file)?)
+}
+
+/// Linux stages take their final mode before staging; privacy is not tracked.
+#[cfg(not(windows))]
+fn stage_is_private(_file: &File) -> Result<bool, CheckpointError> {
+    Ok(false)
 }
 
 fn lock(file: &File) -> Result<(), CheckpointError> {
@@ -1035,9 +1056,11 @@ mod tests {
                 bytes: fs::read(&self.source).expect("source bytes"),
                 volume: metadata.dev(),
                 file_id: u128::from(metadata.ino()).to_le_bytes(),
-                owner: metadata.uid(),
-                group: metadata.gid(),
-                mode: metadata.mode() & 0o777,
+                security: omgcode_platform::private_store::NativeSecurity::Unix {
+                    owner: metadata.uid(),
+                    group: metadata.gid(),
+                    mode: metadata.mode() & 0o777,
+                },
             }
         }
         fn ledger_bytes(&self) -> Vec<u8> {

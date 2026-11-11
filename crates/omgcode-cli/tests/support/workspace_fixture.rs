@@ -28,6 +28,8 @@ impl Fixture {
         let workspace = development.join("project");
         fs::create_dir_all(&workspace).expect("workspace directories");
         fs::write(workspace.join("note.txt"), original).expect("original workspace file");
+        #[cfg(windows)]
+        restrict_to_current_user(&data);
 
         let workspace_id = without_child_spawns(|| {
             let mut control = ControlStore::open(&data).expect("private control store");
@@ -61,4 +63,37 @@ impl Fixture {
             session_id: Uuid::new_v4(),
         }
     }
+}
+
+/// Gives `data` the private ACL the Windows store requires of its root.
+///
+/// Temporary directories inherit grants that the store correctly refuses.
+#[cfg(windows)]
+fn restrict_to_current_user(data: &std::path::Path) {
+    use std::process::Command;
+
+    use super::{CLI_DEADLINE, run_with_deadline};
+
+    let run = |command: Command| {
+        let result = run_with_deadline(command, CLI_DEADLINE).expect("run ACL fixture command");
+        assert!(!result.timed_out, "ACL fixture command timed out");
+        assert!(result.output.status.success(), "ACL fixture command failed");
+        String::from_utf8(result.output.stdout).expect("UTF-8 output")
+    };
+    let mut whoami = Command::new("whoami");
+    whoami.args(["/user", "/fo", "csv", "/nh"]);
+    let identity = run(whoami);
+    let sid = identity
+        .trim()
+        .rsplit(',')
+        .next()
+        .expect("SID column")
+        .trim_matches('"')
+        .to_owned();
+    fs::create_dir(data).expect("application data");
+    let mut icacls = Command::new("icacls");
+    icacls
+        .arg(data)
+        .args(["/inheritance:r", "/grant:r", &format!("*{sid}:(OI)(CI)F")]);
+    run(icacls);
 }

@@ -33,8 +33,11 @@ This is a resume guide, not a replacement for the owning contracts in
 - **PR #15** merged at `4fe92ca`: **Phase A2c**, version **0.9.0**, with trusted
   Linux ext4 apply. Its pull-request checks passed, but the Rust workflow failed
   on the merge commit because of the test race described in the known cautions.
-- This branch, `codex/fix-control-lock-race`, fixes that test race. It changes
-  tests and documentation only, so the version stays **0.9.0**.
+- **PR #16** merged at `b7fbc0b`: fixes that test race, with tests and
+  documentation only.
+- **PR #17** merged at `ddfc90a`: **Phase A3a**, the Windows NTFS private store.
+- This branch, `codex/windows-apply`: **Phase A3b**, version **0.10.0**, with
+  Windows NTFS checkpoint storage and trusted apply.
 
 Implemented today:
 
@@ -66,15 +69,17 @@ Implemented today:
   capacity, and fail-closed admission. No workspace entry is replaced.
 - Existing-only `file checkpoints` and `file acknowledge-checkpoint` recovery.
   Inspection returns metadata. Acknowledgement clears a blocker without success,
-  repair, permission changes, or replay. Windows checkpoint storage is unsupported.
+  repair, permission changes, or replay.
 - Trusted `file apply` on Linux ext4: exact precondition, stopped-writers
   acknowledgement, private stage, durable commit intent, one native rename,
   and verified sync/outcome ordering. See [ADR-0022](docs/adr/0022-publish-one-verified-stage-on-linux-ext4.md).
+- Windows NTFS checkpoint storage and trusted `file apply`, with no power-loss
+  claim. See [ADR-0024](docs/adr/0024-publish-one-verified-stage-on-windows-ntfs.md).
 
 Not implemented:
 
-- Windows apply, apply on other Linux filesystems, restore, deletion, and
-  standalone CLI checkpoint preparation.
+- Apply on other filesystems, restore, deletion, and standalone CLI checkpoint
+  preparation.
 - CLI or real-provider model tool dispatch.
 - Process execution, execution containment, Git, MCP, runtime skills, memories,
   desktop/UI panels, compaction, or caches.
@@ -160,6 +165,16 @@ formatting, Clippy, all-target tests, and doc tests. Linux under WSL ran 294 tes
 and one doc test. Native Windows ran 238 tests and one doc test, with
 workspace-local `TEMP` and `TMP`. No tests failed, were ignored, or were filtered.
 
+A3b final verification used default test parallelism with Rust 1.99.1 and passed
+formatting, Clippy, all-target tests, and doc tests. Native Windows ran 309 tests
+and one doc test, with `TEMP` and `TMP` on the same NTFS volume as the fixtures.
+Linux under WSL ran 296 tests and one doc test. No tests failed, were ignored, or
+were filtered. Temporary mutations of the Windows refusal checks were each caught
+by a test, except for two that do not change behaviour on the tested host: a link
+check that `stage_metadata` repeats, and the first of two identity comparisons in
+the recheck. These results do not establish remote CI status, power-loss behaviour,
+or release filesystem support.
+
 A mock or compile-only result does not establish native containment, live
 provider compatibility, or release filesystem support.
 
@@ -193,13 +208,14 @@ at that review boundary:
     metadata, durable intent, native publication, and uncertain-outcome recovery.
     Other filesystems and Windows refuse apply. Release filesystem and power-loss
     qualification, Windows ACLs, and restore remain open.
-  - **A3a (this branch, `codex/windows-private-store`):** Windows NTFS private
-    store with exact per-user DACLs, as a separate public type the core does not
-    use. No capture, publication, or behaviour change. See
+  - **A3a (merged as PR #17):** Windows NTFS private store with exact per-user
+    DACLs, as a separate public type the core did not yet use. See
     [ADR-0023](docs/adr/0023-store-windows-checkpoints-with-verified-acls.md).
-  - **A3b (next):** Windows capture, security-metadata preservation, and
-    retained-handle publication, then wire the store to `PrivateDirectory` and
-    lift the core's refusal. ADR-0023 records the observed rename behaviour.
+  - **A3b (this branch, `codex/windows-apply`):** Windows capture,
+    security-metadata preservation, and retained-handle publication, with the
+    store wired to `PrivateDirectory` and the core's refusal lifted. See
+    [ADR-0024](docs/adr/0024-publish-one-verified-stage-on-windows-ntfs.md).
+    Release qualification, power-loss evidence, and restore remain open.
 
 Contract decisions accepted in A1:
 

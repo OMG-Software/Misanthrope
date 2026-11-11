@@ -5,20 +5,20 @@ mod support;
 use std::fs;
 use std::path::Path;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use omgcode_core::control::ControlStore;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use omgcode_core::policy::PermissionSet;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use serde_json::Value;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use serde_json::json;
 use uuid::Uuid;
 
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::MetadataExt;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use support::spawn_gate::without_child_spawns;
 use support::workspace_fixture::Fixture;
 use support::{
@@ -26,12 +26,12 @@ use support::{
 };
 
 const ORIGINAL: &[u8] = b"before\r\nlast line";
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 const PROPOSED: &[u8] = b"after\r\nlast line\r\n";
 
 impl Fixture {
     /// Read the current target through the public CLI and return its exact digest.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     fn current_sha256(&self) -> String {
         let output = run_cli(
             &self.data,
@@ -123,13 +123,14 @@ fn apply_requires_existing_settings_without_creating_them() {
     assert!(!data.exists());
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn apply_replaces_exact_bytes_and_retains_a_completed_checkpoint() {
     let fixture = Fixture::new(ORIGINAL);
     let proposed_file = fixture._temporary.path().join("proposed.txt");
     fs::write(&proposed_file, PROPOSED).expect("complete proposed bytes");
     let expected_sha256 = fixture.current_sha256();
+    #[cfg(target_os = "linux")]
     let original_metadata =
         fs::metadata(fixture.workspace.join("note.txt")).expect("original file metadata");
 
@@ -161,8 +162,10 @@ fn apply_replaces_exact_bytes_and_retains_a_completed_checkpoint() {
         fs::read(fixture.workspace.join("note.txt")).expect("published bytes"),
         PROPOSED
     );
+    #[cfg(target_os = "linux")]
     let published_metadata =
         fs::metadata(fixture.workspace.join("note.txt")).expect("published file metadata");
+    #[cfg(target_os = "linux")]
     assert_ne!(original_metadata.ino(), published_metadata.ino());
 
     let operation_id = receipt["operation_id"]
@@ -198,7 +201,7 @@ fn apply_replaces_exact_bytes_and_retains_a_completed_checkpoint() {
     );
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn applying_identical_bytes_does_not_create_a_checkpoint() {
     let fixture = Fixture::new(ORIGINAL);
@@ -220,7 +223,7 @@ fn applying_identical_bytes_does_not_create_a_checkpoint() {
     );
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn stale_expected_digest_refuses_without_changing_target_or_checkpoint_storage() {
     let fixture = Fixture::new(ORIGINAL);
@@ -236,7 +239,7 @@ fn stale_expected_digest_refuses_without_changing_target_or_checkpoint_storage()
     );
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn denied_write_preference_refuses_replacement() {
     let fixture = Fixture::new(ORIGINAL);
@@ -269,7 +272,7 @@ fn denied_write_preference_refuses_replacement() {
     assert!(!fixture.data.join("replacement-v1").exists());
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn apply_requires_explicit_stop_writers_flag_without_side_effects() {
     let fixture = Fixture::new(ORIGINAL);
@@ -311,18 +314,23 @@ fn apply_rejects_a_symlinked_proposed_source() {
 
 #[cfg(windows)]
 #[test]
-fn windows_apply_refuses_before_checkpoint_or_workspace_mutation() {
+fn apply_refuses_a_target_held_open_by_a_writer() {
+    use std::os::windows::fs::OpenOptionsExt;
+
     let fixture = Fixture::new(ORIGINAL);
-    let absent_source = fixture._temporary.path().join("source-does-not-exist.txt");
-    let before_names = child_names(&fixture.data);
+    let proposed_file = fixture._temporary.path().join("proposed.txt");
+    fs::write(&proposed_file, PROPOSED).expect("complete proposed bytes");
+    let expected_sha256 = fixture.current_sha256();
+    let writer = fs::OpenOptions::new()
+        .write(true)
+        .share_mode(7)
+        .open(fixture.workspace.join("note.txt"))
+        .expect("independent writer");
 
-    let checkpoints = run_cli(&fixture.data, &["file", "checkpoints"]);
-    assert_success(&checkpoints);
-    assert_eq!(json_output(&checkpoints)["state"], "unused");
-
-    let output = fixture.apply(&absent_source, &"0".repeat(64), ORIGINAL.len(), true);
-    assert_error_code(&output, "file_unsupported");
-    assert_eq!(child_names(&fixture.data), before_names);
+    let output = fixture.apply(&proposed_file, &expected_sha256, ORIGINAL.len(), true);
+    assert!(!output.status.success(), "an open writer must refuse apply");
+    drop(writer);
+    assert!(!fixture.data.join("replacement-v1").exists());
     assert_eq!(
         fs::read(fixture.workspace.join("note.txt")).expect("unchanged source"),
         ORIGINAL

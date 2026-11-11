@@ -6,9 +6,18 @@ Changes are recorded here before a release version is assigned.
 
 ### Added
 
+- Version 0.10.0 enables checkpoint storage and trusted `file apply` on Windows
+  NTFS. Apply preserves the owner, group, DACL, and content-indexing opt-out, and
+  refuses metadata it cannot reproduce. The stage stays owner-only until the
+  commit attempt, and a failure before the rename tries to restore that DACL.
+  The opt-out changes only while the stage is private, so a crash between the
+  two metadata writes leaves a stage that recovery accepts.
+  A crash or failed restore in that window can leave a retained stage with the
+  source DACL, which may expose unpublished bytes to principals it admits.
+  Windows makes no power-loss claim and is not qualified for release; see
+  ADR-0024.
 - Add a Windows NTFS private-store backend with exact protected per-user DACLs,
-  handle-relative access, and a failing directory flush. It is not wired to the
-  core, so Windows checkpoints and apply still refuse. Microsoft documents no
+  handle-relative access, and a failing directory flush. Microsoft documents no
   durability contract for the flush; see ADR-0023.
 
 ### Changed
