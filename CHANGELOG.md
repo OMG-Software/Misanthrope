@@ -6,6 +6,19 @@ Changes are recorded here before a release version is assigned.
 
 ### Added
 
+- Version 0.12.0 lets chat offer the local LM Studio model two tools,
+  `workspace_read_file` and `workspace_list_directory`, for a workspace whose
+  new `model_tools` preference is enabled. The preference is off by default and
+  is set with `workspace permissions --model-tools true`. Settings logs that
+  never enable it stay readable by 0.11.0. Each call rechecks the live
+  `model_tools` and read preferences and stays inside the registered workspace;
+  parent, absolute, rooted, and link paths are refused. There is no per-call
+  approval prompt. A turn makes at most four model requests within 120 seconds.
+  Tool results are source-labelled user messages, and the configured server
+  token is removed from them before they are recorded or sent. `workspace
+  status` reports `model_tools`, and `capabilities` reports
+  `model_read_list_tools` and a new `tool_policy` value. Live LM Studio
+  tool-call compatibility is not qualified; see ADR-0026.
 - Version 0.11.0 adds trusted `file restore` and
   `file delete-checkpoint --permanent` on Linux ext4 and Windows NTFS. Restore
   writes a retained checkpoint's original bytes back through the normal apply

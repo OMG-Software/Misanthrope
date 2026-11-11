@@ -16,8 +16,9 @@ metadata. The v0.3.0 core also authorizes a bounded native file broker, exposed
 only through trusted CLI commands. Broker operations add live handle checks and
 use a separate file-operation journal. The v0.4.0 core adds a session-owned
 turn/tool runtime and schema-version-2 journals. That runtime is exercised with
-a scripted model and the real control store, broker, and temporary workspace; no
-CLI route or real provider adapter dispatches tools. The v0.5.0 CLI adds a
+a scripted model and the real control store, broker, and temporary workspace.
+Since 0.12.0, CLI chat tests also drive it through the LM Studio adapter against
+a local mock server. The v0.5.0 CLI adds a
 read-only edit preview that compares a broker-read file with trusted proposed
 content and never writes or checkpoints. These features do not provide a
 process runner or an execution sandbox. See [workspace permissions](workspace-permissions.md)
@@ -123,6 +124,7 @@ As the relevant components are implemented, include:
 | Frontend | Untrusted rendering, IPC authorization, no secret disclosure |
 | Sessions | Concurrent edits/worktrees, JSONL naming/schema/durability, index rebuild, archive/restore, safe resume, v1/v2 boundaries |
 | Turn/tool lifecycle | Fresh bindings, strict schemas, unknown/malformed/duplicate calls, round/call/byte limits, cancellation, deadline, source labels, denial at the broker, no replay |
+| Model tool chat | Preference off by default and rechecked per call, settings compatibility, confinement against parent, absolute, rooted, UNC, link, junction, and hard-link paths, strict provider tool-call parsing, token removal before journal and model |
 | MCP | Version/transport compatibility, authorization, untrusted content, local confinement, OAuth/redirects, cancellation |
 | LM Studio | Model discovery, token/no-token profiles, streamed tools, context limits, unavailable models, no hosted-tool bypass |
 | Instructions | Compiled base/UI/request match, runtime replacement denial, role-injection attempts, preference/task precedence, revisions, safe rendering |
@@ -137,9 +139,11 @@ and model were tested. A mock pass is not a live-provider compatibility result.
 
 The current LM Studio adapter tests use a local HTTP fixture. They do not call a
 live model. The adapter supports one non-streaming Chat Completions request,
-rejects tool requests, requires the compiled base prompt, and accepts only a
-literal loopback HTTP endpoint. The turn-runtime tests use a scripted model
-interface; they do not establish real provider tool-call compatibility. Model discovery, streaming, cancellation, and
+rejects tool requests unless the workspace enables `model_tools`, requires the
+compiled base prompt, and accepts only a literal loopback HTTP endpoint. The
+turn-runtime tests use a scripted model interface. The tool-enabled chat tests
+use a mock that returns the documented OpenAI-compatible tool-call shape; they
+do not establish live LM Studio tool-call compatibility. Model discovery, streaming, cancellation, and
 live model compatibility remain future qualification work. The CLI can inspect
 and archive sessions, but it does not execute recorded tool actions or resume
 an incomplete turn.

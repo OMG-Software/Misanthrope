@@ -32,9 +32,9 @@ skill/tool/memory selections, or an account profile.
 
 The core turn/tool runtime records the exact tool schema version and tool names
 in a schema-version-2 request manifest. Its read/list results are appended as
-source-labelled user-level tool messages and are never system messages. The CLI
-does not expose this runtime: `chat` sends no tool definitions and rejects any
-provider tool call.
+source-labelled user-level tool messages and are never system messages. Chat
+runs this runtime only for a workspace that enables `model_tools`; otherwise it
+sends no tool definitions and rejects any provider tool call.
 
 Prompt assembly limits custom instruction text and each history message to 16
 KiB, history to 128 messages, and the assembled UTF-8 text to 256 KiB. The

@@ -36,12 +36,13 @@ This is a resume guide, not a replacement for the owning contracts in
 - **PR #16** merged at `b7fbc0b`: fixes that test race, with tests and
   documentation only.
 - **PR #17** merged at `ddfc90a`: **Phase A3a**, the Windows NTFS private store.
-- **PR #18**, `codex/windows-apply`: **Phase A3b**, version **0.10.0**, with
-  Windows NTFS checkpoint storage and trusted apply. Open and unmerged when A4
-  started from its `2dc3b50` head.
-- This branch, `codex/checkpoint-restore-delete`: **Phase A4**, version
-  **0.11.0**, with explicit restore and checkpoint deletion. It is stacked on
-  PR #18. Retarget its PR to `main` after PR #18 merges.
+- **PR #18** merged at `243ba8d`: **Phase A3b**, version **0.10.0**, with
+  Windows NTFS checkpoint storage and trusted apply.
+- **PR #19** merged at `270b889`: **Phase A4**, version **0.11.0**, with
+  explicit restore and checkpoint deletion.
+- This branch, `codex/model-read-tools`: **Phase B**, version **0.12.0**, with
+  read/list model tools in chat behind the `model_tools` workspace preference.
+  It starts from `main` at `270b889`.
 
 Implemented today:
 
@@ -59,12 +60,15 @@ Implemented today:
 - Core turn/tool runtime for read/list through a caller-supplied model
   interface. It has strict tool-call parsing, round/call/byte/prompt limits,
   cooperative cancellation, source-labelled messages, and fresh per-operation
-  policy bindings. No CLI command or real provider adapter dispatches it.
+  policy bindings. Chat dispatches it through the LM Studio adapter for a
+  workspace that enables `model_tools`.
 - Read-only `file diff`: trusted CLI preview of a broker-read file against
   complete proposed UTF-8 content. Exact digests, bounded one-hunk diff, no
   workspace mutation, no checkpoint, no replacement.
-- Text-only LM Studio Chat Completions chat with one non-streaming request and
-  no model tools.
+- LM Studio Chat Completions chat with non-streaming requests. It is text-only
+  unless the session's workspace enables `model_tools`; then it offers only the
+  read and list tools. See
+  [ADR-0026](docs/adr/0026-offer-read-list-tools-through-a-workspace-preference.md).
 - Read-only core initialization/ledger record inspectors with bounded strict
   JSON, lifecycle validation, manifest references, and unresolved-state retention.
   The pure inspectors open no files and execute no recorded work.
@@ -88,7 +92,8 @@ Not implemented:
 
 - Apply or restore on other filesystems, workspace file deletion, ledger
   compaction, and standalone CLI checkpoint preparation.
-- CLI or real-provider model tool dispatch.
+- Model write, process, network, Git, or MCP tools; per-call tool approval;
+  and live provider tool-call qualification.
 - Process execution, execution containment, Git, MCP, runtime skills, memories,
   desktop/UI panels, compaction, or caches.
 - Subscription/API-key provider profiles beyond the local LM Studio route.
@@ -196,6 +201,15 @@ one doc test. Linux ext4 under WSL, uid 1000, ran 310 tests and one doc test. No
 tests failed, were ignored, or were filtered. These results do not establish
 remote CI status, power-loss behaviour, or release filesystem support.
 
+Phase B started from `main` at `270b889`. Its final verification ran with Rust
+1.99.1 and default test parallelism. It passed formatting, Clippy, all-target
+tests, and doc tests. Native Windows NTFS ran 339 tests and one doc test. Linux
+ext4 under WSL, uid 1000, ran 325 tests and one doc test. No tests failed, were
+ignored, or were filtered. Temporary removal of path confinement, the core
+tool-text filter, and the CLI filter call were each caught by a test. These
+results use a mock LM Studio server. They do not establish live tool-call
+compatibility, remote CI status, or release readiness.
+
 A mock or compile-only result does not establish native containment, live
 provider compatibility, or release filesystem support.
 
@@ -285,8 +299,17 @@ Runtime acceptance criteria for A2:
 
 ### Phase B: provider tool-call integration for read/list
 
-Only after an explicit product decision on model tool dispatch. The runtime is
-already bounded and policy-checked, but the CLI currently advertises no tools.
+**This branch, `codex/model-read-tools`.** The user chose a persisted
+workspace preference with no per-call prompt, and required that a model call
+never read outside the registered workspace. Chat offers the read and list tools
+only when the session's workspace enables `model_tools`. The dispatcher rechecks
+that preference live before each call. Model paths are refused before the
+broker when absolute, rooted, prefixed, or parent-relative; the broker still
+refuses links and names outside the workspace. The LM Studio adapter parses tool
+calls strictly, and the configured token is removed from tool results before
+they are recorded or sent. See
+[ADR-0026](docs/adr/0026-offer-read-list-tools-through-a-workspace-preference.md).
+Live LM Studio tool-call compatibility remains open.
 
 Acceptance criteria:
 

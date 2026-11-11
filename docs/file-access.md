@@ -5,8 +5,10 @@
 The 0.3.0 broker provides bounded file reads, directory listings, exclusive
 new-file creation, and exclusive single-directory creation. Trusted CLI input
 exercises these APIs. The 0.4.0 core turn runtime can also dispatch read and
-list through a caller-supplied model interface, but no CLI command exposes it;
-chat still advertises no tools and rejects model tool calls. The 0.5.0 CLI adds
+list through a caller-supplied model interface. Since 0.12.0, chat runs that
+runtime with the local LM Studio adapter when the workspace's
+[`model_tools` preference](workspace-permissions.md#model-readlist-tools) is
+enabled; otherwise chat advertises no tools. The 0.5.0 CLI adds
 a read-only `file diff` preview that reads through the broker and never writes,
 checkpoints, or replaces a workspace entry. The process runner,
 terminal, Git, MCP, and graphical panels are separate increments. This broker is
@@ -15,8 +17,9 @@ not process containment or a release qualification.
 The CLI session UUID selects an operator trace scope. These manual commands do
 not dispatch work from saved conversations. The core turn runtime checks
 archive and active-turn state before starting and obtains a fresh binding before
-each call; it does not infer a live binding from journal metadata. A future CLI
-or provider integration must preserve those checks.
+each call; it does not infer a live binding from journal metadata. Tool-enabled
+chat preserves those checks and also requires the live `model_tools`
+preference before each call.
 
 Trusted apply can replace an existing file on Linux ext4 or Windows NTFS under
 the [replacement contract](#replacement-contract). Trusted restore writes a

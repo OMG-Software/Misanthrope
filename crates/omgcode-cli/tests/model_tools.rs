@@ -1,0 +1,477 @@
+//! Real CLI tests for chat with the persisted model read/list tool preference.
+
+mod support;
+
+use std::fs;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::process::Output;
+use std::sync::mpsc::{self, Receiver};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
+
+use serde_json::{Value, json};
+
+use support::workspace_fixture::Fixture;
+use support::{
+    CLI_DEADLINE, HANG_FIXTURE_ENV, assert_error_code, assert_success, json_output, path_arg,
+    run_cli, run_with_deadline,
+};
+
+const NOTE: &[u8] = b"workspace notes for the model";
+const IN_ROOT: &str = "sentinel-in-development-root";
+const BEYOND_ROOT: &str = "sentinel-beyond-development-root";
+const MOCK_TIMEOUT: Duration = Duration::from_secs(8);
+const MAX_HTTP_BYTES: usize = 1024 * 1024;
+
+/// Serve a fixed sequence of responses, one per connection, and keep each request.
+struct SequenceServer {
+    endpoint: String,
+    requests: Receiver<Value>,
+    worker: JoinHandle<Result<usize, String>>,
+}
+
+impl SequenceServer {
+    fn start(responses: Vec<Value>) -> Self {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind private mock server");
+        listener.set_nonblocking(true).expect("bounded accept mode");
+        let address = listener.local_addr().expect("mock server address");
+        let (sender, requests) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let mut served = 0;
+            for response in responses {
+                // The CLI stops early after a refused call; that is not an error.
+                let Ok(mut stream) = accept(&listener) else {
+                    break;
+                };
+                let body = read_body(&mut stream)?;
+                let request: Value = serde_json::from_slice(&body)
+                    .map_err(|error| format!("request JSON: {error}"))?;
+                sender.send(request).map_err(|error| error.to_string())?;
+                let bytes = serde_json::to_vec(&response).map_err(|error| error.to_string())?;
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    bytes.len()
+                );
+                stream
+                    .write_all(head.as_bytes())
+                    .and_then(|()| stream.write_all(&bytes))
+                    .map_err(|error| error.to_string())?;
+                served += 1;
+            }
+            Ok(served)
+        });
+        Self {
+            endpoint: format!("http://{address}/v1"),
+            requests,
+            worker,
+        }
+    }
+
+    /// Return every captured request after the server thread has finished.
+    fn finish(self) -> Vec<Value> {
+        let served = self
+            .worker
+            .join()
+            .expect("mock server thread")
+            .expect("mock server exchange");
+        let requests: Vec<Value> = self.requests.try_iter().collect();
+        assert_eq!(requests.len(), served);
+        requests
+    }
+}
+
+fn accept(listener: &TcpListener) -> Result<TcpStream, String> {
+    let deadline = Instant::now() + MOCK_TIMEOUT;
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                stream
+                    .set_nonblocking(false)
+                    .map_err(|error| error.to_string())?;
+                stream
+                    .set_read_timeout(Some(MOCK_TIMEOUT))
+                    .map_err(|error| error.to_string())?;
+                return Ok(stream);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline {
+                    return Err("no further request".to_owned());
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+}
+
+fn read_body(stream: &mut TcpStream) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    loop {
+        if let Some(end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+            let head = String::from_utf8_lossy(&bytes[..end]).to_ascii_lowercase();
+            let length: usize = head
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:"))
+                .ok_or("missing content length")?
+                .trim()
+                .parse()
+                .map_err(|_| "invalid content length")?;
+            if length > MAX_HTTP_BYTES {
+                return Err("request too large".to_owned());
+            }
+            while bytes.len() < end + 4 + length {
+                let read = stream
+                    .read(&mut buffer)
+                    .map_err(|error| error.to_string())?;
+                if read == 0 {
+                    return Err("truncated body".to_owned());
+                }
+                bytes.extend_from_slice(&buffer[..read]);
+            }
+            return Ok(bytes[end + 4..end + 4 + length].to_vec());
+        }
+        if bytes.len() > MAX_HTTP_BYTES {
+            return Err("headers too large".to_owned());
+        }
+        let read = stream
+            .read(&mut buffer)
+            .map_err(|error| error.to_string())?;
+        if read == 0 {
+            return Err("connection closed before headers".to_owned());
+        }
+        bytes.extend_from_slice(&buffer[..read]);
+    }
+}
+
+fn text(content: &str) -> Value {
+    json!({
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": content},
+            "finish_reason": "stop"
+        }]
+    })
+}
+
+fn tool_call(id: &str, name: &str, arguments: &Value) -> Value {
+    json!({
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": id,
+                    "type": "function",
+                    "function": {"name": name, "arguments": arguments.to_string()}
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    })
+}
+
+impl Fixture {
+    /// Create a session for the registered workspace through the CLI.
+    fn session(&self) -> PathBuf {
+        let output = run_cli(
+            &self.data,
+            &["session", "new", "--workspace", path_arg(&self.workspace)],
+        );
+        assert_success(&output);
+        PathBuf::from(json_output(&output)["journal"].as_str().expect("journal"))
+    }
+
+    fn revision(&self) -> String {
+        let output = run_cli(&self.data, &["workspace", "status"]);
+        assert_success(&output);
+        json_output(&output)["revision"].to_string()
+    }
+
+    fn set(&self, flag: &str, value: bool) {
+        let revision = self.revision();
+        let output = run_cli(
+            &self.data,
+            &[
+                "workspace",
+                "permissions",
+                &self.workspace_id.to_string(),
+                "--revision",
+                &revision,
+                flag,
+                if value { "true" } else { "false" },
+            ],
+        );
+        assert_success(&output);
+    }
+
+    fn chat(&self, journal: &Path, endpoint: &str, message: &str) -> Output {
+        run_cli(
+            &self.data,
+            &[
+                "chat",
+                "--journal",
+                path_arg(journal),
+                "--endpoint",
+                endpoint,
+                "--model",
+                "fixture",
+                "--context-tokens",
+                "131072",
+                "--max-output-tokens",
+                "64",
+                message,
+            ],
+        )
+    }
+
+    fn root(&self) -> PathBuf {
+        self.workspace
+            .parent()
+            .expect("development root")
+            .to_path_buf()
+    }
+}
+
+fn user_texts(request: &Value) -> Vec<String> {
+    request["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .filter(|message| message["role"] == "user")
+        .map(|message| message["content"].as_str().expect("text").to_owned())
+        .collect()
+}
+
+#[test]
+fn a_disabled_preference_keeps_chat_text_only_and_settings_bytes_compatible() {
+    let fixture = Fixture::new(NOTE);
+    let journal = fixture.session();
+    let status = run_cli(&fixture.data, &["workspace", "status"]);
+    assert_success(&status);
+    assert_eq!(
+        json_output(&status)["workspaces"][0]["permissions"]["model_tools"],
+        false,
+        "status must report the disabled preference explicitly"
+    );
+    let settings = fs::read_to_string(fixture.data.join("control-v1.jsonl")).expect("settings");
+    assert!(
+        !settings.contains("model_tools"),
+        "a disabled preference must not change persisted settings bytes"
+    );
+
+    let server = SequenceServer::start(vec![text("text only")]);
+    let output = fixture.chat(&journal, &server.endpoint, "read note.txt");
+    let requests = server.finish();
+
+    assert_success(&output);
+    let result = json_output(&output);
+    assert_eq!(result["reply"]["content"], "text only");
+    assert_eq!(result["model_tools"]["mode"], "disabled");
+    assert_eq!(result["model_tools"]["reason"], "preference_disabled");
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].get("tools").is_none(), "no tools were offered");
+}
+
+#[test]
+fn an_enabled_preference_lets_the_model_read_the_workspace_through_the_runtime() {
+    let fixture = Fixture::new(NOTE);
+    let journal = fixture.session();
+    fixture.set("--model-tools", true);
+    let settings = fs::read_to_string(fixture.data.join("control-v1.jsonl")).expect("settings");
+    assert!(settings.contains("\"model_tools\":true"));
+
+    let server = SequenceServer::start(vec![
+        tool_call(
+            "call-1",
+            "workspace_read_file",
+            &json!({"path": "note.txt"}),
+        ),
+        text("The note says hello."),
+    ]);
+    let output = fixture.chat(&journal, &server.endpoint, "what does note.txt say?");
+    let requests = server.finish();
+
+    assert_success(&output);
+    let result = json_output(&output);
+    assert_eq!(result["reply"]["content"], "The note says hello.");
+    assert_eq!(result["model_tools"]["mode"], "enabled");
+    assert_eq!(
+        result["model_tools"]["workspace_id"],
+        fixture.workspace_id.to_string()
+    );
+    assert_eq!(result["model_tools"]["tool_calls"], 1);
+    assert_eq!(requests.len(), 2);
+    for request in &requests {
+        assert_eq!(request["tool_choice"], "auto");
+        let names: Vec<&str> = request["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .map(|tool| tool["function"]["name"].as_str().expect("name"))
+            .collect();
+        assert_eq!(names, ["workspace_read_file", "workspace_list_directory"]);
+        // The compiled base prompt remains the only system message.
+        let systems = request["messages"]
+            .as_array()
+            .expect("messages")
+            .iter()
+            .filter(|message| message["role"] == "system")
+            .count();
+        assert_eq!(systems, 1);
+    }
+    let tool_text = user_texts(&requests[1])
+        .into_iter()
+        .find(|text| text.starts_with("Tool result [call call-1"))
+        .expect("source-labelled tool result sent as user content");
+    assert!(tool_text.contains("untrusted workspace data"));
+    assert!(tool_text.contains(std::str::from_utf8(NOTE).expect("UTF-8 note")));
+
+    let events = fs::read_to_string(&journal).expect("journal");
+    assert!(events.contains("\"tool.requested\""));
+    assert!(events.contains("\"tool.completed\""));
+}
+
+#[test]
+fn the_server_token_in_a_workspace_file_is_redacted_before_the_journal_and_model() {
+    const TOKEN: &str = "fixture-lm-credential-654321";
+    let fixture = Fixture::new(NOTE);
+    let journal = fixture.session();
+    fixture.set("--model-tools", true);
+    fs::write(
+        fixture.workspace.join("secret.txt"),
+        format!(
+            "server token {TOKEN}
+"
+        ),
+    )
+    .expect("write file with the token");
+    let server = SequenceServer::start(vec![
+        tool_call(
+            "call-1",
+            "workspace_read_file",
+            &json!({"path": "secret.txt"}),
+        ),
+        text("Read it."),
+    ]);
+
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_omgcode"));
+    command
+        .env("OMGCODE_LM_TOKEN", TOKEN)
+        .env_remove(HANG_FIXTURE_ENV)
+        .arg("--data-dir")
+        .arg(&fixture.data)
+        .args(["chat", "--journal", path_arg(&journal)])
+        .args(["--endpoint", &server.endpoint, "--model", "fixture"])
+        .args(["--context-tokens", "131072", "--max-output-tokens", "64"])
+        .arg("read secret.txt");
+    let result = run_with_deadline(command, CLI_DEADLINE).expect("run OMGCode CLI");
+    assert!(!result.timed_out, "CLI exceeded its deadline");
+    let output = result.output;
+    let requests = server.finish();
+
+    assert_success(&output);
+    assert_eq!(json_output(&output)["model_tools"]["tool_calls"], 1);
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(TOKEN));
+    let tool_text = user_texts(&requests[1])
+        .into_iter()
+        .find(|text| text.starts_with("Tool result [call call-1"))
+        .expect("tool result sent to the model");
+    assert!(tool_text.contains("server token [REDACTED]"));
+    for request in &requests {
+        assert!(!request.to_string().contains(TOKEN));
+    }
+    let events = fs::read_to_string(&journal).expect("journal");
+    assert!(events.contains("server token [REDACTED]"));
+    assert!(!events.contains(TOKEN));
+}
+
+#[test]
+fn model_tool_calls_never_read_outside_the_workspace_through_the_cli() {
+    let attempts = [
+        json!({"path": "../outside.txt"}),
+        json!({"path": "../../beyond.txt"}),
+        json!({"path": "outside-hardlink"}),
+    ];
+    for arguments in attempts {
+        let fixture = Fixture::new(NOTE);
+        fs::write(fixture.root().join("outside.txt"), IN_ROOT).expect("in-root sentinel");
+        let beyond = fixture
+            .root()
+            .parent()
+            .expect("temporary")
+            .join("beyond.txt");
+        fs::write(&beyond, BEYOND_ROOT).expect("beyond-root sentinel");
+        fs::hard_link(&beyond, fixture.workspace.join("outside-hardlink")).expect("hard link");
+        let journal = fixture.session();
+        fixture.set("--model-tools", true);
+
+        // Serve only the escape attempt. A refused call ends the turn; any
+        // follow-up request would fail to connect, which also discloses nothing.
+        let server =
+            SequenceServer::start(vec![tool_call("escape", "workspace_read_file", &arguments)]);
+        let output = fixture.chat(&journal, &server.endpoint, "read outside");
+        let requests = server.finish();
+
+        let transcript = format!(
+            "{}{}{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+            fs::read_to_string(&journal).expect("journal"),
+            serde_json::to_string(&requests).expect("requests"),
+        );
+        assert!(
+            !transcript.contains(IN_ROOT) && !transcript.contains(BEYOND_ROOT),
+            "{arguments}: an outside sentinel escaped"
+        );
+    }
+}
+
+#[test]
+fn revoking_read_denies_model_reads_even_with_tools_enabled() {
+    let fixture = Fixture::new(NOTE);
+    let journal = fixture.session();
+    fixture.set("--model-tools", true);
+    fixture.set("--read", false);
+
+    let server = SequenceServer::start(vec![tool_call(
+        "call-1",
+        "workspace_read_file",
+        &json!({"path": "note.txt"}),
+    )]);
+    let output = fixture.chat(&journal, &server.endpoint, "read note.txt");
+    let requests = server.finish();
+
+    assert_error_code(&output, "permission");
+    assert_eq!(
+        requests.len(),
+        1,
+        "a denial stops before a follow-up request"
+    );
+    let events = fs::read_to_string(&journal).expect("journal");
+    assert!(events.contains("permission_denied"));
+    assert!(!events.contains(std::str::from_utf8(NOTE).expect("UTF-8 note")));
+}
+
+#[test]
+fn invalid_settings_stop_chat_before_any_model_request() {
+    let fixture = Fixture::new(NOTE);
+    let journal = fixture.session();
+    let settings = fixture.data.join("control-v1.jsonl");
+    let mut bytes = fs::read(&settings).expect("settings");
+    bytes.extend_from_slice(b"{\"incomplete\":");
+    fs::write(&settings, bytes).expect("corrupt settings tail");
+
+    // Nothing listens here; a request would fail with a provider error instead.
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("reserve port");
+    let endpoint = format!("http://{}/v1", listener.local_addr().expect("address"));
+    drop(listener);
+    let output = fixture.chat(&journal, &endpoint, "read note.txt");
+
+    support::assert_control_error(&output);
+    let events = fs::read_to_string(&journal).expect("journal");
+    assert!(!events.contains("turn.started"));
+}

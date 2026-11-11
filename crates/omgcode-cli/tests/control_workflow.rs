@@ -141,7 +141,8 @@ fn workspace_commands_persist_cas_permissions_policy_and_audit_results() {
     assert_ne!(first_id, second_id);
     assert_eq!(second["snapshot"]["revision"], 3);
 
-    // When flags are omitted, defaults keep read/write enabled and execute/network disabled.
+    // When flags are omitted, defaults keep read/write enabled and execute,
+    // network, and model tools disabled. Status reports every flag explicitly.
     let second_permissions = second["snapshot"]["workspaces"]
         .as_array()
         .expect("workspace registrations")
@@ -155,7 +156,8 @@ fn workspace_commands_persist_cas_permissions_policy_and_audit_results() {
             "read": true,
             "write": true,
             "execute": false,
-            "task_network": false
+            "task_network": false,
+            "model_tools": false
         })
     );
 

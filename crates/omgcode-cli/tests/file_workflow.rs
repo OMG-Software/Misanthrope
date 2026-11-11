@@ -250,6 +250,7 @@ fn cli_creates_lists_reads_and_audits_files_without_recording_contents() {
         "existing_file_replacement",
         "checkpoint_restore",
         "checkpoint_deletion",
+        "model_read_list_tools",
     ] {
         assert_eq!(
             capabilities[flag],
@@ -259,6 +260,14 @@ fn cli_creates_lists_reads_and_audits_files_without_recording_contents() {
     }
     assert_eq!(capabilities["edit_previews"], native_broker_implemented);
     assert_eq!(capabilities["workspace_file_tools"], false);
+    assert_eq!(
+        capabilities["tool_policy"],
+        if cfg!(any(target_os = "linux", target_os = "windows")) {
+            "read_list_only_when_workspace_model_tools_enabled"
+        } else {
+            "reject all model-requested tools"
+        }
+    );
 }
 
 #[test]

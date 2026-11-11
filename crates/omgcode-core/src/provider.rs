@@ -1,4 +1,6 @@
 use crate::prompt::{BASE_PROMPT, ModelMessage, ModelRole};
+use crate::storage::parse_strict_json;
+use crate::turn::{ModelError, ToolDefinition, ToolModel, ToolModelReply, ToolModelRequest};
 use reqwest::Url;
 use reqwest::blocking::{Client, Response};
 use reqwest::header::{AUTHORIZATION, HeaderValue};
@@ -17,6 +19,11 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const MESSAGE_OVERHEAD_ESTIMATE: u64 = 256;
 const PROMPT_HEADROOM_ESTIMATE: u64 = 512;
+/// Upper bound on advertised tool definitions in one request.
+const MAX_TOOL_DEFINITIONS: usize = 8;
+/// Upper bound on raw tool calls accepted from one response before validation.
+/// The turn runtime applies its own, smaller per-round limit.
+const MAX_RESPONSE_TOOL_CALLS: usize = 64;
 
 /// Explicit settings for one local LM Studio Chat Completions connection.
 ///
@@ -119,6 +126,25 @@ struct ChatRequest<'a> {
     max_tokens: u32,
 }
 
+/// The text request plus the advertised function tools.
+#[derive(Serialize)]
+struct ToolChatRequest<'a> {
+    model: &'a str,
+    messages: &'a [ModelMessage],
+    stream: bool,
+    max_tokens: u32,
+    tools: &'a [WireTool<'a>],
+    tool_choice: &'static str,
+}
+
+/// One OpenAI-compatible function tool definition.
+#[derive(Serialize)]
+struct WireTool<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    function: &'a ToolDefinition,
+}
+
 impl LocalModelClient {
     /// Create a client for a literal loopback LM Studio endpoint.
     ///
@@ -186,6 +212,66 @@ impl LocalModelClient {
     /// Model output remains untrusted plain text and is never interpreted as an
     /// action by this adapter.
     pub fn complete(&self, messages: &[ModelMessage]) -> Result<ModelReply, ProviderError> {
+        self.check_messages(messages, 0)?;
+        let body = serde_json::to_vec(&ChatRequest {
+            model: &self.model,
+            messages,
+            stream: false,
+            max_tokens: self.max_output_tokens,
+        })
+        .map_err(|_| ProviderError::MalformedResponse)?;
+        parse_response(self.send(body)?)
+    }
+
+    /// Send one bounded request that advertises the supplied function tools.
+    ///
+    /// Tool definitions are sent in the OpenAI-compatible `tools` field with
+    /// `tool_choice` set to `auto`. The response is parsed strictly: duplicate
+    /// keys, legacy `function_call` output, truncated tool calls, and more than
+    /// 64 calls are refused. Returned tool calls stay raw and unvalidated; the
+    /// caller must validate each one before any dispatch. This method executes
+    /// nothing and never trusts provider metadata or role labels.
+    pub fn complete_with_tools(
+        &self,
+        messages: &[ModelMessage],
+        tools: &[ToolDefinition],
+    ) -> Result<ToolModelReply, ProviderError> {
+        if tools.is_empty() || tools.len() > MAX_TOOL_DEFINITIONS {
+            return Err(ProviderError::InvalidConfiguration);
+        }
+        let tools: Vec<WireTool<'_>> = tools
+            .iter()
+            .map(|definition| WireTool {
+                kind: "function",
+                function: definition,
+            })
+            .collect();
+        let tool_bytes = serde_json::to_vec(&tools).map_err(|_| ProviderError::RequestTooLarge)?;
+        self.check_messages(
+            messages,
+            u64::try_from(tool_bytes.len()).map_err(|_| ProviderError::RequestTooLarge)?,
+        )?;
+        let body = serde_json::to_vec(&ToolChatRequest {
+            model: &self.model,
+            messages,
+            stream: false,
+            max_tokens: self.max_output_tokens,
+            tools: &tools,
+            tool_choice: "auto",
+        })
+        .map_err(|_| ProviderError::MalformedResponse)?;
+        parse_tool_response(self.send(body)?)
+    }
+
+    /// Require the compiled base prompt as the only system message and bound the request.
+    ///
+    /// `extra_bytes` covers serialized request fields beyond the messages, such
+    /// as tool definitions, in both the context estimate and the byte limit.
+    fn check_messages(
+        &self,
+        messages: &[ModelMessage],
+        extra_bytes: u64,
+    ) -> Result<(), ProviderError> {
         let Some((base_message, following_messages)) = messages.split_first() else {
             return Err(ProviderError::InvalidConfiguration);
         };
@@ -198,21 +284,23 @@ impl LocalModelClient {
             return Err(ProviderError::InvalidConfiguration);
         }
 
-        let estimate = estimate_context(messages, self.max_output_tokens)?;
+        let estimate = estimate_context(messages, self.max_output_tokens)?
+            .checked_add(extra_bytes)
+            .ok_or(ProviderError::ContextLimit)?;
         if estimate > self.context_tokens {
             return Err(ProviderError::ContextLimit);
         }
-        if estimate_serialized_request_size(messages, &self.model)? > MAX_REQUEST_BYTES as u64 {
+        let size = estimate_serialized_request_size(messages, &self.model)?
+            .checked_add(extra_bytes)
+            .ok_or(ProviderError::RequestTooLarge)?;
+        if size > MAX_REQUEST_BYTES as u64 {
             return Err(ProviderError::RequestTooLarge);
         }
+        Ok(())
+    }
 
-        let body = serde_json::to_vec(&ChatRequest {
-            model: &self.model,
-            messages,
-            stream: false,
-            max_tokens: self.max_output_tokens,
-        })
-        .map_err(|_| ProviderError::MalformedResponse)?;
+    /// Post one encoded request body to the validated loopback endpoint.
+    fn send(&self, body: Vec<u8>) -> Result<Response, ProviderError> {
         if body.len() > MAX_REQUEST_BYTES {
             return Err(ProviderError::RequestTooLarge);
         }
@@ -225,11 +313,59 @@ impl LocalModelClient {
         if let Some(authorization) = &self.authorization {
             request = request.header(AUTHORIZATION, authorization.clone());
         }
-        let response = request
+        request
             .body(body)
             .send()
-            .map_err(|_| ProviderError::Transport)?;
-        parse_response(response)
+            .map_err(|_| ProviderError::Transport)
+    }
+}
+
+/// Map the local client onto the turn runtime's model interface.
+///
+/// The adapter keeps the most recent provider failure so a caller can report
+/// it precisely; the runtime records only the coarse [`ModelError`].
+pub struct LocalToolModel<'a> {
+    client: &'a LocalModelClient,
+    last_error: Option<ProviderError>,
+}
+
+impl<'a> LocalToolModel<'a> {
+    /// Wrap a validated client for one tool-enabled turn.
+    pub const fn new(client: &'a LocalModelClient) -> Self {
+        Self {
+            client,
+            last_error: None,
+        }
+    }
+
+    /// Return the provider failure behind the last model error, if any.
+    pub const fn last_error(&self) -> Option<ProviderError> {
+        self.last_error
+    }
+}
+
+impl ToolModel for LocalToolModel<'_> {
+    /// Send one request and remember the precise failure for reporting.
+    fn complete(&mut self, request: ToolModelRequest<'_>) -> Result<ToolModelReply, ModelError> {
+        self.client
+            .complete_with_tools(request.messages, request.tools)
+            .map_err(|error| {
+                self.last_error = Some(error);
+                model_error(error)
+            })
+    }
+}
+
+/// Collapse provider failures into the runtime's bounded categories.
+const fn model_error(error: ProviderError) -> ModelError {
+    match error {
+        ProviderError::RequestTooLarge | ProviderError::ContextLimit => ModelError::RequestTooLarge,
+        ProviderError::Transport | ProviderError::HttpStatus(_) => ModelError::Transport,
+        ProviderError::InvalidConfiguration
+        | ProviderError::InvalidToken
+        | ProviderError::ResponseTooLarge
+        | ProviderError::MalformedResponse
+        | ProviderError::UnsupportedToolCall => ModelError::InvalidResponse,
     }
 }
 
@@ -351,8 +487,8 @@ fn json_string_len(value: &str) -> Result<u64, ProviderError> {
     })
 }
 
-/// Parse one bounded assistant response; never expose server error bodies.
-fn parse_response(response: Response) -> Result<ModelReply, ProviderError> {
+/// Read a successful response body within the byte limit.
+fn read_body(response: Response) -> Result<Vec<u8>, ProviderError> {
     let status = response.status();
     if !status.is_success() {
         return Err(ProviderError::HttpStatus(status.as_u16()));
@@ -367,6 +503,66 @@ fn parse_response(response: Response) -> Result<ModelReply, ProviderError> {
     {
         return Err(ProviderError::ResponseTooLarge);
     }
+    Ok(bytes)
+}
+
+/// Parse one tool-capable reply strictly, leaving each call unvalidated.
+///
+/// Duplicate keys at any depth are refused before any value is inspected, so a
+/// call cannot carry two names or two argument strings. Content may be `null`
+/// only when the reply contains tool calls. A reply cut short by the token
+/// limit cannot carry tool calls, because their arguments may be truncated.
+fn parse_tool_response(response: Response) -> Result<ToolModelReply, ProviderError> {
+    let bytes = read_body(response)?;
+    let value = parse_strict_json(&bytes).map_err(|_| ProviderError::MalformedResponse)?;
+    let choices = value
+        .get("choices")
+        .and_then(Value::as_array)
+        .filter(|choices| choices.len() == 1)
+        .ok_or(ProviderError::MalformedResponse)?;
+    let choice = choices.first().ok_or(ProviderError::MalformedResponse)?;
+    let message = choice
+        .get("message")
+        .and_then(Value::as_object)
+        .ok_or(ProviderError::MalformedResponse)?;
+    if message.get("role").and_then(Value::as_str) != Some("assistant") {
+        return Err(ProviderError::MalformedResponse);
+    }
+    // Legacy single function calls and choice-level calls are not supported.
+    reject_actions(choice.get("tool_calls"), choice.get("function_call"))?;
+    reject_actions(None, message.get("function_call"))?;
+
+    let tool_calls = match message.get("tool_calls") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(calls)) if calls.len() <= MAX_RESPONSE_TOOL_CALLS => calls.clone(),
+        Some(_) => return Err(ProviderError::MalformedResponse),
+    };
+    let content = match message.get("content") {
+        Some(Value::String(text)) => text.clone(),
+        None | Some(Value::Null) if !tool_calls.is_empty() => String::new(),
+        _ => return Err(ProviderError::MalformedResponse),
+    };
+    let finish_reason = choice
+        .get("finish_reason")
+        .and_then(Value::as_str)
+        .ok_or(ProviderError::MalformedResponse)?;
+    let accepted = if tool_calls.is_empty() {
+        matches!(finish_reason, "stop" | "length")
+    } else {
+        matches!(finish_reason, "tool_calls" | "stop")
+    };
+    if !accepted {
+        return Err(ProviderError::MalformedResponse);
+    }
+    Ok(ToolModelReply {
+        content,
+        tool_calls,
+    })
+}
+
+/// Parse one bounded assistant response; never expose server error bodies.
+fn parse_response(response: Response) -> Result<ModelReply, ProviderError> {
+    let bytes = read_body(response)?;
     let value: Value =
         serde_json::from_slice(&bytes).map_err(|_| ProviderError::MalformedResponse)?;
     let choices = value
@@ -466,6 +662,62 @@ mod tests {
     use std::sync::mpsc;
     use std::thread;
     use std::time::Instant;
+
+    /// Advertised tool definitions consume context and wire budget before any request.
+    #[test]
+    fn tool_definitions_count_against_the_context_and_wire_limits() {
+        let messages = [
+            ModelMessage {
+                role: ModelRole::System,
+                content: BASE_PROMPT.to_owned(),
+            },
+            ModelMessage {
+                role: ModelRole::User,
+                content: "read the notes".to_owned(),
+            },
+        ];
+        let text_estimate = estimate_context(&messages, 64).expect("estimate");
+        // The port is never contacted: every check here fails before connecting.
+        let client = LocalModelClient::new(
+            LocalModelConfig {
+                base_url: "http://127.0.0.1:9/v1".to_owned(),
+                model: "m".to_owned(),
+                context_tokens: text_estimate,
+                max_output_tokens: 64,
+            },
+            None,
+        )
+        .expect("client");
+        assert_eq!(client.check_messages(&messages, 0), Ok(()));
+        assert_eq!(
+            client
+                .complete_with_tools(&messages, &crate::turn::tool_definitions())
+                .err(),
+            Some(ProviderError::ContextLimit)
+        );
+        assert_eq!(
+            client.check_messages(&messages, MAX_REQUEST_BYTES as u64),
+            Err(ProviderError::ContextLimit)
+        );
+        let roomy = LocalModelClient::new(
+            LocalModelConfig {
+                base_url: "http://127.0.0.1:9/v1".to_owned(),
+                model: "m".to_owned(),
+                context_tokens: u64::MAX / 2,
+                max_output_tokens: 64,
+            },
+            None,
+        )
+        .expect("client");
+        assert_eq!(
+            roomy.check_messages(&messages, MAX_REQUEST_BYTES as u64),
+            Err(ProviderError::RequestTooLarge)
+        );
+        assert_eq!(
+            roomy.complete_with_tools(&messages, &[]).err(),
+            Some(ProviderError::InvalidConfiguration)
+        );
+    }
 
     /// Give the server its own deadline and cancellation path, independent of HTTP timeouts.
     fn slow_response(

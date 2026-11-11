@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 use crate::control::{ControlError, ControlStore};
 use crate::files::{FileBroker, FileError, FileListing, FileTarget};
-use crate::policy::WorkspaceId;
+use crate::policy::{DecisionReason, WorkspaceId};
 use crate::prompt::{
     self, BASE_PROMPT, BASE_PROMPT_VERSION, ConversationMessage, ConversationRole, ModelMessage,
     PromptError,
@@ -572,6 +572,7 @@ pub struct TurnRuntime<'a> {
     workspace_id: WorkspaceId,
     limits: TurnLimits,
     cancel: CancelToken,
+    tool_text_filter: Option<&'a dyn Fn(&str) -> String>,
 }
 
 impl<'a> TurnRuntime<'a> {
@@ -599,7 +600,20 @@ impl<'a> TurnRuntime<'a> {
             workspace_id,
             limits,
             cancel: CancelToken::new(),
+            tool_text_filter: None,
         })
+    }
+
+    /// Transform each tool result before it is limited, recorded, or sent.
+    ///
+    /// The runtime itself redacts nothing. A caller that knows a secret, such
+    /// as a provider token, supplies a filter which removes it. The filtered
+    /// text is the only form that reaches the journal and the model; its byte
+    /// count and digest are taken after filtering.
+    #[must_use]
+    pub fn with_tool_text_filter(mut self, filter: &'a dyn Fn(&str) -> String) -> Self {
+        self.tool_text_filter = Some(filter);
+        self
     }
 
     /// Return a token which requests cancellation at the next checkpoint.
@@ -822,12 +836,15 @@ impl<'a> TurnRuntime<'a> {
                 ) {
                     return Err(self.abort(request_id, "persistence", error.into()));
                 }
-                let execution = WorkspaceToolDispatcher {
+                let mut execution = WorkspaceToolDispatcher {
                     data_directory: self.data_directory,
                     session_id: self.journal.snapshot().session_id,
                     workspace_id: self.workspace_id,
                 }
                 .dispatch(call, self.limits.max_result_bytes);
+                if let Some(filter) = self.tool_text_filter {
+                    execution.text = filter(&execution.text);
+                }
                 let message_limit = self.limits.max_result_bytes.min(MAX_MESSAGE_BYTES);
                 if execution.text.len() > message_limit {
                     let error = TurnError::Limit(TurnLimit::ResultBytes);
@@ -1034,6 +1051,18 @@ impl WorkspaceToolDispatcher<'_> {
                 );
             }
         };
+        // The persisted model-tool preference is rechecked on every call, so a
+        // change made during model I/O stops the next operation.
+        let model_tools = control
+            .workspace(self.workspace_id)
+            .is_some_and(|workspace| workspace.permissions().model_tools);
+        if !model_tools {
+            return ToolExecution::denied(
+                "model_tools_disabled",
+                call,
+                FileError::Denied(DecisionReason::PermissionDisabled),
+            );
+        }
         let target = FileTarget {
             session_id: self.session_id,
             workspace_id: self.workspace_id,

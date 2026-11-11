@@ -115,8 +115,50 @@ pub struct ControlSnapshot {
     store_id: Uuid,
     revision: u64,
     development_root: Option<DirectoryRecord>,
+    #[serde(serialize_with = "serialize_workspace_views")]
     workspaces: Vec<WorkspaceRegistration>,
     configuration_only: bool,
+}
+
+/// Operator-facing workspace view that reports every preference explicitly.
+///
+/// Persisted records omit a disabled `model_tools` flag for compatibility;
+/// status output must still show that it is disabled.
+#[derive(Serialize)]
+struct WorkspaceView<'a> {
+    id: WorkspaceId,
+    directory: &'a DirectoryRecord,
+    permissions: PermissionView,
+}
+
+/// All preference flags, including disabled optional ones.
+#[derive(Serialize)]
+struct PermissionView {
+    read: bool,
+    write: bool,
+    execute: bool,
+    task_network: bool,
+    model_tools: bool,
+}
+
+fn serialize_workspace_views<S: serde::Serializer>(
+    workspaces: &[WorkspaceRegistration],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.collect_seq(workspaces.iter().map(|workspace| {
+        let permissions = workspace.permissions;
+        WorkspaceView {
+            id: workspace.id,
+            directory: &workspace.directory,
+            permissions: PermissionView {
+                read: permissions.read,
+                write: permissions.write,
+                execute: permissions.execute,
+                task_network: permissions.task_network,
+                model_tools: permissions.model_tools,
+            },
+        }
+    }))
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -335,6 +377,18 @@ impl ControlStore {
             .workspaces
             .iter()
             .find(|workspace| workspace.id == id)
+    }
+
+    /// Find the registration whose stable ID equals an untrusted recorded UUID.
+    ///
+    /// A journal's recorded workspace UUID can only select an existing
+    /// registration. The returned ID and preferences come from these settings,
+    /// and the lookup grants nothing.
+    pub fn registered_workspace(&self, recorded: Uuid) -> Option<&WorkspaceRegistration> {
+        self.snapshot
+            .workspaces
+            .iter()
+            .find(|workspace| *workspace.id.as_uuid() == recorded)
     }
 
     /// Select an existing development root outside application storage.

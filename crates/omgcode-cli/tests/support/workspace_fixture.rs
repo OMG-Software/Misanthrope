@@ -48,6 +48,7 @@ impl Fixture {
                         write: true,
                         execute: false,
                         task_network: false,
+                        model_tools: false,
                     },
                     control.revision(),
                 )

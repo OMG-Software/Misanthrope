@@ -1,17 +1,20 @@
 # Build and run the core prototype
 
-OMGCode 0.11.0 is a developer CLI prototype with workspace permission
+OMGCode 0.12.0 is a developer CLI prototype with workspace permission
 settings and bounded native file operations through trusted operator commands.
 It can send a text conversation to an explicitly selected local LM Studio model
 and save that conversation. It can read/list files, exclusively create new
 files/directories, and preview a bounded diff against trusted proposed content
-in a registered workspace. The core also has a bounded turn/tool runtime for
-library callers and tests, but no CLI command exposes it. Trusted CLI apply can
+in a registered workspace. When a workspace enables `model_tools`, chat runs
+the core's bounded turn/tool runtime so the model can read and list files in
+that workspace. Trusted CLI apply can
 replace an existing file on Linux ext4 or Windows NTFS. Trusted restore puts a
 retained checkpoint's original bytes back through apply, and trusted checkpoint
 deletion removes one resolved private entry. The CLI cannot delete workspace
 files, run commands, use Git, or connect to MCP servers.
-CLI/provider model tool dispatch and an execution sandbox are not implemented.
+When a workspace enables `model_tools`, chat lets the local model read and list
+files in that workspace. Model write, process, network, Git, and MCP tools and
+an execution sandbox are not implemented.
 
 The core's byte-input replacement inspectors remain read-only. Its file broker
 also provides `checkpoint_prepare` on Linux and Windows with fresh read/write
@@ -129,14 +132,17 @@ omgcode --data-dir C:\omgcode-data workspace status
 omgcode --data-dir C:\omgcode-data workspace set-root C:\dev --revision 0
 omgcode --data-dir C:\omgcode-data workspace register C:\dev\project --revision 1
 omgcode --data-dir C:\omgcode-data workspace permissions WORKSPACE_ID --revision 2 --write false
+omgcode --data-dir C:\omgcode-data workspace permissions WORKSPACE_ID --revision 3 --model-tools true
 omgcode --data-dir C:\omgcode-data workspace check WORKSPACE_ID --session SESSION_UUID --operation read
 omgcode --data-dir C:\omgcode-data workspace audit --limit 20
 ```
 
 `status` initializes an absent store at revision zero. `check` and `audit`
 require existing state. Flags take explicit `true` or `false` values. Read/write
-default to enabled; execute/task-network default to disabled. All decisions
-still report `execution_allowed: false`. Commands do not dispatch tools.
+default to enabled; execute, task-network, and model-tools default to
+disabled. All decisions still report `execution_allowed: false`. Settings
+commands do not dispatch tools. `--model-tools true` lets chat offer the model
+read and list tools; see [model read/list tools](workspace-permissions.md#model-readlist-tools).
 See the [workspace contract](workspace-permissions.md) for limits and failures.
 
 When a root is configured, new sessions use stable IDs from the persisted
@@ -160,7 +166,9 @@ native mount. Execute remains disabled. The `audit`, `acknowledge`,
 `checkpoints`, `acknowledge-checkpoint`, and `delete-checkpoint` commands require
 existing workspace settings.
 They do not require a configured root, workspace registration, or session
-selection. Chat advertises no file tools.
+selection. Chat advertises the read and list tools only when the session's
+workspace enables `model_tools`; see
+[model read/list tools](workspace-permissions.md#model-readlist-tools).
 
 Capability JSON separates implementation from availability. On Linux and
 Windows, `workspace_file_broker_implemented` is `true`, while
@@ -173,7 +181,10 @@ trusted CLI preview. `existing_file_replacement` is `true` on Linux and Windows 
 implementation, and `false` elsewhere. The CLI does not probe the mount, metadata,
 or permissions for that flag. `checkpoint_restore` and `checkpoint_deletion`
 follow the same rule for `file restore` and `file delete-checkpoint`.
-`workspace_file_tools` remains `false`.
+`model_read_list_tools` is `true` on Linux and Windows, and `tool_policy` is
+`read_list_only_when_workspace_model_tools_enabled` there. Neither reports
+whether any workspace enables the preference. `workspace_file_tools`, which
+covers model write or general file tools, remains `false`.
 
 ```text
 omgcode --data-dir C:\omgcode-data file read WORKSPACE_ID --session SESSION_UUID src\main.rs --max-bytes 65536
@@ -218,8 +229,8 @@ See [archive and recovery details](file-access.md#explicit-operation-journal-arc
 ## Core turn/tool lifecycle
 
 `omgcode_core::turn` provides a session-owned runtime for one bounded
-model/tool turn. It is not a CLI command and `chat` still advertises no tools.
-A caller supplies a model implementation, an open schema-version-2 session, the
+model/tool turn. `chat` runs it when the session's workspace enables
+`model_tools`. A caller supplies a model implementation, an open schema-version-2 session, the
 trusted application-data directory, and the workspace ID. The runtime:
 
 - parses strict OpenAI-style function calls for `workspace_read_file` and
@@ -232,16 +243,20 @@ trusted application-data directory, and the workspace ID. The runtime:
   before recording any tool intent, result, or message;
 - enforces hard maxima of four rounds, eight calls per round, sixteen calls per
   turn, 16 KiB per source-labelled tool message, and 256 KiB aggregate tool
-  text, with a 30-second cooperative deadline by default;
+  text, with a 30-second cooperative deadline by default (chat uses 120 seconds);
 - records `tool.requested`, `tool.completed`, and schema-version-2 tool messages,
   and records the exact tool schema version and names in the request manifest;
 - treats every tool result as source-labelled untrusted user-level content and
-  never promotes it to the system role.
+  never promotes it to the system role;
+- denies every call with `model_tools_disabled` unless the workspace's live
+  `model_tools` preference is still enabled.
 
 The runtime supports no writes, process execution, Git, MCP, or network access.
-Its model interface is a test seam, not a provider adapter. A future adapter
-must parse provider JSON strictly, map its tool-call response without trusting
-provider metadata, and keep the subscription/API profile split. See the
+`LocalToolModel` adapts the LM Studio client to its model interface. The adapter
+sends the tool definitions in the OpenAI-compatible `tools` field, parses the
+response with the strict duplicate-key-rejecting parser, and returns each call
+unvalidated for the runtime to check. Other provider adapters must do the same
+and keep the subscription/API profile split. See the
 [session contract](session-storage.md) for the event sequence and the
 [file-access contract](file-access.md) for broker checks.
 
@@ -264,14 +279,31 @@ loopback connection does not establish how the selected server handles data
 upstream. Verify the server's own configuration before sending sensitive text.
 
 The CLI sends the compiled base prompt, optional --instructions user-level
-preferences, the saved user/assistant history, and the current message. It sends
-no workspace contents or tool definitions. It rejects structured tool calls.
-Text which resembles a command remains text. Output is JSON so untrusted control
+preferences, the saved user/assistant history, and the current message. When the
+session's workspace does not enable `model_tools`, it sends no workspace
+contents or tool definitions, rejects structured tool calls, and reports
+`model_tools.mode` as `disabled` with a reason. Text which resembles a command
+remains text.
+
+When the workspace enables `model_tools`, chat offers `workspace_read_file` and
+`workspace_list_directory`. The model may make up to four requests in one turn.
+Each call is rechecked against live settings and stays inside the workspace.
+Results return to the model as source-labelled user messages. The configured
+LM Studio token is removed from each result before it is recorded or sent. There
+is no per-call approval prompt. The output reports
+`model_tools.mode` as `enabled`, with the workspace ID, rounds, call count, and
+tool bytes. A refused or invalid call ends the turn with a `permission`,
+`tool_call`, or `tool_limit` error, recorded in the journal.
+
+```text
+omgcode --data-dir C:\omgcode-data chat --journal <journal-path> --model google/gemma-4-e4b --context-tokens 131072 "Summarise README.md."
+``` Output is JSON so untrusted control
 characters are escaped rather than written as terminal instructions.
 
-Each invocation sends one non-streaming request. There is a five-second connect
-timeout and a thirty-second total request timeout, with no automatic retry or
-provider fallback. A slow first inference can time out. Its remote outcome can
+Each text-only invocation sends one non-streaming request; a tool-enabled turn
+sends at most four. There is a five-second connect timeout and a thirty-second
+timeout per request, with no automatic retry or provider fallback. A
+tool-enabled turn also stops at a 120-second cooperative deadline. A slow first inference can time out. Its remote outcome can
 be unknown, and a retry is a new explicit user action.
 
 Optional server authentication can be supplied to the trusted CLI process with
@@ -346,7 +378,8 @@ planned. See the complete [session contract](session-storage.md).
 | Tool rounds per turn | 4 |
 | Tool calls per round / per turn | 8 / 16 |
 | Aggregate tool text per turn | 256 KiB |
-| Cooperative turn deadline | 30 seconds |
+| Cooperative turn deadline | 30 seconds by default; 120 seconds for chat |
+| Raw tool calls accepted from one response | 64 before runtime validation |
 
 These are ordinary quotas. Active turns reserve one terminal event and 1 KiB
 for it. CLI requests preflight their encoded manifest and user event, and reserve
@@ -370,7 +403,7 @@ usage events, streaming chunks, and large-output artifacts remain planned.
 | Crate | Responsibility |
 | --- | --- |
 | omgcode-core | Compiled prompt, bounded model adapter, session/control/file-operation journals, workspace policy, broker orchestration, bounded turn/tool lifecycle, and non-destructive edit previews |
-| omgcode-cli | Trusted operator input, one-turn text chat orchestration, bounded file and preview commands, JSON output |
+| omgcode-cli | Trusted operator input, one-turn chat orchestration with optional read/list model tools, bounded file and preview commands, JSON output |
 | omgcode-platform | Native journal validation, directory identity, and handle-relative workspace file operations |
 
 Core and CLI forbid unsafe code. The platform crate denies unsafe code except
@@ -443,5 +476,6 @@ are explicit, bounded checks of a particular server/model/auth profile.
 Do not infer whole-user/process containment, Git safety, credential storage,
 release filesystem support, or full coding-agent support from these tests. The
 broker supports bounded file operations through trusted CLI input and the core
-turn runtime. CLI/provider model dispatch and process containment remain
-separate implementation boundaries.
+turn runtime, which chat drives for read and list when a workspace enables
+`model_tools`. Live provider tool-call compatibility and process containment
+remain separate boundaries.
