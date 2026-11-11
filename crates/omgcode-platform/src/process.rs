@@ -4,9 +4,9 @@
 //! its whole descendant tree: bounded output, a deadline, cooperative
 //! cancellation, and observed tree cleanup. [`run`] applies no filesystem or
 //! network confinement. [`run_confined`] adds a Landlock filesystem allowlist
-//! and a seccomp socket filter on Linux, and refuses to start on Windows until
-//! the AppContainer increment exists. No CLI command or model tool calls either
-//! yet. See `docs/execution.md`, ADR-0027, and ADR-0028.
+//! and a seccomp socket filter on Linux, and an AppContainer with recorded
+//! directory grants on Windows. No CLI command or model tool calls either
+//! yet. See `docs/execution.md`, ADR-0027, ADR-0028, and ADR-0029.
 
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -247,8 +247,11 @@ pub fn run(
 /// sequenced-packet type; [`UnixSocketAccess::HostServices`] also allows
 /// connecting to host Unix-domain sockets. Setup fails closed: if a rule or primitive cannot be applied,
 /// nothing starts and an error is returned. On Linux this needs Landlock ABI 3
-/// or later. Windows returns [`ProcessError::Unsupported`] until AppContainer
-/// confinement is implemented.
+/// or later. On Windows the tree runs in the AppContainer named by
+/// [`Confinement::container`] with no capabilities, so it has no network
+/// access; each listed path, and the program, must already be granted to it.
+/// Windows refuses [`UnixSocketAccess::HostServices`] with
+/// [`ProcessError::Unsupported`].
 pub fn run_confined(
     spec: &ProcessSpec,
     confinement: &Confinement,
@@ -278,12 +281,7 @@ fn run_native(
     limits: ProcessLimits,
     cancel: &CancelSignal,
 ) -> Result<ProcessOutcome, ProcessError> {
-    if confinement.is_some() {
-        return Err(ProcessError::Unsupported(
-            "confined execution is not implemented on Windows yet",
-        ));
-    }
-    windows::run(spec, limits, cancel)
+    windows::run(spec, confinement, limits, cancel)
 }
 
 #[cfg(not(any(target_os = "linux", windows)))]

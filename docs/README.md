@@ -4,7 +4,7 @@ OMGCode has a Rust CLI prototype for local chat, JSONL sessions, and a
 bounded native workspace file broker. The broker is available only through
 trusted operator commands and, when a workspace enables `model_tools`, to the
 local model's read and list tools. Other model tools and the execution sandbox
-are not implemented. A process-tree runner core, with Linux-only confinement, exists for tests only. The guides distinguish implemented behaviour from the
+are not implemented. A process-tree runner core, with Linux Landlock and Windows AppContainer confinement, exists for tests only. The guides distinguish implemented behaviour from the
 remaining product contracts.
 
 ## Start here

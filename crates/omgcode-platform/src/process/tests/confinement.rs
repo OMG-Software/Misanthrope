@@ -214,6 +214,7 @@ impl Scene {
             read_only,
             read_write: vec![self.workspace.clone()],
             unix_sockets,
+            container: None,
         }
     }
 

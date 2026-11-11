@@ -43,3 +43,4 @@ meaningful alternative does not need an ADR.
 | [0026: Offer read/list tools through a workspace preference](0026-offer-read-list-tools-through-a-workspace-preference.md) | Accepted | 2026-11-11 |
 | [0027: Confine execution with native primitives, starting with a process-tree core](0027-confine-execution-with-native-primitives-starting-with-a-process-tree-core.md) | Accepted | 2026-11-11 |
 | [0028: Confine Linux runs with Landlock and a socket filter](0028-confine-linux-runs-with-landlock-and-a-socket-filter.md) | Accepted | 2026-11-11 |
+| [0029: Confine Windows runs in a workspace AppContainer with recorded grants](0029-confine-windows-runs-in-a-workspace-appcontainer-with-recorded-grants.md) | Accepted | 2026-11-11 |

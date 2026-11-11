@@ -212,6 +212,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
             "checkpoint_deletion": cfg!(any(target_os = "linux", target_os = "windows")),
             "edit_previews": cfg!(any(target_os = "linux", target_os = "windows")),
             "model_read_list_tools": model_tools::MODEL_TOOLS_SUPPORTED,
+            "workspace_container_grants": omgcode_core::control::CONTAINER_GRANTS_SUPPORTED,
             "workspace_file_tools": false,
             "process_execution": false,
             "mcp": false,

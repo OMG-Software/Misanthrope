@@ -1,6 +1,6 @@
 # Build and run the core prototype
 
-OMGCode 0.14.0 is a developer CLI prototype with workspace permission
+OMGCode 0.15.0 is a developer CLI prototype with workspace permission
 settings and bounded native file operations through trusted operator commands.
 It can send a text conversation to an explicitly selected local LM Studio model
 and save that conversation. It can read/list files, exclusively create new
@@ -16,8 +16,9 @@ When a workspace enables `model_tools`, chat lets the local model read and list
 files in that workspace. Model write, process, network, Git, and MCP tools and
 exposed command execution are not implemented. The platform crate has a
 process-tree runner core with no caller. Its confined entry point applies
-Landlock and a seccomp socket filter on Linux and refuses on Windows; see
-[command execution](execution.md).
+Landlock and a seccomp socket filter on Linux and a per-workspace AppContainer
+on Windows. Trusted commands record and apply the Windows container grants;
+see [command execution](execution.md).
 
 The core's byte-input replacement inspectors remain read-only. Its file broker
 also provides `checkpoint_prepare` on Linux and Windows with fresh read/write
@@ -138,6 +139,9 @@ omgcode --data-dir C:\omgcode-data workspace permissions WORKSPACE_ID --revision
 omgcode --data-dir C:\omgcode-data workspace permissions WORKSPACE_ID --revision 3 --model-tools true
 omgcode --data-dir C:\omgcode-data workspace check WORKSPACE_ID --session SESSION_UUID --operation read
 omgcode --data-dir C:\omgcode-data workspace audit --limit 20
+omgcode --data-dir C:\omgcode-data workspace container-grant WORKSPACE_ID C:\dev\project --access read-write --revision 4
+omgcode --data-dir C:\omgcode-data workspace container-grant WORKSPACE_ID C:\Users\me\.cargo --access read-execute --revision 5
+omgcode --data-dir C:\omgcode-data workspace container-revoke GRANT_UUID
 ```
 
 `status` initializes an absent store at revision zero. `check` and `audit`
@@ -147,6 +151,9 @@ disabled. All decisions still report `execution_allowed: false`. Settings
 commands do not dispatch tools. `--model-tools true` lets chat offer the model
 read and list tools; see [model read/list tools](workspace-permissions.md#model-readlist-tools).
 See the [workspace contract](workspace-permissions.md) for limits and failures.
+`container-grant` and `container-revoke` work on Windows only. They change ACLs
+for the workspace's AppContainer and record each change; see
+[container grants](execution.md#container-grants).
 
 When a root is configured, new sessions use stable IDs from the persisted
 workspace registration. Invalid settings or outside-root selections fail.
@@ -419,11 +426,12 @@ usage events, streaming chunks, and large-output artifacts remain planned.
 | --- | --- |
 | omgcode-core | Compiled prompt, bounded model adapter, session/control/file-operation journals, workspace policy, broker orchestration, bounded turn/tool lifecycle, and non-destructive edit previews |
 | omgcode-cli | Trusted operator input, one-turn chat orchestration with optional read/list model tools, bounded file and preview commands, JSON output |
-| omgcode-platform | Native journal validation, directory identity, handle-relative workspace file operations, and an unexposed process-tree runner core with Linux Landlock/seccomp confinement |
+| omgcode-platform | Native journal validation, directory identity, handle-relative workspace file operations, Windows AppContainer grants, and an unexposed process-tree runner core with Linux Landlock/seccomp and Windows AppContainer confinement |
 
 Core and CLI forbid unsafe code. The platform crate denies unsafe code except
 inside its reviewed Windows handle wrappers for directory identity, native file
-operations, and process creation and job control, and its Linux pre-exec
+operations, process creation and job control, and AppContainer profiles and
+ACL grants, and its Linux pre-exec
 `prctl`, seccomp, and `close_range` calls. Linux uses Rustix's safe `openat2` API. Directory registration
 uses native file IDs and requires directory creation-time metadata. The broker
 reopens the registered root and workspace, checks their identities and creation

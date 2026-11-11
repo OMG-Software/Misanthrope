@@ -131,6 +131,16 @@ not changed. Windows inherits ACLs; explicit per-user ACL setup and power-loss
 durability remain unqualified. Parent paths must be trusted. Native file checks
 and locks do not protect against a hostile same-user application.
 
+## Container grants
+
+On Windows, `workspace container-grant` and `workspace container-revoke` give
+and remove ACL grants for a workspace's AppContainer. A grant needs the expected
+revision and increments it; revocation needs none and keeps it. `workspace
+status` lists outstanding grants under `container_grants` and omits the field
+when there are none, so settings without grants keep their exact output.
+Version 0.14.0 refuses a settings log that records a grant. The
+[execution guide](execution.md#container-grants) owns the rules.
+
 ## Model read/list tools
 
 `workspace permissions <id> --revision <n> --model-tools true` lets `chat` offer

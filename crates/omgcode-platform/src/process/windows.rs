@@ -4,8 +4,10 @@
 //! `PROC_THREAD_ATTRIBUTE_JOB_LIST`, so it cannot start a descendant outside the
 //! job. The job disallows breakaway and kills every member when its last handle
 //! closes. Only the three standard handles are inherited, through
-//! `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`. No AppContainer or token restriction is
-//! applied yet; this is not filesystem or network confinement.
+//! `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`. An unconfined run applies no token
+//! restriction. A confined run also passes
+//! `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES` with the workspace container
+//! SID and no capabilities, so the whole tree runs in that AppContainer.
 
 use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
@@ -21,6 +23,7 @@ use std::time::Instant;
 use windows_sys::Win32::Foundation::{
     HANDLE, HANDLE_FLAG_INHERIT, SetHandleInformation, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
+use windows_sys::Win32::Security::SECURITY_CAPABILITIES;
 use windows_sys::Win32::System::JobObjects::{
     CreateJobObjectW, IsProcessInJob, JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION,
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
@@ -33,15 +36,20 @@ use windows_sys::Win32::System::Threading::{
     CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
     DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess,
     InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
-    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_INFORMATION,
-    ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess,
-    UpdateProcThreadAttribute, WaitForSingleObject,
+    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST,
+    PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, PROCESS_INFORMATION, ResumeThread,
+    STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute,
+    WaitForSingleObject,
 };
 
 use super::{
-    AppliedConfinement, CancelSignal, Capture, ProcessError, ProcessLimits, ProcessOutcome,
-    ProcessSpec, ProcessTree, Termination, is_batch_script, stop_tree, supervise,
+    AppliedConfinement, CancelSignal, Capture, Confinement, ProcessError, ProcessLimits,
+    ProcessOutcome, ProcessSpec, ProcessTree, Termination, UnixSocketAccess, is_batch_script,
+    stop_tree, supervise,
 };
+use crate::container::ContainerAccess;
+use crate::container::windows::{derive_sid, granted_access, profile_exists};
+use crate::private_store::windows::Sid;
 
 /// Longest command line accepted by `CreateProcessW`, including the final NUL.
 const MAX_COMMAND_LINE_UNITS: usize = 32_767;
@@ -92,9 +100,18 @@ pub(super) fn validate_spec(spec: &ProcessSpec) -> Result<(), ProcessError> {
 
 pub(super) fn run(
     spec: &ProcessSpec,
+    confinement: Option<&Confinement>,
     limits: ProcessLimits,
     cancel: &CancelSignal,
 ) -> Result<ProcessOutcome, ProcessError> {
+    let container = confinement
+        .map(|confinement| prepare_container(spec, confinement))
+        .transpose()?;
+    let applied = if container.is_some() {
+        AppliedConfinement::AppContainer
+    } else {
+        AppliedConfinement::Unconfined
+    };
     let application = wide_nul(spec.program.as_os_str());
     let mut command_line = command_line(spec)?;
     let environment = environment_block(spec);
@@ -118,18 +135,18 @@ pub(super) fn run(
         for handle in inherited {
             set_inheritable(handle, true).map_err(ProcessError::Spawn)?;
         }
-        let result = AttributeList::new(inherited, job.as_raw_handle() as HANDLE).and_then(
-            |mut attributes| {
-                create_suspended(
-                    &application,
-                    &mut command_line,
-                    &environment,
-                    &directory,
-                    inherited,
-                    &mut attributes,
-                )
-            },
-        );
+        let result =
+            AttributeList::new(inherited, job.as_raw_handle() as HANDLE, container.as_ref())
+                .and_then(|mut attributes| {
+                    create_suspended(
+                        &application,
+                        &mut command_line,
+                        &environment,
+                        &directory,
+                        inherited,
+                        &mut attributes,
+                    )
+                });
         // The child has its own copies; ours must close so the pipes can end.
         drop(null_input);
         drop(stdout_write);
@@ -154,13 +171,78 @@ pub(super) fn run(
             return Err(ProcessError::Supervision(error));
         }
     };
-    supervise(
-        &mut tree,
-        capture,
-        started,
-        limits,
-        cancel,
-        AppliedConfinement::Unconfined,
+    supervise(&mut tree, capture, started, limits, cancel, applied)
+}
+
+/// Check a confinement and derive its container SID before anything starts.
+///
+/// Access is decided by the persistent grants at each open; this check makes
+/// a missing or weaker grant fail before the program runs instead of partway.
+fn prepare_container(spec: &ProcessSpec, confinement: &Confinement) -> Result<Sid, ProcessError> {
+    if confinement.unix_sockets == UnixSocketAccess::HostServices {
+        return Err(ProcessError::Unsupported(
+            "host-service Unix-socket access is not available on Windows",
+        ));
+    }
+    let name = confinement
+        .container
+        .as_ref()
+        .ok_or(ProcessError::InvalidSpec(
+            "Windows confinement needs a container name",
+        ))?;
+    let sid = derive_sid(name).map_err(ProcessError::Confinement)?;
+    if !profile_exists(name).map_err(ProcessError::Confinement)? {
+        return Err(ProcessError::Confinement(io::Error::new(
+            io::ErrorKind::NotFound,
+            "the container profile does not exist; grant it a directory first",
+        )));
+    }
+    // Windows derives the container's own folder from this variable and
+    // replaces it, TEMP, and TMP; without it the process cannot be created.
+    if !spec
+        .environment
+        .iter()
+        .any(|(variable, _)| variable.eq_ignore_ascii_case("LOCALAPPDATA"))
+    {
+        return Err(ProcessError::InvalidSpec(
+            "Windows confinement needs LOCALAPPDATA in the environment",
+        ));
+    }
+    let rules = [
+        (&confinement.read_only, ContainerAccess::ReadExecute),
+        (&confinement.read_write, ContainerAccess::ReadWrite),
+    ];
+    for (paths, needed) in rules {
+        for path in paths {
+            let access = granted_access(path, &sid).map_err(ProcessError::Confinement)?;
+            if !covers(access, needed) {
+                return Err(ProcessError::Confinement(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "a confinement path is not granted to the container at its listed level",
+                )));
+            }
+        }
+    }
+    // `CreateProcessW` maps the image with the caller's token, so a program
+    // the container cannot read would still start. Refuse it here instead.
+    let program = granted_access(&spec.program, &sid).map_err(ProcessError::Confinement)?;
+    if !covers(program, ContainerAccess::ReadExecute) {
+        return Err(ProcessError::Confinement(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the program is not readable and executable by the container",
+        )));
+    }
+    Ok(sid)
+}
+
+const fn covers(granted: Option<ContainerAccess>, needed: ContainerAccess) -> bool {
+    matches!(
+        (granted, needed),
+        (Some(ContainerAccess::ReadWrite), _)
+            | (
+                Some(ContainerAccess::ReadExecute),
+                ContainerAccess::ReadExecute
+            )
     )
 }
 
@@ -293,23 +375,28 @@ fn set_inheritable(handle: HANDLE, inheritable: bool) -> io::Result<()> {
     Ok(())
 }
 
-/// A process/thread attribute list that names the inherited handles and the job.
+/// A process/thread attribute list that names the inherited handles, the job,
+/// and, for a confined run, the AppContainer.
 ///
-/// The handle and job arrays are boxed because the list keeps pointers to them
-/// until `DeleteProcThreadAttributeList`, which runs in `Drop`.
+/// The handle and job arrays, the capabilities structure, and the SID it
+/// points to are heap-allocated because the list keeps pointers to them until
+/// `DeleteProcThreadAttributeList`, which runs in `Drop`.
 struct AttributeList {
     buffer: Vec<u64>,
     handles: Box<[HANDLE; 3]>,
     jobs: Box<[HANDLE; 1]>,
+    capabilities: Option<Box<SECURITY_CAPABILITIES>>,
+    container: Option<Sid>,
 }
 
 impl AttributeList {
     #[allow(unsafe_code)]
-    fn new(handles: [HANDLE; 3], job: HANDLE) -> io::Result<Self> {
+    fn new(handles: [HANDLE; 3], job: HANDLE, container: Option<&Sid>) -> io::Result<Self> {
+        let count = if container.is_some() { 3 } else { 2 };
         let mut size = 0usize;
         // SAFETY: a null list with a writable size queries the required size.
         // The expected result is failure with ERROR_INSUFFICIENT_BUFFER.
-        unsafe { InitializeProcThreadAttributeList(null_mut(), 2, 0, &raw mut size) };
+        unsafe { InitializeProcThreadAttributeList(null_mut(), count, 0, &raw mut size) };
         if size == 0 {
             return Err(io::Error::last_os_error());
         }
@@ -318,10 +405,12 @@ impl AttributeList {
             buffer: vec![0u64; words],
             handles: Box::new(handles),
             jobs: Box::new([job]),
+            capabilities: None,
+            container: container.cloned(),
         };
         // SAFETY: the buffer is writable, 8-byte aligned, and at least `size` bytes.
         let result =
-            unsafe { InitializeProcThreadAttributeList(list.pointer(), 2, 0, &raw mut size) };
+            unsafe { InitializeProcThreadAttributeList(list.pointer(), count, 0, &raw mut size) };
         if result == 0 {
             // Not initialized, so `Drop` must not delete it.
             list.buffer = Vec::new();
@@ -359,6 +448,33 @@ impl AttributeList {
         };
         if result == 0 {
             return Err(io::Error::last_os_error());
+        }
+        if let Some(sid) = &list.container {
+            // No capabilities: no network, no loopback, no brokered resources.
+            let capabilities = Box::new(SECURITY_CAPABILITIES {
+                AppContainerSid: sid.as_psid(),
+                Capabilities: null_mut(),
+                CapabilityCount: 0,
+                Reserved: 0,
+            });
+            let pointer: *const SECURITY_CAPABILITIES = &raw const *capabilities;
+            list.capabilities = Some(capabilities);
+            // SAFETY: the list is initialized. The boxed structure and the SID
+            // storage it points to are owned by the list and outlive it.
+            let result = unsafe {
+                UpdateProcThreadAttribute(
+                    list.pointer(),
+                    0,
+                    PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES as usize,
+                    pointer.cast(),
+                    size_of::<SECURITY_CAPABILITIES>(),
+                    null_mut(),
+                    null(),
+                )
+            };
+            if result == 0 {
+                return Err(io::Error::last_os_error());
+            }
         }
         Ok(list)
     }

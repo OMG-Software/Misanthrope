@@ -44,9 +44,12 @@ This is a resume guide, not a replacement for the owning contracts in
   read/list model tools in chat behind the `model_tools` workspace preference.
 - **PR #21** merged at `6b1ebe4`: **Phase C1**, version **0.13.0**, with the
   execution contract and an unexposed process-tree runner core.
-- This branch, `codex/linux-confinement`: **Phase C2**, version **0.14.0**,
-  with `run_confined`: Landlock and a seccomp socket filter on Linux, and a
-  per-run Unix-socket mode. It started from `main` at `6b1ebe4`.
+- **PR #23** merged at `2d44d41`: **Phase C2**, version **0.14.0**, with
+  `run_confined`: Landlock and a seccomp socket filter on Linux, and a per-run
+  Unix-socket mode.
+- This branch, `codex/windows-appcontainer`: **Phase C3**, version **0.15.0**,
+  with Windows AppContainer confinement and recorded, revocable container
+  grants. It started from `main` at `2d44d41`.
 
 Implemented today:
 
@@ -89,8 +92,14 @@ Implemented today:
   claim. See [ADR-0024](docs/adr/0024-publish-one-verified-stage-on-windows-ntfs.md).
 - `process::run_confined` on Linux: a Landlock allowlist (ABI 3 or later),
   seccomp refusal of IP sockets and `io_uring`, and `PairsOnly` (default) or
-  `HostServices` Unix-socket access. No caller; Windows refuses. See
+  `HostServices` Unix-socket access. No caller. See
   [ADR-0028](docs/adr/0028-confine-linux-runs-with-landlock-and-a-socket-filter.md).
+- `process::run_confined` on Windows: a per-workspace AppContainer with no
+  capabilities, checked against persistent ACL grants, with `HostServices`
+  refused. Trusted `workspace container-grant` and `container-revoke` record
+  each intent and outcome in the control journal. No caller runs in the
+  container yet. See
+  [ADR-0029](docs/adr/0029-confine-windows-runs-in-a-workspace-appcontainer-with-recorded-grants.md).
 - Trusted `file restore` through a new checkpoint and
   `file delete-checkpoint --permanent` for one resolved checkpoint, on the same
   filesystems as apply. Neither is power-loss qualified. See
@@ -397,21 +406,26 @@ The user chose Landlock and seccomp on Linux, AppContainer inside a Job Object
 on Windows, and trusted CLI commands as the first caller. See
 [ADR-0027](docs/adr/0027-confine-execution-with-native-primitives-starting-with-a-process-tree-core.md).
 
-- **C1 (this branch, `codex/process-runner-core`, stacked on PR #20):** the
+- **C1 (PR #21):** the
   execution contract and a process-tree runner core in `omgcode-platform`.
   It covers bounded output, deadline, cancellation, and observed cleanup. It
   denies Linux process-group escape with seccomp and Windows job breakaway.
   There is no confinement and no caller.
-- **C2 (this branch, `codex/linux-confinement`):** Linux Landlock filesystem
+- **C2 (PR #23):** Linux Landlock filesystem
   rules and seccomp network denial. The user chose a per-run Unix-socket mode:
   `PairsOnly` by default, and `HostServices` for developers who need the
   Docker daemon or similar services. See
   [ADR-0028](docs/adr/0028-confine-linux-runs-with-landlock-and-a-socket-filter.md).
-- **C3:** Windows AppContainer with recorded, reversible workspace access
-  entries and no network capability.
+- **C3 (this branch, `codex/windows-appcontainer`):** Windows AppContainer with
+  recorded, reversible workspace access entries and no network capability. The
+  user chose persistent grants with explicit revocation, read-execute grants
+  for toolchain roots, refusing `HostServices` on Windows for now, and journal
+  records with trusted CLI commands. See
+  [ADR-0029](docs/adr/0029-confine-windows-runs-in-a-workspace-appcontainer-with-recorded-grants.md).
 - **C4:** trusted CLI `run` behind the `execute` preference, with toolchain
   profiles, journal records, an explicit recorded operator choice before
-  `HostServices`, and the development-tool acceptance cases.
+  `HostServices`, Windows confinement built from the recorded grants, and the
+  development-tool acceptance cases.
 
 ### Phase D: additional providers, streaming, and account lifecycle
 
