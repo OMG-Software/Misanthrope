@@ -3,20 +3,24 @@
 mod support;
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
+#[cfg(target_os = "linux")]
 use omgcode_core::control::ControlStore;
-use omgcode_core::policy::{PermissionSet, WorkspaceId};
+#[cfg(target_os = "linux")]
+use omgcode_core::policy::PermissionSet;
 #[cfg(target_os = "linux")]
 use serde_json::Value;
 #[cfg(target_os = "linux")]
 use serde_json::json;
-use tempfile::TempDir;
 use uuid::Uuid;
 
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::MetadataExt;
 
+#[cfg(target_os = "linux")]
+use support::spawn_gate::without_child_spawns;
+use support::workspace_fixture::Fixture;
 use support::{
     assert_control_error, assert_error_code, assert_success, json_output, path_arg, run_cli,
 };
@@ -25,55 +29,7 @@ const ORIGINAL: &[u8] = b"before\r\nlast line";
 #[cfg(target_os = "linux")]
 const PROPOSED: &[u8] = b"after\r\nlast line\r\n";
 
-/// Owns isolated settings and a disposable workspace for each subprocess test.
-struct Fixture {
-    _temporary: TempDir,
-    data: PathBuf,
-    workspace: PathBuf,
-    workspace_id: WorkspaceId,
-    session_id: Uuid,
-}
-
 impl Fixture {
-    /// Create a live read/write registration and an existing target file.
-    fn new() -> Self {
-        let temporary = tempfile::tempdir().expect("private fixture root");
-        let data = temporary.path().join("application-data");
-        let development = temporary.path().join("development");
-        let workspace = development.join("project");
-        fs::create_dir_all(&workspace).expect("workspace directories");
-        fs::write(workspace.join("note.txt"), ORIGINAL).expect("original workspace file");
-
-        let mut control = ControlStore::open(&data).expect("private control store");
-        control
-            .set_development_root(&development, control.revision())
-            .expect("development root");
-        let workspace_id = control
-            .register_workspace(&workspace, control.revision())
-            .expect("registered workspace")
-            .id();
-        control
-            .set_permissions(
-                workspace_id,
-                PermissionSet {
-                    read: true,
-                    write: true,
-                    execute: false,
-                    task_network: false,
-                },
-                control.revision(),
-            )
-            .expect("explicit file preferences");
-
-        Self {
-            _temporary: temporary,
-            data,
-            workspace,
-            workspace_id,
-            session_id: Uuid::new_v4(),
-        }
-    }
-
     /// Read the current target through the public CLI and return its exact digest.
     #[cfg(target_os = "linux")]
     fn current_sha256(&self) -> String {
@@ -170,7 +126,7 @@ fn apply_requires_existing_settings_without_creating_them() {
 #[cfg(target_os = "linux")]
 #[test]
 fn apply_replaces_exact_bytes_and_retains_a_completed_checkpoint() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new(ORIGINAL);
     let proposed_file = fixture._temporary.path().join("proposed.txt");
     fs::write(&proposed_file, PROPOSED).expect("complete proposed bytes");
     let expected_sha256 = fixture.current_sha256();
@@ -245,7 +201,7 @@ fn apply_replaces_exact_bytes_and_retains_a_completed_checkpoint() {
 #[cfg(target_os = "linux")]
 #[test]
 fn applying_identical_bytes_does_not_create_a_checkpoint() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new(ORIGINAL);
     let proposed_file = fixture._temporary.path().join("proposed.txt");
     fs::write(&proposed_file, ORIGINAL).expect("same proposed bytes");
     let expected_sha256 = fixture.current_sha256();
@@ -267,7 +223,7 @@ fn applying_identical_bytes_does_not_create_a_checkpoint() {
 #[cfg(target_os = "linux")]
 #[test]
 fn stale_expected_digest_refuses_without_changing_target_or_checkpoint_storage() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new(ORIGINAL);
     let proposed_file = fixture._temporary.path().join("proposed.txt");
     fs::write(&proposed_file, PROPOSED).expect("complete proposed bytes");
 
@@ -283,25 +239,26 @@ fn stale_expected_digest_refuses_without_changing_target_or_checkpoint_storage()
 #[cfg(target_os = "linux")]
 #[test]
 fn denied_write_preference_refuses_replacement() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new(ORIGINAL);
     let proposed_file = fixture._temporary.path().join("proposed.txt");
     fs::write(&proposed_file, PROPOSED).expect("complete proposed bytes");
-    let mut control = ControlStore::open_existing(&fixture.data)
-        .expect("existing settings")
-        .expect("control store exists");
-    control
-        .set_permissions(
-            fixture.workspace_id,
-            PermissionSet {
-                read: true,
-                write: false,
-                execute: false,
-                task_network: false,
-            },
-            control.revision(),
-        )
-        .expect("revoke write preference");
-    drop(control);
+    without_child_spawns(|| {
+        let mut control = ControlStore::open_existing(&fixture.data)
+            .expect("existing settings")
+            .expect("control store exists");
+        control
+            .set_permissions(
+                fixture.workspace_id,
+                PermissionSet {
+                    read: true,
+                    write: false,
+                    execute: false,
+                    task_network: false,
+                },
+                control.revision(),
+            )
+            .expect("revoke write preference");
+    });
 
     let output = fixture.apply(&proposed_file, &"0".repeat(64), ORIGINAL.len(), true);
     assert_error_code(&output, "checkpoint_denied");
@@ -315,7 +272,7 @@ fn denied_write_preference_refuses_replacement() {
 #[cfg(target_os = "linux")]
 #[test]
 fn apply_requires_explicit_stop_writers_flag_without_side_effects() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new(ORIGINAL);
     let proposed_file = fixture._temporary.path().join("proposed.txt");
     fs::write(&proposed_file, PROPOSED).expect("complete proposed bytes");
     let before_names = child_names(&fixture.data);
@@ -336,7 +293,7 @@ fn apply_requires_explicit_stop_writers_flag_without_side_effects() {
 #[cfg(target_os = "linux")]
 #[test]
 fn apply_rejects_a_symlinked_proposed_source() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new(ORIGINAL);
     let real_source = fixture._temporary.path().join("real-proposed.txt");
     let linked_source = fixture._temporary.path().join("linked-proposed.txt");
     fs::write(&real_source, PROPOSED).expect("complete proposed bytes");
@@ -355,7 +312,7 @@ fn apply_rejects_a_symlinked_proposed_source() {
 #[cfg(windows)]
 #[test]
 fn windows_apply_refuses_before_checkpoint_or_workspace_mutation() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new(ORIGINAL);
     let absent_source = fixture._temporary.path().join("source-does-not-exist.txt");
     let before_names = child_names(&fixture.data);
 

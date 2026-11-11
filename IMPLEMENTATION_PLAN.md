@@ -1,6 +1,6 @@
 # OMGCode implementation plan
 
-Last verified: 2026-11-10.
+Last verified: 2026-11-11.
 
 This guide is part of `main` after PR #9. Read it before selecting the next
 increment. Checkpoint preparation does not mean native replacement exists.
@@ -30,8 +30,11 @@ This is a resume guide, not a replacement for the owning contracts in
   protected Linux checkpoint storage and existing-only CLI recovery.
 - **PR #14** merged at `b3829db`: typed checkpoint inspection state and
   A2b review fixes, with no JSON or storage format change.
-- This branch, `codex/native-replacement`, implements **Phase A2c** on that
-  baseline, version **0.9.0**. It adds trusted Linux ext4 apply.
+- **PR #15** merged at `4fe92ca`: **Phase A2c**, version **0.9.0**, with trusted
+  Linux ext4 apply. Its pull-request checks passed, but the Rust workflow failed
+  on the merge commit because of the test race described in the known cautions.
+- This branch, `codex/fix-control-lock-race`, fixes that test race. It changes
+  tests and documentation only, so the version stays **0.9.0**.
 
 Implemented today:
 
@@ -123,8 +126,10 @@ checks that actually ran. Application tests were not applicable to A1; A2a
 requires the Cargo checks and targeted `replacement_records` integration tests.
 A2b adds `checkpoint_storage`, `checkpoint_recovery`, native private-store and
 capture tests, and internal persistence fault/reopen tests. Run the complete
-suite on both hosts. Use `-- --test-threads=1` when host contention affects local
-provider fixtures; record failures before any isolated rerun or full retry.
+suite on both hosts with default parallelism, as CI does. Use
+`-- --test-threads=1` only as an additional run when host contention affects local
+provider fixtures; record failures before any isolated rerun or full retry. A
+serial run alone cannot detect races between test threads.
 
 A2b local verification on 2026-11-10 passed formatting, Clippy, serial all-target
 tests, and doc tests with Rust 1.99.1. Ubuntu 24.04 under WSL, uid 1000, passed
@@ -146,6 +151,14 @@ Windows ran 237 tests and one doc test. Each final command exited zero; no tests
 failed, were ignored, or were filtered. Linux apply ran on ext4 under WSL
 with a separate tmpfs mount for the cross-mount refusal case. See the
 [native apply limits](docs/file-access.md#implemented-native-apply-phase-a2c).
+
+The lock-race fix started from `4fe92ca`, where Linux `checkpoint_recovery` failed
+7 of 150 parallel runs and `cli_workflow` failed 7 of 150. After the fix, each of
+those suites and `replacement_apply` had no failures in 300 parallel runs. Final
+verification used default test parallelism with Rust 1.99.1 and passed
+formatting, Clippy, all-target tests, and doc tests. Linux under WSL ran 294 tests
+and one doc test. Native Windows ran 238 tests and one doc test, with
+workspace-local `TEMP` and `TMP`. No tests failed, were ignored, or were filtered.
 
 A mock or compile-only result does not establish native containment, live
 provider compatibility, or release filesystem support.
@@ -176,7 +189,7 @@ at that review boundary:
     admission with native storage and existing-only missing-state rules.
     Library-only preparation stops unresolved; CLI inspection/acknowledgement
     does not apply an edit. See [ADR-0021](docs/adr/0021-store-checkpoints-with-native-private-handles.md).
-  - **A2c (current branch):** trusted Linux ext4 apply with exact supported
+  - **A2c (merged as PR #15):** trusted Linux ext4 apply with exact supported
     metadata, durable intent, native publication, and uncertain-outcome recovery.
     Other filesystems and Windows refuse apply. Release filesystem and power-loss
     qualification, Windows ACLs, and restore remain open.
@@ -271,6 +284,11 @@ release readiness remain separate gates.
 
 ## Known cautions
 
+- Linux CLI integration tests raced on inherited `flock` descriptors, producing
+  `Busy` and mock-provider timeouts. The spawn gate in
+  [testing standards](docs/testing-standards.md#isolation-and-concurrency) covers
+  the CLI suites. `omgcode-core`'s `file_broker` FIFO test still spawns one child
+  beside in-process stores; it did not fail in 60 parallel runs and is not gated.
 - Local Windows all-target runs intermittently timed out in pre-existing
   multi-fixture provider tests under host load. The tests pass individually and
   CI passed on `987a5aa`; recheck on a clean host rather than weakening a test.
