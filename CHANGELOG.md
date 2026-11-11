@@ -18,7 +18,8 @@ Changes are recorded here before a release version is assigned.
   token is removed from them before they are recorded or sent. `workspace
   status` reports `model_tools`, and `capabilities` reports
   `model_read_list_tools` and a new `tool_policy` value. Live LM Studio
-  tool-call compatibility is not qualified; see ADR-0026.
+  tool-call compatibility is not qualified. One opt-in Windows spot-check with
+  LM Studio 0.4.28 and `google/gemma-4-e4b` passed; see ADR-0026.
 - Version 0.11.0 adds trusted `file restore` and
   `file delete-checkpoint --permanent` on Linux ext4 and Windows NTFS. Restore
   writes a retained checkpoint's original bytes back through the normal apply

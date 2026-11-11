@@ -210,6 +210,14 @@ tool-text filter, and the CLI filter call were each caught by a test. These
 results use a mock LM Studio server. They do not establish live tool-call
 compatibility, remote CI status, or release readiness.
 
+An opt-in live spot-check then ran the debug CLI on Windows against LM Studio 0.4.28 and `google/gemma-4-e4b`
+at `http://127.0.0.1:1234/v1`, with no token and disposable data. Text-only chat
+with the preference off, a read, and a directory listing succeeded. Revoking
+read produced `tool_denied`. Explicit parent, absolute, rooted, and `..` listing
+calls each failed as `invalid_tool_call` before file access. Sentinels outside
+the workspace never reached the journal. This is one model on one host, not a
+provider qualification.
+
 A mock or compile-only result does not establish native containment, live
 provider compatibility, or release filesystem support.
 

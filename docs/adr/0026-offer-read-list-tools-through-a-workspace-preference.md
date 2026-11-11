@@ -102,7 +102,9 @@ Limits and gaps:
   defence beyond source labelling and the fixed tool set is not added here.
 - Live compatibility with LM Studio tool-call output is not qualified. Mock
   fixtures cover the documented OpenAI-compatible shape only. A server that
-  adds fields to a call object fails closed.
+  adds fields to a call object fails closed. One opt-in Windows spot-check with
+  LM Studio 0.4.28 and `google/gemma-4-e4b` passed read, list, revocation, and path-refusal
+  cases; it does not qualify other versions or models.
 - A same-user process can still change files between calls. Reads are
   snapshots, not locks.
 - Secret redaction covers only the configured local server token. Chat

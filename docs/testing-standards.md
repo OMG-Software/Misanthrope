@@ -143,7 +143,8 @@ rejects tool requests unless the workspace enables `model_tools`, requires the
 compiled base prompt, and accepts only a literal loopback HTTP endpoint. The
 turn-runtime tests use a scripted model interface. The tool-enabled chat tests
 use a mock that returns the documented OpenAI-compatible tool-call shape; they
-do not establish live LM Studio tool-call compatibility. Model discovery, streaming, cancellation, and
+do not establish live LM Studio tool-call compatibility. A single opt-in spot-check
+with LM Studio 0.4.28 and `google/gemma-4-e4b` on Windows is recorded in the implementation plan. Model discovery, streaming, cancellation, and
 live model compatibility remain future qualification work. The CLI can inspect
 and archive sessions, but it does not execute recorded tool actions or resume
 an incomplete turn.
