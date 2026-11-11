@@ -32,7 +32,15 @@ granted directory, run it in a fresh AppContainer, and record each probe as
 `ok`, `denied`, or the OS error. The same probes run unconfined as a positive
 control. Grant tests change real ACLs on temporary NTFS directories, and each
 test container deletes its profile when dropped, so runs leave no per-user
-AppContainer profiles. These tests ran on Windows 11 build 26300. See [workspace permissions](workspace-permissions.md)
+AppContainer profiles. These tests ran on Windows 11 build 26300.
+
+The 0.16.0 `run_workflow` tests drive `omgcode run` through the real CLI with
+system tools. Windows scenes grant the workspace and revoke every grant when
+dropped. The `toolchain_acceptance` tests run real toolchains. They are
+`#[ignore]` because they need host toolchains named by `OMGCODE_ACCEPT_*`
+variables. Run them explicitly with `--ignored` on both platforms and report
+each language that did not run. A missing variable fails the case rather than
+passing it. See [workspace permissions](workspace-permissions.md)
 and the [workspace file-access contract](file-access.md) for their scope and
 current limits. [Repository review and analysis](repository-checks.md) have
 separate workflows.

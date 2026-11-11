@@ -319,6 +319,7 @@ fn checkpoint_acknowledgement_does_not_restore_revoked_workspace_permissions() {
                     execute: false,
                     task_network: false,
                     model_tools: false,
+                    host_services: false,
                 },
                 control.revision(),
             )

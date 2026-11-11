@@ -75,13 +75,14 @@ fn is_valid_workspace_uuid(value: Uuid) -> bool {
     !value.is_nil() && value.get_version() == Some(Version::Random)
 }
 
-/// User-configured permission flags for the four supported operation classes
-/// and the model read/list tool preference.
+/// User-configured permission flags for the four supported operation classes,
+/// the model read/list tool preference, and the host-service preference.
 ///
 /// These flags are policy inputs only. They do not mint execution grants.
-/// `model_tools` is omitted from persisted JSON while it is `false`, so
-/// settings written without it keep their exact bytes and older readers can
-/// still open them. Once enabled, older readers refuse the field.
+/// `model_tools` and `host_services` are omitted from persisted JSON while
+/// they are `false`, so settings written without them keep their exact bytes
+/// and older readers can still open them. Once enabled, older readers refuse
+/// the field.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PermissionSet {
@@ -99,6 +100,13 @@ pub struct PermissionSet {
     /// binding, and stays confined to the session workspace.
     #[serde(default, skip_serializing_if = "is_false")]
     pub model_tools: bool,
+    /// Whether a trusted `run` may select host-service Unix-socket access.
+    ///
+    /// Each run must also ask for it explicitly. Host-service access reaches
+    /// every Unix socket the user can open, such as the Docker daemon, and is
+    /// refused on Windows. It is never offered to a model.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub host_services: bool,
 }
 
 /// Keep a disabled optional preference out of persisted settings records.
@@ -108,7 +116,8 @@ const fn is_false(value: &bool) -> bool {
 }
 
 impl Default for PermissionSet {
-    /// Leave process execution, task networking, and model tools disabled until configured.
+    /// Leave process execution, task networking, model tools, and host
+    /// services disabled until configured.
     fn default() -> Self {
         Self {
             read: true,
@@ -116,6 +125,7 @@ impl Default for PermissionSet {
             execute: false,
             task_network: false,
             model_tools: false,
+            host_services: false,
         }
     }
 }
@@ -382,6 +392,7 @@ mod tests {
                     execute: false,
                     task_network: false,
                     model_tools: false,
+                    host_services: false,
                 },
             ),
             (
@@ -393,6 +404,7 @@ mod tests {
                     execute: false,
                     task_network: false,
                     model_tools: false,
+                    host_services: false,
                 },
             ),
             (
@@ -404,6 +416,7 @@ mod tests {
                     execute: true,
                     task_network: false,
                     model_tools: false,
+                    host_services: false,
                 },
             ),
             (
@@ -415,6 +428,7 @@ mod tests {
                     execute: false,
                     task_network: true,
                     model_tools: false,
+                    host_services: false,
                 },
             ),
         ];
@@ -652,6 +666,35 @@ mod tests {
         };
         let encoded = serde_json::to_value(enabled).expect("encode enabled");
         assert_eq!(encoded["model_tools"], true);
+        assert_eq!(
+            serde_json::from_value::<PermissionSet>(encoded).expect("decode enabled"),
+            enabled
+        );
+        for operation in [
+            Operation::Read,
+            Operation::Write,
+            Operation::Execute,
+            Operation::TaskNetwork,
+        ] {
+            assert_eq!(
+                enabled.allows(operation),
+                PermissionSet::default().allows(operation)
+            );
+        }
+    }
+
+    /// The host-service preference follows the same compatibility rule and
+    /// changes no operation class.
+    #[test]
+    fn host_services_is_absent_while_disabled_and_explicit_when_enabled() {
+        let default = serde_json::to_value(PermissionSet::default()).expect("encode default");
+        assert!(default.get("host_services").is_none());
+        let enabled = PermissionSet {
+            host_services: true,
+            ..PermissionSet::default()
+        };
+        let encoded = serde_json::to_value(enabled).expect("encode enabled");
+        assert_eq!(encoded["host_services"], true);
         assert_eq!(
             serde_json::from_value::<PermissionSet>(encoded).expect("decode enabled"),
             enabled

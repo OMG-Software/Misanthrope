@@ -47,9 +47,11 @@ This is a resume guide, not a replacement for the owning contracts in
 - **PR #23** merged at `2d44d41`: **Phase C2**, version **0.14.0**, with
   `run_confined`: Landlock and a seccomp socket filter on Linux, and a per-run
   Unix-socket mode.
-- This branch, `codex/windows-appcontainer`: **Phase C3**, version **0.15.0**,
-  with Windows AppContainer confinement and recorded, revocable container
-  grants. It started from `main` at `2d44d41`.
+- **PR #24** merged at `aa31976`: **Phase C3**, version **0.15.0**, with
+  Windows AppContainer confinement and recorded, revocable container grants.
+- This branch, `codex/cli-run`: **Phase C4**, version **0.16.0**, with the
+  trusted CLI `run`, toolchain profiles, the run journal, and the
+  `host_services` preference. It started from `main` at `aa31976`.
 
 Implemented today:
 
@@ -92,14 +94,25 @@ Implemented today:
   claim. See [ADR-0024](docs/adr/0024-publish-one-verified-stage-on-windows-ntfs.md).
 - `process::run_confined` on Linux: a Landlock allowlist (ABI 3 or later),
   seccomp refusal of IP sockets and `io_uring`, and `PairsOnly` (default) or
-  `HostServices` Unix-socket access. No caller. See
+  `HostServices` Unix-socket access. See
   [ADR-0028](docs/adr/0028-confine-linux-runs-with-landlock-and-a-socket-filter.md).
 - `process::run_confined` on Windows: a per-workspace AppContainer with no
   capabilities, checked against persistent ACL grants, with `HostServices`
   refused. Trusted `workspace container-grant` and `container-revoke` record
-  each intent and outcome in the control journal. No caller runs in the
-  container yet. See
+  each intent and outcome in the control journal. See
   [ADR-0029](docs/adr/0029-confine-windows-runs-in-a-workspace-appcontainer-with-recorded-grants.md).
+- Trusted `omgcode run` on Linux and Windows:
+  - behind the live `execute` preference, through `run_confined` only;
+  - operator-declared toolchain profiles (`workspace profile-add`,
+    `profile-show`, `profile-remove`) and a curated environment;
+  - a bounded `runs-v1.jsonl` journal of intents and outcomes, with no
+    argument text or output, managed by `runs audit`, `acknowledge`, and
+    `archive`;
+  - a `host_services` preference that a run's `--host-services` flag also
+    needs (Linux only);
+  - interrupt-to-cancel handling.
+
+  See [ADR-0030](docs/adr/0030-run-trusted-commands-through-recorded-toolchain-profiles.md).
 - Trusted `file restore` through a new checkpoint and
   `file delete-checkpoint --permanent` for one resolved checkpoint, on the same
   filesystems as apply. Neither is power-loss qualified. See
@@ -111,10 +124,9 @@ Not implemented:
   compaction, and standalone CLI checkpoint preparation.
 - Model write, process, network, Git, or MCP tools; per-call tool approval;
   and live provider tool-call qualification.
-- Exposed process execution, Windows execution confinement, tree-wide resource
-  limits, task networking, Git, MCP, runtime skills, memories, desktop/UI
-  panels, compaction, or caches. The process-tree runner core has no caller;
-  only its Linux confined path applies confinement.
+- Model-callable process execution, tree-wide resource limits, task and
+  package networking, Git, MCP, runtime skills, memories, desktop/UI panels,
+  compaction, or caches. Nothing calls the unconfined process runner.
 - Subscription/API-key provider profiles beyond the local LM Studio route.
 
 ## Resume steps
@@ -416,16 +428,28 @@ on Windows, and trusted CLI commands as the first caller. See
   `PairsOnly` by default, and `HostServices` for developers who need the
   Docker daemon or similar services. See
   [ADR-0028](docs/adr/0028-confine-linux-runs-with-landlock-and-a-socket-filter.md).
-- **C3 (this branch, `codex/windows-appcontainer`):** Windows AppContainer with
+- **C3 (PR #24):** Windows AppContainer with
   recorded, reversible workspace access entries and no network capability. The
   user chose persistent grants with explicit revocation, read-execute grants
   for toolchain roots, refusing `HostServices` on Windows for now, and journal
   records with trusted CLI commands. See
   [ADR-0029](docs/adr/0029-confine-windows-runs-in-a-workspace-appcontainer-with-recorded-grants.md).
-- **C4:** trusted CLI `run` behind the `execute` preference, with toolchain
-  profiles, journal records, an explicit recorded operator choice before
-  `HostServices`, Windows confinement built from the recorded grants, and the
-  development-tool acceptance cases.
+- **C4 (this branch, `codex/cli-run`):** trusted CLI `run` behind the `execute`
+  preference. The user chose:
+  - operator-declared toolchain profiles recorded with a revision;
+  - a separate bounded run journal that stores no output;
+  - a `host_services` preference plus a per-run flag;
+  - acceptance workflows for Rust, Python, Node, C/C++, Go, and Java on both
+    platforms.
+
+  Java has not run, because no JDK was installed. See
+  [ADR-0030](docs/adr/0030-run-trusted-commands-through-recorded-toolchain-profiles.md).
+
+Next decisions, not yet scheduled:
+
+- a package-network profile;
+- tree-wide resource limits;
+- a model-callable command tool with per-call approval.
 
 ### Phase D: additional providers, streaming, and account lifecycle
 

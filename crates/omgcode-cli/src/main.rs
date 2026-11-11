@@ -4,6 +4,7 @@
 mod control_cli;
 mod file_cli;
 mod model_tools;
+mod run_cli;
 
 use clap::{Args, Parser, Subcommand};
 use directories::ProjectDirs;
@@ -22,6 +23,9 @@ use std::env;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
+
+/// Whether trusted runs and toolchain profiles exist on this platform.
+const RUN_SUPPORTED: bool = cfg!(any(target_os = "linux", windows));
 
 #[derive(Parser)]
 #[command(name = "omgcode", version, about = "OMGCode local core prototype")]
@@ -56,6 +60,14 @@ enum Command {
     },
     /// Send one turn to an explicitly selected local LM Studio model.
     Chat(ChatArgs),
+    /// Run one program in a workspace under native confinement, using a
+    /// recorded toolchain profile. Needs the workspace `execute` preference.
+    Run(run_cli::RunArgs),
+    /// Inspect, acknowledge, or archive run records.
+    Runs {
+        #[command(subcommand)]
+        action: run_cli::RunsCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -178,6 +190,7 @@ fn main() -> ExitCode {
 }
 
 /// Dispatch trusted operator commands without providing any model execution route.
+/// `run` is an operator command; no model tool reaches it.
 fn run(cli: Cli) -> Result<(), CliError> {
     match cli.command {
         Command::Prompt => print_json(&json!({
@@ -214,10 +227,21 @@ fn run(cli: Cli) -> Result<(), CliError> {
             "model_read_list_tools": model_tools::MODEL_TOOLS_SUPPORTED,
             "workspace_container_grants": omgcode_core::control::CONTAINER_GRANTS_SUPPORTED,
             "workspace_file_tools": false,
-            "process_execution": false,
+            "toolchain_profiles": RUN_SUPPORTED,
+            "process_execution": if RUN_SUPPORTED {
+                serde_json::Value::from("trusted_cli_only")
+            } else {
+                serde_json::Value::Bool(false)
+            },
             "mcp": false,
             "memories": false,
-            "sandbox_backend": "unavailable",
+            "sandbox_backend": if cfg!(target_os = "linux") {
+                "landlock"
+            } else if cfg!(windows) {
+                "appcontainer"
+            } else {
+                "unavailable"
+            },
             "tool_policy": if cfg!(any(target_os = "linux", target_os = "windows")) {
                 "read_list_only_when_workspace_model_tools_enabled"
             } else {
@@ -265,6 +289,8 @@ fn run(cli: Cli) -> Result<(), CliError> {
         }
         Command::File { action } => file_cli::run(action, &data_root(cli.data_dir)?),
         Command::Chat(args) => chat(cli.data_dir, args),
+        Command::Run(args) => run_cli::run(args, &data_root(cli.data_dir)?),
+        Command::Runs { action } => run_cli::runs(action, &data_root(cli.data_dir)?),
     }
 }
 

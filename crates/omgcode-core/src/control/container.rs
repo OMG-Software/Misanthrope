@@ -97,6 +97,12 @@ impl ContainerGrant {
     pub const fn access(&self) -> ContainerGrantAccess {
         self.access
     }
+
+    /// The granted directory as recorded.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) const fn directory(&self) -> &DirectoryRecord {
+        &self.directory
+    }
 }
 
 /// A grant and its current state, as reported in status output.

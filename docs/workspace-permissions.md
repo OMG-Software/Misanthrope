@@ -13,6 +13,11 @@ class for that binding. It is not a grant to open a file or start a process.
 Future tools must check the target actually opened and apply native controls.
 Never pass these results to an unrestricted executor.
 
+Since 0.16.0 the live `execute` preference gates the trusted CLI command
+`omgcode run`. The command checks the preference itself on every run and
+starts the program only under native confinement. It does not consume a
+diagnostic result; see [trusted runs](execution.md#trusted-runs).
+
 ## Trusted settings and identity
 
 Only trusted local CLI input can change settings. The commands are not model
@@ -22,10 +27,11 @@ cannot set a development root, change permissions, or recreate a binding.
 Select an existing development root explicitly. Register an existing workspace
 beneath it, including the root itself. Each workspace gets a random UUIDv4.
 Read and write preferences default to enabled; process execution, task
-network access, and model tools default to disabled. Provider connections
-remain separate from task networking. No operation class executes a tool. The
-separate `model_tools` preference is described under
-[model read/list tools](#model-readlist-tools).
+network access, host services, and model tools default to disabled. Provider
+connections remain separate from task networking. No operation class executes
+a tool by itself. The separate `model_tools` and `host_services` preferences
+are described under [model read/list tools](#model-readlist-tools) and
+[host services](#host-services).
 
 Registration stores the canonical native path, volume/filesystem ID, 128-bit
 file ID, and directory creation timestamp. Canonicalization resolves a trusted
@@ -78,9 +84,10 @@ rejects store, session, workspace, revision, expiry,
 availability, and flag mismatches before reporting configuration eligibility.
 Checks append audit events without changing the settings revision.
 
-No running tasks exist in this increment. Live task revocation, descendant
-cleanup, per-target grants, approval UI, and filesystem enforcement remain
-required before tool execution can be enabled.
+Trusted CLI runs exist since 0.16.0. Each run checks the live settings once,
+before it starts. A preference change during a run applies to later runs; it
+does not stop a running tree. Live task revocation, per-target grants, and
+approval UI remain required before a model can request execution.
 
 ## Persistence and audit
 
@@ -140,6 +147,34 @@ status` lists outstanding grants under `container_grants` and omits the field
 when there are none, so settings without grants keep their exact output.
 Version 0.14.0 refuses a settings log that records a grant. The
 [execution guide](execution.md#container-grants) owns the rules.
+
+## Toolchain profiles
+
+`workspace profile-add`, `profile-show`, and `profile-remove` manage the
+operator-declared toolchain profiles that `omgcode run` uses. Adding and
+removing need the expected revision and increment it, through the
+`profile_added` and `profile_removed` events. `workspace status` lists
+profiles under `profiles` and omits the field when there are none, so settings
+without profiles keep their exact output. Version 0.15.0 refuses a settings log
+that records a profile. The
+[execution guide](execution.md#toolchain-profiles) owns the rules. Profile
+variables are stored here in plain text; never put secrets in them.
+
+## Host services
+
+`workspace permissions <id> --revision <n> --host-services true` lets a
+trusted Linux `run` of that workspace select host-service Unix-socket access
+when the run also passes `--host-services`. Both are required. The preference
+is off by default and appends `permissions_changed` like the other flags. It is
+not an operation class, so `workspace check` does not mention it. Windows
+refuses host services at run time whatever the preference says.
+
+`workspace status` always reports `host_services`. Persisted settings omit the
+field while it is `false`, so settings that never enable it keep their exact
+bytes. Once a `true` value is written, version 0.15.0 refuses the settings
+log. Host-service access exposes every Unix socket the user can reach,
+including the Docker daemon; see
+[Unix-domain sockets](execution.md#unix-domain-sockets).
 
 ## Model read/list tools
 

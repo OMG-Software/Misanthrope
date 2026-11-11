@@ -1,6 +1,6 @@
 # Build and run the core prototype
 
-OMGCode 0.15.0 is a developer CLI prototype with workspace permission
+OMGCode 0.16.0 is a developer CLI prototype with workspace permission
 settings and bounded native file operations through trusted operator commands.
 It can send a text conversation to an explicitly selected local LM Studio model
 and save that conversation. It can read/list files, exclusively create new
@@ -10,15 +10,16 @@ the core's bounded turn/tool runtime so the model can read and list files in
 that workspace. Trusted CLI apply can
 replace an existing file on Linux ext4 or Windows NTFS. Trusted restore puts a
 retained checkpoint's original bytes back through apply, and trusted checkpoint
-deletion removes one resolved private entry. The CLI cannot delete workspace
-files, run commands, use Git, or connect to MCP servers.
+deletion removes one resolved private entry. The trusted `run` command starts
+one program in a workspace whose `execute` preference is enabled, under
+Landlock and a seccomp socket filter on Linux or a per-workspace AppContainer
+on Windows. It uses an operator-declared toolchain profile and records each
+run in a run journal. The CLI cannot delete workspace files, use Git, or
+connect to MCP servers.
 When a workspace enables `model_tools`, chat lets the local model read and list
-files in that workspace. Model write, process, network, Git, and MCP tools and
-exposed command execution are not implemented. The platform crate has a
-process-tree runner core with no caller. Its confined entry point applies
-Landlock and a seccomp socket filter on Linux and a per-workspace AppContainer
-on Windows. Trusted commands record and apply the Windows container grants;
-see [command execution](execution.md).
+files in that workspace. Model write, process, network, Git, and MCP tools are
+not implemented. Trusted commands record and apply the Windows container
+grants; see [command execution](execution.md).
 
 The core's byte-input replacement inspectors remain read-only. Its file broker
 also provides `checkpoint_prepare` on Linux and Windows with fresh read/write
@@ -146,14 +147,43 @@ omgcode --data-dir C:\omgcode-data workspace container-revoke GRANT_UUID
 
 `status` initializes an absent store at revision zero. `check` and `audit`
 require existing state. Flags take explicit `true` or `false` values. Read/write
-default to enabled; execute, task-network, and model-tools default to
-disabled. All decisions still report `execution_allowed: false`. Settings
-commands do not dispatch tools. `--model-tools true` lets chat offer the model
+default to enabled; execute, task-network, host-services, and model-tools
+default to disabled. All decisions still report `execution_allowed: false`;
+only the trusted `run` command starts a process. Settings commands do not
+dispatch tools. `--model-tools true` lets chat offer the model
 read and list tools; see [model read/list tools](workspace-permissions.md#model-readlist-tools).
 See the [workspace contract](workspace-permissions.md) for limits and failures.
 `container-grant` and `container-revoke` work on Windows only. They change ACLs
 for the workspace's AppContainer and record each change; see
 [container grants](execution.md#container-grants).
+
+## Trusted runs
+
+Enable `execute`, declare a toolchain profile, and run a program. On Windows,
+grant the workspace read-write first, and grant read-execute on any toolchain
+root that application packages cannot already read. These examples continue
+the revisions above.
+
+```text
+omgcode --data-dir C:\omgcode-data workspace permissions WORKSPACE_ID --revision 6 --execute true
+omgcode --data-dir C:\omgcode-data workspace container-grant WORKSPACE_ID C:\Users\me\.rustup\toolchains\1.99.1-x86_64-pc-windows-msvc --access read-execute --revision 7
+omgcode --data-dir C:\omgcode-data workspace profile-add rust --root C:\Users\me\.rustup\toolchains\1.99.1-x86_64-pc-windows-msvc --path C:\Users\me\.rustup\toolchains\1.99.1-x86_64-pc-windows-msvc\bin --root C:\Windows\System32 --path C:\Windows\System32 --revision 8
+omgcode --data-dir C:\omgcode-data run WORKSPACE_ID --profile rust -- cargo build --offline
+omgcode --data-dir C:\omgcode-data runs audit --limit 20
+omgcode --data-dir C:\omgcode-data runs acknowledge RUN_UUID
+omgcode --data-dir C:\omgcode-data runs archive --archive-dir C:\omgcode-archive
+```
+
+A Windows profile that links with MSVC also needs the MSVC tools and Windows
+Kits directories as roots, the MSVC `bin\Hostx64\x64` directory on `PATH`, and
+the `INCLUDE`, `LIB`, and `VCINSTALLDIR` values a developer prompt would set.
+On Linux a typical profile is `--root /usr --path /usr/bin` plus the
+toolchain's own root. The run receives only the profile's `PATH` and
+variables, plus runner-owned home and temporary locations. Output is printed,
+never stored. `--host-services` also needs `--host-services true` on the
+workspace and works only on Linux. The [execution guide](execution.md#trusted-runs)
+owns the checks, the journal, and the known limits, including those for Node
+on Windows.
 
 When a root is configured, new sessions use stable IDs from the persisted
 workspace registration. Invalid settings or outside-root selections fail.
@@ -424,15 +454,15 @@ usage events, streaming chunks, and large-output artifacts remain planned.
 
 | Crate | Responsibility |
 | --- | --- |
-| omgcode-core | Compiled prompt, bounded model adapter, session/control/file-operation journals, workspace policy, broker orchestration, bounded turn/tool lifecycle, and non-destructive edit previews |
-| omgcode-cli | Trusted operator input, one-turn chat orchestration with optional read/list model tools, bounded file and preview commands, JSON output |
-| omgcode-platform | Native journal validation, directory identity, handle-relative workspace file operations, Windows AppContainer grants, and an unexposed process-tree runner core with Linux Landlock/seccomp and Windows AppContainer confinement |
+| omgcode-core | Compiled prompt, bounded model adapter, session/control/file-operation/run journals, workspace policy and toolchain profiles, broker orchestration, trusted runs, bounded turn/tool lifecycle, and non-destructive edit previews |
+| omgcode-cli | Trusted operator input, one-turn chat orchestration with optional read/list model tools, bounded file and preview commands, trusted `run`, JSON output |
+| omgcode-platform | Native journal validation, directory identity, handle-relative workspace file operations, Windows AppContainer grants, interrupt-to-cancel handling, and a process-tree runner with Linux Landlock/seccomp and Windows AppContainer confinement |
 
 Core and CLI forbid unsafe code. The platform crate denies unsafe code except
 inside its reviewed Windows handle wrappers for directory identity, native file
-operations, process creation and job control, and AppContainer profiles and
-ACL grants, and its Linux pre-exec
-`prctl`, seccomp, and `close_range` calls. Linux uses Rustix's safe `openat2` API. Directory registration
+operations, process creation and job control, AppContainer profiles and ACL
+grants, and console control handler registration, and its Linux pre-exec
+`prctl`, seccomp, and `close_range` calls and `sigaction` registration. Linux uses Rustix's safe `openat2` API. Directory registration
 uses native file IDs and requires directory creation-time metadata. The broker
 reopens the registered root and workspace, checks their identities and creation
 times, then accesses relative names through retained handles. These live checks
@@ -478,7 +508,7 @@ Direct dependencies have specific purposes:
 | reqwest | Blocking HTTP client; default features disabled, no TLS backend or hosted execution used in this loopback-only increment |
 | clap | CLI parsing and help; derive macro runs during compilation |
 | directories | Platform application-data location selection |
-| windows-sys | Maintained Windows API bindings behind narrow reviewed wrappers for Win32/WDK Foundation and Storage/FileSystem, Security, and I/O handles |
+| windows-sys | Maintained Windows API bindings behind narrow reviewed wrappers for Win32/WDK Foundation and Storage/FileSystem, Security, I/O handles, processes and jobs, and console control events |
 | tempfile | Private disposable test data; development dependency only |
 
 The selected direct crates declare MIT and/or Apache-2.0 licensing and support
@@ -496,6 +526,14 @@ on both Windows and Linux. The Rust workflow runs formatting, strict Clippy,
 unit/integration tests, and separate documentation tests. Tests use private data
 and loopback fixtures. They do not call a live model. Live compatibility checks
 are explicit, bounded checks of a particular server/model/auth profile.
+
+The toolchain acceptance tests are ignored by default. After a change to runs,
+profiles, or confinement, run them on both platforms with the toolchain
+variables listed in `crates/omgcode-cli/tests/toolchain_acceptance.rs`:
+
+```text
+cargo test -p omgcode-cli --test toolchain_acceptance -- --ignored
+```
 
 Do not infer whole-user/process containment, Git safety, credential storage,
 release filesystem support, or full coding-agent support from these tests. The

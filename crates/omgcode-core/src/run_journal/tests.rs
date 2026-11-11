@@ -1,0 +1,381 @@
+use super::*;
+use std::ffi::OsString;
+
+fn store_id() -> Uuid {
+    Uuid::new_v4()
+}
+
+fn start(run_id: Uuid) -> RunStart {
+    RunStart {
+        run_id,
+        workspace_id: WorkspaceId::fresh(),
+        settings_revision: 7,
+        profile_id: Uuid::new_v4(),
+        profile_name: "tools".into(),
+        profile_revision: 3,
+        program: NativePath::from_path(&std::env::temp_dir().join("tool")).expect("native path"),
+        argument_count: 2,
+        arguments_sha256: arguments_digest(&[OsString::from("a"), OsString::from("b")]),
+        working_directory: NativePath::from_path(&std::env::temp_dir()).expect("native path"),
+        unix_sockets: SocketMode::PairsOnly,
+    }
+}
+
+fn finished(result: RunResult) -> RunFinish {
+    RunFinish {
+        result,
+        confinement: (result != RunResult::NotStarted).then_some(ConfinementRecord::AppContainer),
+        elapsed_ms: 12,
+        stdout_bytes: 3,
+        stderr_bytes: 0,
+    }
+}
+
+/// Intent and outcome pairs replay; several runs can be in flight at once.
+#[test]
+fn runs_are_recorded_and_replayed_with_several_in_flight() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let store = store_id();
+    let first = Uuid::new_v4();
+    let second = Uuid::new_v4();
+    {
+        let mut journal = RunJournal::open(directory.path(), store).expect("journal");
+        journal.start(start(first)).expect("first start");
+        journal.start(start(second)).expect("second start");
+        assert_eq!(journal.pending().len(), 2);
+        journal
+            .finish(second, finished(RunResult::Exited { code: 0 }))
+            .expect("second finish");
+    }
+    let mut journal = RunJournal::open(directory.path(), store).expect("reopen");
+    assert_eq!(
+        journal.pending(),
+        &[PendingRun {
+            run_id: first,
+            state: PendingRunState::InProgress,
+        }]
+    );
+    journal
+        .finish(first, finished(RunResult::Cancelled))
+        .expect("first finish after reopen");
+    assert!(journal.pending().is_empty());
+    assert!(matches!(
+        journal.finish(first, finished(RunResult::Cancelled)),
+        Err(RunJournalError::WrongRun(_))
+    ));
+    let entries = describe(journal.entries(100).expect("entries")).expect("JSON");
+    assert_eq!(entries.len(), 5);
+    assert_eq!(entries[1]["action"]["type"], "run_started");
+    assert_eq!(
+        entries[1]["action"]["payload"]["start"]["unix_sockets"],
+        "pairs_only"
+    );
+    assert_eq!(
+        entries[4]["action"]["payload"]["finish"]["result"]["kind"],
+        "cancelled"
+    );
+    assert!(journal.entries(0).is_err());
+    assert!(journal.entries(101).is_err());
+    drop(journal);
+    assert!(matches!(
+        RunJournal::open(directory.path(), store_id()),
+        Err(RunJournalError::Invalid(_))
+    ));
+}
+
+/// Unconfirmed cleanup stays pending until acknowledged; an acknowledged run
+/// cannot be finished later; outcomes must name confinement consistently.
+#[test]
+fn unconfirmed_cleanup_needs_acknowledgement() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let mut journal = RunJournal::open(directory.path(), store_id()).expect("journal");
+    let run = Uuid::new_v4();
+    journal.start(start(run)).expect("start");
+    journal
+        .finish(run, finished(RunResult::CleanupUnconfirmed))
+        .expect("finish");
+    assert_eq!(
+        journal.pending()[0].state,
+        PendingRunState::NeedsAcknowledgement
+    );
+    assert!(journal.finish(run, finished(RunResult::Cancelled)).is_err());
+    journal.acknowledge(run).expect("acknowledge");
+    assert!(journal.pending().is_empty());
+    assert!(journal.acknowledge(run).is_err());
+
+    let abandoned = Uuid::new_v4();
+    journal.start(start(abandoned)).expect("start");
+    journal
+        .acknowledge(abandoned)
+        .expect("acknowledge in progress");
+    assert!(matches!(
+        journal.finish(abandoned, finished(RunResult::Exited { code: 0 })),
+        Err(RunJournalError::WrongRun(_))
+    ));
+
+    let inconsistent = Uuid::new_v4();
+    journal.start(start(inconsistent)).expect("start");
+    let mut not_started = finished(RunResult::NotStarted);
+    not_started.confinement = Some(ConfinementRecord::Landlock { abi: 3 });
+    assert!(journal.finish(inconsistent, not_started).is_err());
+    let mut started = finished(RunResult::Exited { code: 1 });
+    started.confinement = None;
+    assert!(journal.finish(inconsistent, started).is_err());
+    journal
+        .finish(inconsistent, finished(RunResult::NotStarted))
+        .expect("consistent outcome");
+}
+
+/// At most sixteen runs can be pending.
+#[test]
+fn pending_runs_are_bounded() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let mut journal = RunJournal::open(directory.path(), store_id()).expect("journal");
+    for _ in 0..MAX_PENDING_RUNS {
+        journal.start(start(Uuid::new_v4())).expect("start");
+    }
+    assert!(matches!(
+        journal.start(start(Uuid::new_v4())),
+        Err(RunJournalError::TooManyPending)
+    ));
+}
+
+/// A start must leave room for every pending outcome; outcomes may use it.
+#[test]
+fn starts_keep_room_for_pending_outcomes() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let mut journal = RunJournal::open(directory.path(), store_id()).expect("journal");
+    let run = Uuid::new_v4();
+    journal.start(start(run)).expect("start");
+    // One pending run reserves two events. Fill the log so that a second
+    // start would need 1 + 2 + 2 more events than remain.
+    let filler = journal.entries[0].clone();
+    journal.entries.resize(MAX_EVENTS - 4, filler);
+    assert!(matches!(
+        journal.start(start(Uuid::new_v4())),
+        Err(RunJournalError::LimitReached)
+    ));
+    journal
+        .finish(run, finished(RunResult::CleanupUnconfirmed))
+        .expect("outcome uses the reserve");
+    journal
+        .acknowledge(run)
+        .expect("acknowledgement uses the reserve");
+
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let mut journal = RunJournal::open(directory.path(), store_id()).expect("journal");
+    journal.bytes = MAX_BYTES - 2 * OUTCOME_EVENT_RESERVE_BYTES;
+    assert!(matches!(
+        journal.start(start(Uuid::new_v4())),
+        Err(RunJournalError::LimitReached)
+    ));
+}
+
+/// The largest outcome and acknowledgement fit the reserved budget.
+#[test]
+fn outcome_events_fit_their_reserve() {
+    let finish = RunFinish {
+        result: RunResult::Exited { code: i64::MIN },
+        confinement: Some(ConfinementRecord::Landlock { abi: u32::MAX }),
+        elapsed_ms: u64::MAX,
+        stdout_bytes: u64::MAX,
+        stderr_bytes: u64::MAX,
+    };
+    for action in [
+        RunAction::RunFinished {
+            run_id: Uuid::new_v4(),
+            finish,
+        },
+        RunAction::RunAcknowledged {
+            run_id: Uuid::new_v4(),
+        },
+    ] {
+        let entry = RunEntry {
+            schema_version: SCHEMA_VERSION,
+            store_id: Uuid::new_v4(),
+            event_id: Uuid::new_v4(),
+            sequence: u64::MAX,
+            timestamp: "9999-12-31T23:59:59.999999999Z".into(),
+            action,
+        };
+        assert!(encode(&entry).expect("encode").len() <= OUTCOME_EVENT_RESERVE_BYTES);
+    }
+}
+
+/// Archiving refuses pending runs, keeps the exact bytes, and lets a new
+/// journal start.
+#[test]
+fn archive_moves_a_settled_journal() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let data = directory.path().join("data");
+    let archive = directory.path().join("archive");
+    fs::create_dir(&archive).expect("archive directory");
+    let store = store_id();
+    let run = Uuid::new_v4();
+    {
+        let mut journal = RunJournal::open(&data, store).expect("journal");
+        journal.start(start(run)).expect("start");
+    }
+    assert!(matches!(
+        RunJournal::archive(&data, store, &archive),
+        Err(RunJournalError::Pending(id)) if id == run
+    ));
+    {
+        let mut journal = RunJournal::open(&data, store).expect("journal");
+        journal
+            .finish(run, finished(RunResult::Exited { code: 0 }))
+            .expect("finish");
+    }
+    let bytes = fs::read(data.join(FILE_NAME)).expect("journal bytes");
+    let archived = RunJournal::archive(&data, store, &archive).expect("archive");
+    assert_eq!(fs::read(&archived.path).expect("archived bytes"), bytes);
+    assert_eq!(archived.sha256, hex(&Sha256::digest(&bytes)));
+    assert_eq!(archived.event_count, 3);
+    assert!(!data.join(FILE_NAME).exists());
+    let inspected = RunJournal::open_archive(&archived.path, store).expect("inspect");
+    assert_eq!(inspected.entries(100).expect("entries").len(), 3);
+    let mut inspected = inspected;
+    assert!(inspected.start(start(Uuid::new_v4())).is_err());
+    let fresh = RunJournal::open(&data, store).expect("new journal");
+    assert_eq!(fresh.entries(100).expect("entries").len(), 1);
+}
+
+/// An uncertain move or sync reports the candidate path.
+#[test]
+fn archive_reports_uncertain_moves() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let data = directory.path().join("data");
+    let archive = directory.path().join("archive");
+    fs::create_dir(&archive).expect("archive directory");
+    let store = store_id();
+    drop(RunJournal::open(&data, store).expect("journal"));
+    let result = RunJournal::archive_with(
+        &data,
+        store,
+        &archive,
+        |_, _| Err(io::Error::other("interrupted move")),
+        |_| Ok(()),
+    );
+    assert!(matches!(
+        result,
+        Err(RunJournalError::ArchiveUncertain { .. })
+    ));
+    let result = RunJournal::archive_with(
+        &data,
+        store,
+        &archive,
+        |_, _| Err(io::Error::new(io::ErrorKind::AlreadyExists, "exists")),
+        |_| Ok(()),
+    );
+    assert!(matches!(result, Err(RunJournalError::Io(_))));
+}
+
+/// Replay refuses tampered or inconsistent journals and changes nothing.
+#[test]
+fn replay_refuses_tampered_journals() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let store = store_id();
+    let run = Uuid::new_v4();
+    let entries = {
+        let mut journal = RunJournal::open(directory.path(), store).expect("journal");
+        journal.start(start(run)).expect("start");
+        journal
+            .finish(run, finished(RunResult::Exited { code: 0 }))
+            .expect("finish");
+        journal.entries.clone()
+    };
+    let path = directory.path().join(FILE_NAME);
+    let write = |entries: &[RunEntry]| {
+        let mut bytes = Vec::new();
+        for entry in entries {
+            bytes.extend(encode(entry).expect("encode"));
+        }
+        fs::write(&path, &bytes).expect("fixture");
+        bytes
+    };
+    type Tamper = Box<dyn Fn(&mut Vec<RunEntry>)>;
+    let cases: Vec<(&str, Tamper)> = vec![
+        (
+            "sequence",
+            Box::new(|entries: &mut Vec<RunEntry>| entries[1].sequence = 5),
+        ),
+        (
+            "store",
+            Box::new(|entries: &mut Vec<RunEntry>| entries[1].store_id = Uuid::new_v4()),
+        ),
+        (
+            "duplicate event",
+            Box::new(|entries: &mut Vec<RunEntry>| entries[2].event_id = entries[1].event_id),
+        ),
+        (
+            "finish without start",
+            Box::new(|entries: &mut Vec<RunEntry>| {
+                entries.remove(1);
+                entries[1].sequence = 1;
+            }),
+        ),
+        (
+            "repeated run",
+            Box::new(|entries: &mut Vec<RunEntry>| {
+                let mut again = entries[1].clone();
+                again.event_id = Uuid::new_v4();
+                again.sequence = 3;
+                entries.push(again);
+            }),
+        ),
+        (
+            "bad digest",
+            Box::new(|entries: &mut Vec<RunEntry>| {
+                if let RunAction::RunStarted { start } = &mut entries[1].action {
+                    start.arguments_sha256 = "XYZ".into();
+                }
+            }),
+        ),
+        (
+            "created later",
+            Box::new(|entries: &mut Vec<RunEntry>| entries[1].action = RunAction::Created),
+        ),
+    ];
+    for (label, mutate) in cases {
+        let mut tampered = entries.clone();
+        mutate(&mut tampered);
+        let bytes = write(&tampered);
+        assert!(
+            RunJournal::open(directory.path(), store).is_err(),
+            "{label}"
+        );
+        assert_eq!(fs::read(&path).expect("unchanged"), bytes, "{label}");
+    }
+    fs::write(&path, b"").expect("empty journal");
+    assert!(RunJournal::open(directory.path(), store).is_err());
+}
+
+/// The digest separates argument boundaries and never needs the text.
+#[test]
+fn argument_digest_keeps_boundaries() {
+    let joined = arguments_digest(&[OsString::from("ab")]);
+    let split = arguments_digest(&[OsString::from("a"), OsString::from("b")]);
+    assert_ne!(joined, split);
+    assert_eq!(
+        split,
+        arguments_digest(&[OsString::from("a"), OsString::from("b")])
+    );
+    assert_ne!(arguments_digest(&[]), arguments_digest(&[OsString::new()]));
+    assert!(valid_digest(&joined));
+}
+
+/// A second writer waits for the first to release the lock.
+#[test]
+fn a_second_writer_waits_for_the_lock() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let store = store_id();
+    let journal = RunJournal::open(directory.path(), store).expect("journal");
+    let path = directory.path().to_path_buf();
+    let waiter = thread::spawn(move || RunJournal::open(&path, store).map(|_| ()));
+    thread::sleep(Duration::from_millis(200));
+    drop(journal);
+    waiter
+        .join()
+        .expect("waiter thread")
+        .expect("the waiter opens after the release");
+}

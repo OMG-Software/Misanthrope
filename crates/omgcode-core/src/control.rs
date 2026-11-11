@@ -23,6 +23,7 @@ use crate::storage::{self, StorageError};
 use crate::workspace::DirectoryRecord;
 
 mod container;
+mod profile;
 
 pub use container::{
     ContainerGrant, ContainerGrantAccess, ContainerGrantState, ContainerGrantStatus,
@@ -30,6 +31,12 @@ pub use container::{
 };
 /// Whether this platform can record and apply container grants.
 pub use omgcode_platform::container::CONTAINER_GRANTS_SUPPORTED;
+pub use profile::{
+    MAX_PROFILE_NAME_CHARS, MAX_PROFILE_PATH_ENTRIES, MAX_PROFILE_ROOTS, MAX_PROFILE_VARIABLES,
+    MAX_PROFILES, MAX_VARIABLE_NAME_BYTES, MAX_VARIABLE_VALUE_BYTES, ProfileDeclaration,
+    ProfilePlatform, ProfileStatus, ProfileVariable, RESERVED_VARIABLES, ToolchainProfile,
+    is_reserved_variable, valid_profile_name,
+};
 
 const FILE_NAME: &str = "control-v1.jsonl";
 const MAX_BYTES: usize = 8 * 1024 * 1024;
@@ -90,6 +97,12 @@ pub enum ControlError {
     /// The requested container grant is outside the allowed scope.
     #[error("container grant refused: {0}")]
     GrantRefused(&'static str),
+    /// No recorded toolchain profile has this name.
+    #[error("toolchain profile is not recorded")]
+    UnknownProfile,
+    /// The requested toolchain profile is invalid or outside the allowed scope.
+    #[error("toolchain profile refused: {0}")]
+    ProfileRefused(&'static str),
 }
 
 impl From<StorageError> for ControlError {
@@ -143,6 +156,8 @@ pub struct ControlSnapshot {
     configuration_only: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     container_grants: Vec<ContainerGrantStatus>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    profiles: Vec<ProfileStatus>,
 }
 
 /// Operator-facing workspace view that reports every preference explicitly.
@@ -164,6 +179,7 @@ struct PermissionView {
     execute: bool,
     task_network: bool,
     model_tools: bool,
+    host_services: bool,
 }
 
 fn serialize_workspace_views<S: serde::Serializer>(
@@ -181,6 +197,7 @@ fn serialize_workspace_views<S: serde::Serializer>(
                 execute: permissions.execute,
                 task_network: permissions.task_network,
                 model_tools: permissions.model_tools,
+                host_services: permissions.host_services,
             },
         }
     }))
@@ -229,6 +246,12 @@ enum Action {
     },
     ContainerGrantRevoked {
         grant_id: Uuid,
+    },
+    ProfileAdded {
+        profile: ToolchainProfile,
+    },
+    ProfileRemoved {
+        profile_id: Uuid,
     },
 }
 
@@ -388,6 +411,7 @@ impl ControlStore {
                 workspaces: Vec::new(),
                 configuration_only: true,
                 container_grants: Vec::new(),
+                profiles: Vec::new(),
             },
             entries: Vec::new(),
             bytes: 0,
@@ -874,6 +898,9 @@ impl ControlStore {
             | Action::ContainerGrantApplied { .. }
             | Action::ContainerRevokeRequested { .. }
             | Action::ContainerGrantRevoked { .. } => container::apply(state, &entry.action)?,
+            Action::ProfileAdded { .. } | Action::ProfileRemoved { .. } => {
+                profile::apply(state, &entry.action, revision)?;
+            }
         }
         state.revision = revision;
         Ok(())

@@ -7,12 +7,13 @@ The current code is an early Rust core and command-line prototype. A bounded
 native workspace file broker is available through trusted CLI commands. A core
 turn/tool runtime and schema-v2 session format let chat offer the local LM Studio
 model read and list tools, only for a workspace that enables `model_tools`.
-Model write and process tools, a desktop interface, Git workflows, and an
-exposed command execution remain planned. The platform crate has a
-process-tree runner core for tests only. Its confined entry point applies
-Landlock and a seccomp socket filter on Linux and a per-workspace AppContainer
-on Windows, and nothing calls it. Trusted CLI commands record and revoke the
-Windows container's directory grants.
+Model write and process tools, a desktop interface, and Git workflows remain
+planned. The trusted CLI `run` command starts one program for a workspace whose
+`execute` preference is enabled. It uses an operator-declared toolchain
+profile, records each run in a run journal, and confines the process tree with
+Landlock and a seccomp socket filter on Linux or a per-workspace AppContainer
+on Windows. Trusted CLI commands record and revoke the Windows container's
+directory grants.
 
 > **Status: early prototype, not release-ready.** The Rust CLI can inspect the
 > compiled prompt, report implemented capabilities, manage JSONL sessions and
@@ -25,8 +26,10 @@ Windows container's directory grants.
 > It has no model write, process, network, Git, or MCP tools. The trusted
 > CLI can replace or restore one existing file through a checkpoint on qualified
 > Linux ext4 or Windows NTFS, and can permanently delete one resolved checkpoint.
-> Workspace files cannot be deleted, commands cannot be run, and no execution
-> sandbox is implemented.
+> Workspace files cannot be deleted. The trusted CLI `run` command executes
+> programs under native confinement. That confinement was tested on one Windows
+> build and one Linux kernel only and is not qualified for release. It has no
+> network access and no memory, process-count, or disk limits.
 
 ## Goals
 
@@ -47,8 +50,13 @@ and `omgcode-platform`. The CLI command is `omgcode`. It provides:
 - `prompt`: print the compiled, read-only base prompt, version, and SHA-256 digest.
 - `capabilities`: report what this prototype implements and rejects.
 - `workspace`: configure the development root, register stable workspace IDs,
-  change read/write/execute/task-network preferences, and inspect audited policy
-  checks. These checks describe configuration only; execution stays disabled.
+  change read/write/execute/task-network/host-services preferences, declare
+  toolchain profiles, manage Windows container grants, and inspect audited
+  policy checks. These checks describe configuration only.
+- `run` and `runs`: run one program in a workspace under native confinement
+  with a recorded toolchain profile, and inspect, acknowledge, or archive the
+  run journal. Output is printed, never stored. See
+  [command execution](docs/execution.md#trusted-runs).
 - `file`: use bounded native reads, listings, exclusive new-file creation,
   single-directory creation, and read-only diff previews through explicit
   workspace/session CLI selections. These trusted operator commands do not
@@ -225,7 +233,9 @@ OMGCode must work with projects in multiple languages. It will support
 user-selected installed tools and managed toolchain environments through a
 generic sandboxed runner. Tool profiles will include the required executable,
 runtime, library, and SDK resources, plus scoped writable build outputs, caches,
-and temporary space.
+and temporary space. Version 0.16.0 profiles are declared by the operator. In
+acceptance tests, Rust, Python, Node, C/C++, and Go workflows ran confined on
+Windows and Linux; Java has not run yet.
 
 Build scripts and all child programs remain subject to the effective sandbox.
 Toolchain access does not grant access to unrelated host data. See
@@ -243,6 +253,8 @@ resource limits remain open.
 Windows confinement uses a per-workspace AppContainer with recorded ACL grants
 inside a Job Object
 ([ADR-0029](docs/adr/0029-confine-windows-runs-in-a-workspace-appcontainer-with-recorded-grants.md)).
+The trusted CLI `run` is their only caller
+([ADR-0030](docs/adr/0030-run-trusted-commands-through-recorded-toolchain-profiles.md)).
 Both backends must pass containment and development-tool compatibility tests
 before release.
 

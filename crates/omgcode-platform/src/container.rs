@@ -22,7 +22,7 @@
 //! [`io::ErrorKind::Unsupported`].
 
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::DirectoryIdentity;
 
@@ -145,6 +145,27 @@ pub fn profile_exists(name: &ContainerName) -> io::Result<bool> {
     }
 }
 
+/// The container-writable folder of the AppContainer profile for `name`,
+/// `%LOCALAPPDATA%\Packages\<name>\AC`. Windows points a contained
+/// process's `LOCALAPPDATA`, `TEMP`, and `TMP` beneath it. A missing profile
+/// is `NotFound`.
+pub fn profile_folder(name: &ContainerName) -> io::Result<PathBuf> {
+    #[cfg(windows)]
+    {
+        windows::folder_path(name)?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "the container profile does not exist",
+            )
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = name;
+        Err(unsupported())
+    }
+}
+
 /// Delete the AppContainer profile for `name` and its container-writable
 /// folder. A missing profile succeeds. Grants on directories are not changed,
 /// so callers delete the profile only after the last grant is revoked.
@@ -227,6 +248,7 @@ mod tests {
             revoke(path, identity, &name).expect_err("revoke"),
             granted_access(path, &name).expect_err("check"),
             profile_exists(&name).expect_err("profile"),
+            profile_folder(&name).expect_err("profile folder"),
             delete_profile(&name).expect_err("delete profile"),
         ];
         for error in errors {

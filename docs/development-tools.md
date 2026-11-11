@@ -16,11 +16,13 @@ a project needs, including:
 | Testing and development support | Test runners, code generators, coverage tools, language servers |
 
 These are required tool categories and profile candidates, not a claim that
-every listed executable or version already works. The platform crate has an
-unexposed process-tree runner core. Its confined entry point applies Linux
-Landlock and seccomp rules or a Windows AppContainer and has no caller; see
-[command execution](execution.md). No command runs project tools yet. Tool
-support must be qualified on the actual platform.
+every listed executable or version already works. Version 0.16.0 adds the
+trusted operator command `omgcode run`. It runs one program under Linux
+Landlock and seccomp rules or a Windows AppContainer, with an
+operator-declared [toolchain profile](execution.md#toolchain-profiles). No
+model tool runs project tools. Tool support must be qualified on the actual
+platform; the [execution guide](execution.md#known-limits) lists the
+toolchains and versions that passed acceptance.
 
 Provide a generic process runner and extensible toolchain registration.
 Do not make useful development depend on a fixed list of approved command names.
@@ -34,8 +36,11 @@ An installed toolchain may need executables, helper programs, shared libraries,
 SDK files, configuration, and machine-derived environment values. A single
 executable-path grant is often insufficient.
 
-Discovery runs through a trusted host-side service. It proposes the required
-resources for user selection; the model cannot approve new host access.
+Profiles are currently declared by the operator, with no discovery; see
+[ADR-0030](adr/0030-run-trusted-commands-through-recorded-toolchain-profiles.md).
+Any later discovery runs through a trusted host-side service. It proposes the
+required resources for user selection; the model cannot approve new host
+access.
 Do not execute repository-controlled discovery hooks or version probes with
 unrestricted host privileges. Run executable probes in confinement.
 
@@ -47,7 +52,20 @@ or distribution rights.
 
 ## Execution profiles
 
-Each selected toolchain profile must define:
+Version 0.16.0 profiles record:
+
+- identity;
+- platform;
+- read-only roots;
+- `PATH` entries;
+- extra variables.
+
+The runner owns the scratch and home locations. The run deadline and output
+limits are per-run options. Network destinations, loader search paths,
+recorded versions, and memory, process-count, and disk limits are not
+implemented.
+
+Each selected toolchain profile must eventually define:
 
 - Profile identity, tool origin, native platform/architecture, and recorded
   executable locations and versions.
@@ -135,6 +153,25 @@ connectivity alone must not enable that package or general task traffic.
 
 Record the selected profile with task results so failures are reproducible.
 Do not claim general support from locating an executable or printing its version.
+
+The 0.16.0 acceptance tests cover these on both platforms:
+
+- builds, tests, and formatting;
+- script and subordinate execution;
+- scoped outputs and caches;
+- denied host data, writes outside the workspace, and loopback connections;
+- missing dependencies, paths with spaces, and stale profiles;
+- concurrent runs and deadlines;
+- cancellation, on Linux.
+
+They are listed in the [execution guide](execution.md#acceptance). Not covered
+yet:
+
+- disk exhaustion;
+- the package-network allowed case, because no network profile exists;
+- hostile package scripts beyond the hostile programs.
+
+The Java case has not run on either host. The registry case also remains open.
 
 See the [security rules](security-coding-rules.md),
 [platform targets](platform-support.md), and

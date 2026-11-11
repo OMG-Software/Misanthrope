@@ -1,5 +1,10 @@
 //! Shared bounded subprocess and JSON helpers for real CLI workflow tests.
 
+#[allow(
+    dead_code,
+    reason = "only run workflow test binaries use the run scene"
+)]
+pub(crate) mod run_scene;
 pub(crate) mod spawn_gate;
 #[allow(
     dead_code,
@@ -18,6 +23,10 @@ use std::time::{Duration, Instant};
 pub(crate) const CLI_DEADLINE: Duration = Duration::from_secs(10);
 /// Environment variable that enables the timeout fixture in the test binary.
 pub(crate) const HANG_FIXTURE_ENV: &str = "OMGCODE_CONTROL_WORKFLOW_HANG_FIXTURE";
+/// A variable set on every CLI process, so tests can prove that a confined run
+/// does not inherit the caller's environment.
+pub(crate) const HOST_ENV_SENTINEL: &str = "OMGCODE_TEST_HOST_ENV";
+pub(crate) const HOST_ENV_SENTINEL_VALUE: &str = "host-env-sentinel-5b81";
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const MAX_CAPTURE_BYTES: u64 = 1024 * 1024;
 
@@ -119,17 +128,23 @@ fn read_capture(file: &mut File) -> io::Result<Vec<u8>> {
 
 /// Run the CLI with isolated token state and the workflow deadline.
 pub(crate) fn run_cli(data_root: &Path, args: &[&str]) -> Output {
+    run_cli_for(data_root, args, CLI_DEADLINE)
+}
+
+/// Run the CLI with isolated token state and a chosen deadline.
+pub(crate) fn run_cli_for(data_root: &Path, args: &[&str], deadline: Duration) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_omgcode"));
     command
         .env_remove("OMGCODE_LM_TOKEN")
         .env_remove(HANG_FIXTURE_ENV)
+        .env(HOST_ENV_SENTINEL, HOST_ENV_SENTINEL_VALUE)
         .arg("--data-dir")
         .arg(data_root)
         .args(args);
-    let result = run_with_deadline(command, CLI_DEADLINE).expect("run OMGCode CLI");
+    let result = run_with_deadline(command, deadline).expect("run OMGCode CLI");
     assert!(
         !result.timed_out,
-        "CLI exceeded its 10-second deadline: stdout={} stderr={}",
+        "CLI exceeded its {deadline:?} deadline: stdout={} stderr={}",
         String::from_utf8_lossy(&result.output.stdout),
         String::from_utf8_lossy(&result.output.stderr)
     );
@@ -152,6 +167,7 @@ pub(crate) fn assert_success(output: &Output) {
 }
 
 /// Require a controlled JSON error with the selected stable category.
+#[allow(dead_code, reason = "the toolchain acceptance binary checks no errors")]
 pub(crate) fn assert_error_code(output: &Output, code: &str) {
     assert!(!output.status.success(), "command unexpectedly succeeded");
     let error: serde_json::Value =
@@ -160,6 +176,7 @@ pub(crate) fn assert_error_code(output: &Output, code: &str) {
 }
 
 /// Require a control-store error from a trusted settings command.
+#[allow(dead_code, reason = "the toolchain acceptance binary checks no errors")]
 pub(crate) fn assert_control_error(output: &Output) {
     assert_error_code(output, "control");
 }

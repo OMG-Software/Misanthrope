@@ -154,12 +154,22 @@ for current native operations, failure states, and explicit recovery.
 The [execution guide](execution.md) owns the runner contract. Version 0.13.0
 added an unconfined process-tree runner core. Version 0.14.0 added
 `run_confined`, with Landlock and a seccomp socket filter on Linux. Version
-0.15.0 adds a per-workspace AppContainer on Windows with recorded ACL grants.
-Never call the unconfined `run` from the CLI, a model tool, or the core. Do not
-call `run_confined` on a platform until its confinement is implemented and
-tested. Its Windows `CreateProcessW`, job, AppContainer, and ACL wrappers and
-its Linux pre-exec `prctl`, seccomp, `close_range`, and Landlock calls are
-reviewed unsafe code in the platform crate.
+0.15.0 added a per-workspace AppContainer on Windows with recorded ACL grants.
+Version 0.16.0 adds the trusted CLI `run`, which calls `run_confined` through
+`omgcode_core::run`. Never call the unconfined `run` from the CLI, a model
+tool, or the core. Do not call `run_confined` on a platform until its
+confinement is implemented and tested. Its Windows `CreateProcessW`, job,
+AppContainer, and ACL wrappers and its Linux pre-exec `prctl`, seccomp,
+`close_range`, and Landlock calls are reviewed unsafe code in the platform
+crate.
+- Start processes only through `omgcode_core::run::run`. It checks the live
+  `execute` preference, records the intent before the start and the outcome
+  after it, and builds the environment from the profile only. Never inherit
+  the caller's environment, and never search the caller's `PATH`.
+- Never record argument text, environment values, or output in a journal.
+  Record the argument digest and byte counts.
+- Treat profile variables as public. Do not add a way to pass credentials
+  through a profile without a reviewed credential design.
 - Change container ACLs only through `ControlStore` grant and revoke methods,
   so every change has a synced intent and outcome. Never grant read-write
   beyond the workspace directory, and never let a full journal block
@@ -168,8 +178,8 @@ reviewed unsafe code in the platform crate.
   create a container profile at run time.
 - Default to `UnixSocketAccess::PairsOnly`. `HostServices` exposes every
   pathname Unix socket the user can reach, including container daemons and
-  credential agents. Select it only on an explicit, recorded operator decision,
-  never for a model.
+  credential agents. Select it only when the workspace `host_services`
+  preference and the run's own flag both ask for it, and never for a model.
 
 - Apply policy and operating-system restrictions before untrusted code starts.
   Never fall back to unrestricted execution when setup or a capability fails.

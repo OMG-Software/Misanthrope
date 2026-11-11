@@ -10,11 +10,13 @@ and [workspace file access](docs/file-access.md) for their contracts. Enabled
 preferences never authorize execution. The prototype is not a desktop app.
 Chat offers the local LM Studio model only read and list tools, and only for a
 workspace whose `model_tools` preference is enabled. There are no model write
-tools, other provider adapters, exposed process execution, or execution sandbox.
-The platform crate's process-tree runner core has no caller. Its confined entry
-point applies Landlock and a seccomp socket filter on Linux and a per-workspace
-AppContainer on Windows. Trusted CLI commands record, apply, and revoke Windows
-container ACL grants; follow the [execution contract](docs/execution.md).
+tools, other provider adapters, or model-callable process execution. The
+trusted CLI `run` command starts one program for a workspace whose `execute`
+preference is enabled. It uses an operator-declared toolchain profile, records
+intent and outcome in a run journal, and applies Landlock and a seccomp socket
+filter on Linux or a per-workspace AppContainer on Windows. It never falls back
+to the unconfined runner. Trusted CLI commands record, apply, and revoke
+Windows container ACL grants. Follow the [execution contract](docs/execution.md).
 The bundled web interface and most planned features are not implemented.
 The core validates replacement records and can prepare protected checkpoints on
 Linux and Windows through a live authorized binding. The CLI provides
