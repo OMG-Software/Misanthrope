@@ -190,8 +190,8 @@ with `WRITE_OWNER`. The worktree's `TEMP` inherited only modify access for
 Authenticated Users under an unelevated token. Pointing `TEMP` and `TMP` at a
 workspace-local directory that grants the current user full control fixed it.
 No assertion was weakened. A4 final verification ran after merging PR #18's head
-`45da53e`, with Rust 1.99.1 and default test parallelism. It passed formatting,
-Clippy, all-target tests, and doc tests. Native Windows NTFS ran 323 tests and
+`17c48ec`, with Rust 1.99.1 and default test parallelism. It passed formatting,
+Clippy, all-target tests, and doc tests. Native Windows NTFS ran 324 tests and
 one doc test. Linux ext4 under WSL, uid 1000, ran 310 tests and one doc test. No
 tests failed, were ignored, or were filtered. These results do not establish
 remote CI status, power-loss behaviour, or release filesystem support.
