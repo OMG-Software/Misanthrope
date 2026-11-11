@@ -20,6 +20,7 @@ containment.
 | Workspace directory identity | Configuration-only metadata check; required native ID and creation time must be available |
 | Workspace file broker | Bounded read/list/exclusive-create/single-directory creation through trusted CLI commands; release filesystem support is not qualified |
 | Model file tools | Read and list only, through chat, for a workspace that enables `model_tools`; write and general file tools are disabled and `workspace_file_tools` remains false |
+| Process-tree runner | Core only, with no caller. Windows uses a Job Object assigned at creation. Linux uses a process group, seccomp, and `close_range` (kernel 5.11 or later, x86_64 or aarch64). No filesystem or network confinement ([execution](execution.md)) |
 | Linux broker prerequisites | Linux 5.6 or later for required `openat2`; `/proc/self/fd` must be available for pinned-file reads; unsupported features fail closed |
 | Checkpoint preparation/storage | Core API on Linux and Windows. Linux requires openat2/procfs, current-user mode0700 directories/mode0600 files, native birth-time metadata and real file/directory sync. Windows requires NTFS, exact protected per-user DACLs, and a trusted data root (ADR-0023) |
 | Trusted apply | Linux ext4 and Windows NTFS prototypes. Linux requires a positive statx mount ID (Linux 5.8 or later), same mount, supported file metadata, and file/parent sync. Windows requires one NTFS volume and supported metadata, with no power-loss claim (ADR-0024) |

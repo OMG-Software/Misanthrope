@@ -41,3 +41,4 @@ meaningful alternative does not need an ADR.
 | [0024: Publish one verified stage on Windows NTFS](0024-publish-one-verified-stage-on-windows-ntfs.md) | Accepted | 2026-11-11 |
 | [0025: Restore and delete checkpoints explicitly](0025-restore-and-delete-checkpoints-explicitly.md) | Accepted | 2026-11-11 |
 | [0026: Offer read/list tools through a workspace preference](0026-offer-read-list-tools-through-a-workspace-preference.md) | Accepted | 2026-11-11 |
+| [0027: Confine execution with native primitives, starting with a process-tree core](0027-confine-execution-with-native-primitives-starting-with-a-process-tree-core.md) | Accepted | 2026-11-11 |

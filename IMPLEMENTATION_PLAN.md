@@ -40,9 +40,12 @@ This is a resume guide, not a replacement for the owning contracts in
   Windows NTFS checkpoint storage and trusted apply.
 - **PR #19** merged at `270b889`: **Phase A4**, version **0.11.0**, with
   explicit restore and checkpoint deletion.
-- This branch, `codex/model-read-tools`: **Phase B**, version **0.12.0**, with
+- **PR #20**, `codex/model-read-tools`: **Phase B**, version **0.12.0**, with
   read/list model tools in chat behind the `model_tools` workspace preference.
-  It starts from `main` at `270b889`.
+  Open and unmerged when C1 started from its `14cf21f` head.
+- This branch, `codex/process-runner-core`: **Phase C1**, version **0.13.0**,
+  with the execution contract and an unexposed process-tree runner core. It is
+  stacked on PR #20. Retarget its PR to `main` after PR #20 merges.
 
 Implemented today:
 
@@ -94,8 +97,9 @@ Not implemented:
   compaction, and standalone CLI checkpoint preparation.
 - Model write, process, network, Git, or MCP tools; per-call tool approval;
   and live provider tool-call qualification.
-- Process execution, execution containment, Git, MCP, runtime skills, memories,
-  desktop/UI panels, compaction, or caches.
+- Exposed process execution, execution containment, Git, MCP, runtime skills,
+  memories, desktop/UI panels, compaction, or caches. The process-tree runner
+  core has no caller and no confinement.
 - Subscription/API-key provider profiles beyond the local LM Studio route.
 
 ## Resume steps
@@ -218,6 +222,15 @@ calls each failed as `invalid_tool_call` before file access. Sentinels outside
 the workspace never reached the journal. This is one model on one host, not a
 provider qualification.
 
+C1 started from PR #20's head `14cf21f`. Its final verification ran with Rust
+1.99.1 and default test parallelism. It passed formatting, Clippy, all-target
+tests, and doc tests. Native Windows ran 353 tests and one doc test. Linux ext4
+under WSL (kernel 6.6, uid 1000) ran 338 tests and one doc test. No tests failed,
+were ignored, or were filtered. Five temporary mutations were each caught:
+removing the Linux seccomp filter, close-on-exec marking, or kill after a normal
+exit, and allowing Windows job breakaway or dropping the handle list. These
+results do not establish confinement, remote CI status, or release readiness.
+
 A mock or compile-only result does not establish native containment, live
 provider compatibility, or release filesystem support.
 
@@ -334,10 +347,27 @@ Acceptance criteria:
 
 ### Phase C: real execution backends and toolchain profiles
 
-Follow [docs/development-tools.md](docs/development-tools.md) and
+Follow [docs/execution.md](docs/execution.md),
+[docs/development-tools.md](docs/development-tools.md), and
 [docs/platform-support.md](docs/platform-support.md). Add confined execution
 only with explicit toolchain profiles, bounded output, controlled networking,
 and observed process-tree cleanup. Never fall back to unrestricted execution.
+
+The user chose Landlock and seccomp on Linux, AppContainer inside a Job Object
+on Windows, and trusted CLI commands as the first caller. See
+[ADR-0027](docs/adr/0027-confine-execution-with-native-primitives-starting-with-a-process-tree-core.md).
+
+- **C1 (this branch, `codex/process-runner-core`, stacked on PR #20):** the
+  execution contract and a process-tree runner core in `omgcode-platform`.
+  It covers bounded output, deadline, cancellation, and observed cleanup. It
+  denies Linux process-group escape with seccomp and Windows job breakaway.
+  There is no confinement and no caller.
+- **C2:** Linux Landlock filesystem rules and seccomp network denial, including
+  a decision for Unix-domain sockets to host services.
+- **C3:** Windows AppContainer with recorded, reversible workspace access
+  entries and no network capability.
+- **C4:** trusted CLI `run` behind the `execute` preference, with toolchain
+  profiles, journal records, and the development-tool acceptance cases.
 
 ### Phase D: additional providers, streaming, and account lifecycle
 

@@ -10,7 +10,9 @@ and [workspace file access](docs/file-access.md) for their contracts. Enabled
 preferences never authorize execution. The prototype is not a desktop app.
 Chat offers the local LM Studio model only read and list tools, and only for a
 workspace whose `model_tools` preference is enabled. There are no model write
-tools, other provider adapters, process execution, or execution sandbox.
+tools, other provider adapters, exposed process execution, or execution sandbox.
+The platform crate's process-tree runner core applies no confinement and has no
+caller; follow the [execution contract](docs/execution.md).
 The bundled web interface and most planned features are not implemented.
 The core validates replacement records and can prepare protected checkpoints on
 Linux and Windows through a live authorized binding. The CLI provides

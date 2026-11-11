@@ -4,7 +4,7 @@ OMGCode has a Rust CLI prototype for local chat, JSONL sessions, and a
 bounded native workspace file broker. The broker is available only through
 trusted operator commands and, when a workspace enables `model_tools`, to the
 local model's read and list tools. Other model tools and the execution sandbox
-are not implemented. The guides distinguish implemented behaviour from the
+are not implemented. A process-tree runner core exists for tests only. The guides distinguish implemented behaviour from the
 remaining product contracts.
 
 ## Start here
@@ -30,6 +30,7 @@ remaining product contracts.
 | [Workspace settings](workspace-permissions.md) | Implemented workspace IDs, configuration-only permissions, revisions, audit, and remaining gates |
 | [Workspace file access](file-access.md) | Native broker, previews, Linux ext4 apply, checkpoint storage, and existing-only recovery |
 | [Development tools](development-tools.md) | Installed/managed toolchains, runtime grants, outputs, caches, and qualification |
+| [Command execution](execution.md) | Process-tree runner contract, accepted confinement primitives, limits, and next increments |
 | [Agent instructions](agent-instructions.md) | Product priorities, visible SYSTEM prompt, user additions, and request manifests |
 | [System prompt draft](../prompts/system.md) | Versioned initial base instructions for the coding assistant |
 | [Context management](context-management.md) | Token-based compaction, cache classes, invalidation, and efficiency measures |

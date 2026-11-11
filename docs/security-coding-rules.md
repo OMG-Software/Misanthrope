@@ -151,6 +151,13 @@ for current native operations, failure states, and explicit recovery.
 
 ## Process and sandbox boundary
 
+The [execution guide](execution.md) owns the runner contract. Version 0.13.0
+has only a process-tree runner core with no confinement. Do not call it from the
+CLI, a model tool, or the core until that platform's confinement is implemented
+and tested. Its Windows `CreateProcessW` and job wrappers and its Linux
+pre-exec `prctl`, seccomp, and `close_range` calls are reviewed unsafe code in
+the platform crate.
+
 - Apply policy and operating-system restrictions before untrusted code starts.
   Never fall back to unrestricted execution when setup or a capability fails.
 - Keep process permissions minimal and apply limits to descendants. Restrict

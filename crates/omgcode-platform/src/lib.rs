@@ -1,8 +1,10 @@
-//! Native handle validation. This does not implement an execution sandbox.
+//! Native handle validation and a process-tree runner core. This does not
+//! implement an execution sandbox.
 
 pub mod broker;
 pub mod journal;
 pub mod private_store;
+pub mod process;
 
 use std::fs::{File, OpenOptions};
 use std::io;

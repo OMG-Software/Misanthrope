@@ -6,6 +6,16 @@ Changes are recorded here before a release version is assigned.
 
 ### Added
 
+- Version 0.13.0 adds a process-tree runner core to the platform crate, for
+  tests only. It starts one absolute-path program with an exact environment,
+  null input, and bounded output. It ends the whole tree on exit, deadline, or
+  cancellation and reports success only after observing the tree empty.
+  Windows assigns a Job Object at creation and inherits only the standard
+  handles. Linux uses a process group, a seccomp filter that denies `setsid` and
+  `setpgid`, a parent-death signal, and close-on-exec descriptors. It applies no
+  filesystem or network confinement, and no CLI command or model tool can call
+  it. The accepted confinement is Landlock and seccomp on Linux and
+  AppContainer on Windows; see ADR-0027 and `docs/execution.md`.
 - Version 0.12.0 lets chat offer the local LM Studio model two tools,
   `workspace_read_file` and `workspace_list_directory`, for a workspace whose
   new `model_tools` preference is enabled. The preference is off by default and

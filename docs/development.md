@@ -1,6 +1,6 @@
 # Build and run the core prototype
 
-OMGCode 0.12.0 is a developer CLI prototype with workspace permission
+OMGCode 0.13.0 is a developer CLI prototype with workspace permission
 settings and bounded native file operations through trusted operator commands.
 It can send a text conversation to an explicitly selected local LM Studio model
 and save that conversation. It can read/list files, exclusively create new
@@ -14,7 +14,9 @@ deletion removes one resolved private entry. The CLI cannot delete workspace
 files, run commands, use Git, or connect to MCP servers.
 When a workspace enables `model_tools`, chat lets the local model read and list
 files in that workspace. Model write, process, network, Git, and MCP tools and
-an execution sandbox are not implemented.
+an execution sandbox are not implemented. The platform crate has a process-tree
+runner core with no confinement and no caller; see
+[command execution](execution.md).
 
 The core's byte-input replacement inspectors remain read-only. Its file broker
 also provides `checkpoint_prepare` on Linux and Windows with fresh read/write
@@ -404,11 +406,12 @@ usage events, streaming chunks, and large-output artifacts remain planned.
 | --- | --- |
 | omgcode-core | Compiled prompt, bounded model adapter, session/control/file-operation journals, workspace policy, broker orchestration, bounded turn/tool lifecycle, and non-destructive edit previews |
 | omgcode-cli | Trusted operator input, one-turn chat orchestration with optional read/list model tools, bounded file and preview commands, JSON output |
-| omgcode-platform | Native journal validation, directory identity, and handle-relative workspace file operations |
+| omgcode-platform | Native journal validation, directory identity, handle-relative workspace file operations, and an unexposed process-tree runner core |
 
 Core and CLI forbid unsafe code. The platform crate denies unsafe code except
-inside its reviewed Windows handle wrappers for directory identity and native
-file operations. Linux uses Rustix's safe `openat2` API. Directory registration
+inside its reviewed Windows handle wrappers for directory identity, native file
+operations, and process creation and job control, and its Linux pre-exec
+`prctl`, seccomp, and `close_range` calls. Linux uses Rustix's safe `openat2` API. Directory registration
 uses native file IDs and requires directory creation-time metadata. The broker
 reopens the registered root and workspace, checks their identities and creation
 times, then accesses relative names through retained handles. These live checks

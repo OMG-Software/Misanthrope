@@ -8,7 +8,8 @@ native workspace file broker is available through trusted CLI commands. A core
 turn/tool runtime and schema-v2 session format let chat offer the local LM Studio
 model read and list tools, only for a workspace that enables `model_tools`.
 Model write and process tools, a desktop interface, Git workflows, and an
-execution sandbox remain planned.
+execution sandbox remain planned. The platform crate has a process-tree runner
+core for tests only; it applies no confinement and nothing calls it.
 
 > **Status: early prototype, not release-ready.** The Rust CLI can inspect the
 > compiled prompt, report implemented capabilities, manage JSONL sessions and

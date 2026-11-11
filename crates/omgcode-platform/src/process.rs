@@ -1,0 +1,506 @@
+//! Process-tree runner core.
+//!
+//! This module starts one program with an explicit environment and supervises
+//! its whole descendant tree: bounded output, a deadline, cooperative
+//! cancellation, and observed tree cleanup. It is **not** a sandbox. It applies
+//! no filesystem or network confinement, so no CLI command or model tool may
+//! expose it until a later increment adds Landlock/seccomp and AppContainer
+//! confinement. See `docs/execution.md` and ADR-0027.
+
+use std::ffi::{OsStr, OsString};
+use std::fmt;
+use std::io::{self, Read};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::thread;
+use std::time::{Duration, Instant};
+
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(windows)]
+mod windows;
+
+#[cfg(test)]
+mod tests;
+
+/// Largest accepted run deadline.
+pub const MAX_DEADLINE: Duration = Duration::from_secs(60 * 60);
+/// Largest accepted wait for observed tree cleanup.
+pub const MAX_CLEANUP_TIMEOUT: Duration = Duration::from_secs(30);
+/// Largest number of output bytes retained from one stream.
+pub const MAX_CAPTURE_BYTES: usize = 16 * 1024 * 1024;
+/// Largest number of program arguments.
+pub const MAX_ARGUMENTS: usize = 4096;
+/// Largest number of environment entries.
+pub const MAX_ENVIRONMENT_ENTRIES: usize = 512;
+/// Largest total size of arguments plus environment, in bytes of OS text.
+pub const MAX_COMMAND_BYTES: usize = 128 * 1024;
+
+/// Poll interval for exit, deadline, and cancellation checks.
+const POLL_INTERVAL: Duration = Duration::from_millis(10);
+/// Read buffer for one captured stream.
+const READ_CHUNK: usize = 8 * 1024;
+
+/// One program to start. Nothing is inherited from the calling process.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProcessSpec {
+    /// Absolute path of the program. The runner never searches `PATH`.
+    pub program: PathBuf,
+    /// Arguments after the program name.
+    pub arguments: Vec<OsString>,
+    /// Absolute working directory.
+    pub working_directory: PathBuf,
+    /// The complete environment. The runner adds nothing.
+    pub environment: Vec<(OsString, OsString)>,
+}
+
+/// Bounds for one run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProcessLimits {
+    /// Time from start until the tree is terminated.
+    pub deadline: Duration,
+    /// Bytes retained from standard output; the rest is drained and counted.
+    pub max_stdout_bytes: usize,
+    /// Bytes retained from standard error; the rest is drained and counted.
+    pub max_stderr_bytes: usize,
+    /// Time allowed to observe an empty tree and closed output after termination.
+    pub cleanup_timeout: Duration,
+}
+
+impl Default for ProcessLimits {
+    fn default() -> Self {
+        Self {
+            deadline: Duration::from_secs(60),
+            max_stdout_bytes: 1024 * 1024,
+            max_stderr_bytes: 1024 * 1024,
+            cleanup_timeout: Duration::from_secs(5),
+        }
+    }
+}
+
+impl ProcessLimits {
+    fn validate(self) -> Result<Self, ProcessError> {
+        if self.deadline.is_zero() || self.deadline > MAX_DEADLINE {
+            return Err(ProcessError::InvalidLimits("deadline is out of range"));
+        }
+        if self.cleanup_timeout.is_zero() || self.cleanup_timeout > MAX_CLEANUP_TIMEOUT {
+            return Err(ProcessError::InvalidLimits(
+                "cleanup timeout is out of range",
+            ));
+        }
+        if self.max_stdout_bytes > MAX_CAPTURE_BYTES || self.max_stderr_bytes > MAX_CAPTURE_BYTES {
+            return Err(ProcessError::InvalidLimits(
+                "output capture limit is too large",
+            ));
+        }
+        Ok(self)
+    }
+}
+
+/// A cancellation request shared with another thread.
+#[derive(Clone, Debug, Default)]
+pub struct CancelSignal(Arc<AtomicBool>);
+
+impl CancelSignal {
+    /// Create a signal that has not been raised.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Request termination of the running tree at the next poll.
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether cancellation was requested.
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+/// How the run ended. Every variant means the whole tree was observed empty.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Termination {
+    /// The program exited with this code. Windows codes are `u32` values.
+    Exited { code: i64 },
+    /// The program was ended by this Unix signal before supervision stopped it.
+    Signalled { signal: i32 },
+    /// The deadline elapsed and the runner terminated the tree.
+    DeadlineExceeded,
+    /// Cancellation was requested and the runner terminated the tree.
+    Cancelled,
+}
+
+/// Bytes captured from one output stream.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CapturedOutput {
+    /// Retained bytes, at most the stream's limit.
+    pub bytes: Vec<u8>,
+    /// Every byte read from the stream, including discarded bytes.
+    pub total_bytes: u64,
+}
+
+impl CapturedOutput {
+    /// Whether some output was discarded after the retention limit.
+    pub fn truncated(&self) -> bool {
+        u64::try_from(self.bytes.len()).map_or(true, |kept| kept < self.total_bytes)
+    }
+}
+
+/// The result of one supervised run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[must_use]
+pub struct ProcessOutcome {
+    pub termination: Termination,
+    pub stdout: CapturedOutput,
+    pub stderr: CapturedOutput,
+    pub elapsed: Duration,
+}
+
+/// A controlled runner failure. No variant reports a successful run.
+#[derive(Debug)]
+pub enum ProcessError {
+    /// The specification is unsafe or malformed; nothing was started.
+    InvalidSpec(&'static str),
+    /// The limits are out of range; nothing was started.
+    InvalidLimits(&'static str),
+    /// A required native primitive is unavailable; nothing was started.
+    Unsupported(&'static str),
+    /// The program could not be started. No process from this run remains.
+    Spawn(io::Error),
+    /// Supervision failed after start. The runner terminated the tree and
+    /// observed it empty before returning this error.
+    Supervision(io::Error),
+    /// The runner could not observe the tree empty, or its output closed,
+    /// within the cleanup timeout. Processes may remain.
+    CleanupUnconfirmed(&'static str),
+}
+
+impl fmt::Display for ProcessError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidSpec(reason) => {
+                write!(formatter, "invalid process specification: {reason}")
+            }
+            Self::InvalidLimits(reason) => write!(formatter, "invalid process limits: {reason}"),
+            Self::Unsupported(reason) => write!(formatter, "process runner unavailable: {reason}"),
+            Self::Spawn(error) => write!(formatter, "the program could not be started: {error}"),
+            Self::Supervision(error) => write!(formatter, "process supervision failed: {error}"),
+            Self::CleanupUnconfirmed(reason) => {
+                write!(
+                    formatter,
+                    "process tree cleanup was not confirmed: {reason}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for ProcessError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Spawn(error) | Self::Supervision(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+/// Start one program and supervise its whole tree until it is observed empty.
+///
+/// The tree is terminated when the program exits, when the deadline elapses, or
+/// when `cancel` is raised; descendants never outlive a run that returns `Ok`.
+/// This applies no filesystem or network confinement.
+pub fn run(
+    spec: &ProcessSpec,
+    limits: &ProcessLimits,
+    cancel: &CancelSignal,
+) -> Result<ProcessOutcome, ProcessError> {
+    let limits = limits.validate()?;
+    validate_spec(spec)?;
+    run_native(spec, limits, cancel)
+}
+
+#[cfg(target_os = "linux")]
+fn run_native(
+    spec: &ProcessSpec,
+    limits: ProcessLimits,
+    cancel: &CancelSignal,
+) -> Result<ProcessOutcome, ProcessError> {
+    linux::run(spec, limits, cancel)
+}
+
+#[cfg(windows)]
+fn run_native(
+    spec: &ProcessSpec,
+    limits: ProcessLimits,
+    cancel: &CancelSignal,
+) -> Result<ProcessOutcome, ProcessError> {
+    windows::run(spec, limits, cancel)
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+fn run_native(
+    _spec: &ProcessSpec,
+    _limits: ProcessLimits,
+    _cancel: &CancelSignal,
+) -> Result<ProcessOutcome, ProcessError> {
+    Err(ProcessError::Unsupported(
+        "process supervision is implemented only on Linux and Windows",
+    ))
+}
+
+fn validate_spec(spec: &ProcessSpec) -> Result<(), ProcessError> {
+    if !spec.program.is_absolute() {
+        return Err(ProcessError::InvalidSpec("program path must be absolute"));
+    }
+    if !spec.working_directory.is_absolute() {
+        return Err(ProcessError::InvalidSpec(
+            "working directory must be absolute",
+        ));
+    }
+    if contains_nul(spec.program.as_os_str()) || contains_nul(spec.working_directory.as_os_str()) {
+        return Err(ProcessError::InvalidSpec("paths must not contain NUL"));
+    }
+    if spec.arguments.len() > MAX_ARGUMENTS {
+        return Err(ProcessError::InvalidSpec("too many arguments"));
+    }
+    if spec.environment.len() > MAX_ENVIRONMENT_ENTRIES {
+        return Err(ProcessError::InvalidSpec("too many environment entries"));
+    }
+    let mut total = 0usize;
+    for argument in &spec.arguments {
+        if contains_nul(argument) {
+            return Err(ProcessError::InvalidSpec("arguments must not contain NUL"));
+        }
+        total = add_size(total, argument.len())?;
+    }
+    for (index, (name, value)) in spec.environment.iter().enumerate() {
+        validate_environment_name(name)?;
+        if contains_nul(value) {
+            return Err(ProcessError::InvalidSpec(
+                "environment values must not contain NUL",
+            ));
+        }
+        if spec.environment[..index]
+            .iter()
+            .any(|(earlier, _)| same_environment_name(earlier, name))
+        {
+            return Err(ProcessError::InvalidSpec("duplicate environment name"));
+        }
+        total = add_size(total, name.len())?;
+        total = add_size(total, value.len())?;
+    }
+    platform_validate_spec(spec)
+}
+
+fn add_size(total: usize, more: usize) -> Result<usize, ProcessError> {
+    total
+        .checked_add(more)
+        .filter(|sum| *sum <= MAX_COMMAND_BYTES)
+        .ok_or(ProcessError::InvalidSpec(
+            "arguments and environment are too large",
+        ))
+}
+
+fn contains_nul(text: &OsStr) -> bool {
+    text.as_encoded_bytes().contains(&0)
+}
+
+fn validate_environment_name(name: &OsStr) -> Result<(), ProcessError> {
+    let bytes = name.as_encoded_bytes();
+    if bytes.is_empty() || bytes.contains(&b'=') || bytes.contains(&0) {
+        return Err(ProcessError::InvalidSpec(
+            "environment names must be non-empty and contain no '=' or NUL",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn same_environment_name(first: &OsStr, second: &OsStr) -> bool {
+    // Windows environment names compare case-insensitively.
+    first.to_string_lossy().to_uppercase() == second.to_string_lossy().to_uppercase()
+}
+
+#[cfg(not(windows))]
+fn same_environment_name(first: &OsStr, second: &OsStr) -> bool {
+    first == second
+}
+
+#[cfg(windows)]
+fn platform_validate_spec(spec: &ProcessSpec) -> Result<(), ProcessError> {
+    windows::validate_spec(spec)
+}
+
+#[cfg(not(windows))]
+fn platform_validate_spec(_spec: &ProcessSpec) -> Result<(), ProcessError> {
+    Ok(())
+}
+
+/// Native control over one started tree.
+trait ProcessTree {
+    /// Return the program's termination if it has exited, without blocking.
+    fn try_exit(&mut self) -> io::Result<Option<Termination>>;
+    /// Ask every process in the tree to stop immediately.
+    fn terminate(&mut self) -> io::Result<()>;
+    /// Whether no process of the tree remains.
+    fn is_empty(&mut self) -> io::Result<bool>;
+}
+
+/// Capture threads for standard output and standard error.
+struct Capture {
+    stdout: Receiver<io::Result<CapturedOutput>>,
+    stderr: Receiver<io::Result<CapturedOutput>>,
+}
+
+impl Capture {
+    fn start(
+        stdout: impl Read + Send + 'static,
+        stderr: impl Read + Send + 'static,
+        limits: ProcessLimits,
+    ) -> io::Result<Self> {
+        Ok(Self {
+            stdout: spawn_reader("omgcode-stdout", stdout, limits.max_stdout_bytes)?,
+            stderr: spawn_reader("omgcode-stderr", stderr, limits.max_stderr_bytes)?,
+        })
+    }
+
+    /// Wait for both streams to close. A stream held open by a process outside
+    /// the observed tree leaves its reader thread blocked and is an error.
+    fn finish(self, deadline: Instant) -> Result<(CapturedOutput, CapturedOutput), ProcessError> {
+        let stdout = receive(&self.stdout, deadline)?;
+        let stderr = receive(&self.stderr, deadline)?;
+        Ok((stdout, stderr))
+    }
+}
+
+fn spawn_reader(
+    name: &str,
+    mut stream: impl Read + Send + 'static,
+    limit: usize,
+) -> io::Result<Receiver<io::Result<CapturedOutput>>> {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    thread::Builder::new()
+        .name(name.to_owned())
+        .spawn(move || {
+            // A send fails only when the supervisor stopped waiting; nothing remains to report.
+            let _unreportable = sender.send(read_bounded(&mut stream, limit));
+        })?;
+    Ok(receiver)
+}
+
+/// Retain at most `limit` bytes, but keep draining so the writer never blocks.
+fn read_bounded(stream: &mut impl Read, limit: usize) -> io::Result<CapturedOutput> {
+    let mut captured = CapturedOutput::default();
+    let mut buffer = [0u8; READ_CHUNK];
+    loop {
+        let read = match stream.read(&mut buffer) {
+            Ok(0) => return Ok(captured),
+            Ok(read) => read,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            // Windows reports a closed pipe as broken rather than end of file.
+            Err(error) if error.kind() == io::ErrorKind::BrokenPipe => return Ok(captured),
+            Err(error) => return Err(error),
+        };
+        let chunk = buffer.get(..read).unwrap_or_default();
+        let room = limit.saturating_sub(captured.bytes.len());
+        captured
+            .bytes
+            .extend_from_slice(chunk.get(..room.min(read)).unwrap_or_default());
+        captured.total_bytes = captured
+            .total_bytes
+            .saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
+    }
+}
+
+fn receive(
+    receiver: &Receiver<io::Result<CapturedOutput>>,
+    deadline: Instant,
+) -> Result<CapturedOutput, ProcessError> {
+    let wait = deadline.saturating_duration_since(Instant::now());
+    match receiver.recv_timeout(wait) {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(error)) => Err(ProcessError::Supervision(error)),
+        Err(RecvTimeoutError::Timeout) => Err(ProcessError::CleanupUnconfirmed(
+            "an output stream stayed open after the tree was empty",
+        )),
+        Err(RecvTimeoutError::Disconnected) => Err(ProcessError::Supervision(io::Error::other(
+            "an output reader stopped without a result",
+        ))),
+    }
+}
+
+/// Supervise a started tree to completion and observe it empty.
+fn supervise(
+    tree: &mut impl ProcessTree,
+    capture: Capture,
+    started: Instant,
+    limits: ProcessLimits,
+    cancel: &CancelSignal,
+) -> Result<ProcessOutcome, ProcessError> {
+    let watched = watch(tree, started, limits.deadline, cancel);
+    // Descendants never outlive the run, including after a normal exit.
+    let stopped = stop_tree(tree, limits.cleanup_timeout);
+    let termination = match (watched, stopped) {
+        (Ok(termination), Ok(())) => termination,
+        (_, Err(error)) => return Err(error),
+        (Err(error), Ok(())) => return Err(ProcessError::Supervision(error)),
+    };
+    let elapsed = started.elapsed();
+    let (stdout, stderr) = capture.finish(Instant::now() + limits.cleanup_timeout)?;
+    Ok(ProcessOutcome {
+        termination,
+        stdout,
+        stderr,
+        elapsed,
+    })
+}
+
+fn watch(
+    tree: &mut impl ProcessTree,
+    started: Instant,
+    deadline: Duration,
+    cancel: &CancelSignal,
+) -> io::Result<Termination> {
+    loop {
+        if let Some(termination) = tree.try_exit()? {
+            return Ok(termination);
+        }
+        if cancel.is_cancelled() {
+            return Ok(Termination::Cancelled);
+        }
+        if started.elapsed() >= deadline {
+            return Ok(Termination::DeadlineExceeded);
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+}
+
+/// Terminate the tree until it is observed empty or the timeout elapses.
+fn stop_tree(tree: &mut impl ProcessTree, timeout: Duration) -> Result<(), ProcessError> {
+    let until = Instant::now() + timeout;
+    loop {
+        tree.terminate().map_err(ProcessError::Supervision)?;
+        if tree.is_empty().map_err(ProcessError::Supervision)? {
+            return Ok(());
+        }
+        if Instant::now() >= until {
+            return Err(ProcessError::CleanupUnconfirmed(
+                "processes remained after termination",
+            ));
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+}
+
+/// Whether `path` names a Windows batch script, which `cmd.exe` would parse.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn is_batch_script(path: &Path) -> bool {
+    path.extension()
+        .and_then(OsStr::to_str)
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("bat") || extension.eq_ignore_ascii_case("cmd")
+        })
+}
