@@ -77,6 +77,9 @@ identity, times, length, attributes, exact name, streams, security, and bytes.
   expose its unpublished bytes to principals the source DACL admits.
 - Copy the security after the rename: rejected. The published file would
   briefly, or after a crash permanently, carry the wrong DACL.
+- Make a retained stage private again during recovery: rejected by maintainer
+  decision. Inspection and acknowledgement stay read-only, so the crash window
+  below remains a documented gap.
 - Rely on the retained handle's change time alone: rejected. A caller with
   write-attributes access can restore file times. Security, streams, name, and
   identity are each compared directly.
@@ -115,8 +118,8 @@ Gaps that remain open:
 - A crash, or a failed restore, between applying the source security and the
   rename leaves a retained stage carrying the source DACL. This window follows
   commit intent and is short, but it is not closed. Closing it would need
-  recovery to change the stage's ACL, and inspection and acknowledgement never
-  repair or mutate evidence. Tests inject a failed restore and recreate the
+  recovery to change the stage's ACL. The maintainer chose to keep inspection
+  and acknowledgement read-only and accept this gap. Tests inject a failed restore and recreate the
   crash state by copying the exact source descriptor onto a retained stage.
 - Stage privacy is tested through its exact DACL, not by a second local user,
   because creating one needs elevation.
