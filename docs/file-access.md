@@ -610,11 +610,14 @@ volume, and filesystems other than NTFS. An audit SACL cannot be read without
 elevation, so it is neither checked nor preserved. The file ID and modification
 time can change.
 
-The stage takes the source DACL before publication, and a failed operation
-retains it. Windows grants bypass traverse checking to everyone by default, so
-the private parent directories do not stop a principal that the copied DACL
-admits and that knows the stage path or file ID. Such a principal can already
-read the target, but it can read proposed bytes that were never published.
+Windows grants bypass traverse checking to everyone by default, so private
+parent directories do not hide a file whose own DACL admits other principals.
+The stage therefore keeps the private store's owner-only DACL until the commit
+attempt. After commit intent and the final check, apply copies the source
+security to the stage, verifies it, checks authority, and renames. A failure
+before the rename restores the owner-only DACL. A crash in that short window
+can leave a retained stage with the source DACL; recovery accepts either state
+only after commit intent.
 
 The data root must meet the
 [ADR-0023](adr/0023-store-windows-checkpoints-with-verified-acls.md) rule. Any

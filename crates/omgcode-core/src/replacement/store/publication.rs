@@ -71,7 +71,7 @@ impl Store {
             file_id: identity.file_id,
         };
         let content = operation.proposed.clone();
-        let length = validate_stage(&entry, &identity, &content, security)?;
+        let length = validate_stage(&entry, &identity, &content, security, false)?;
         add_usage(&mut self.used, length)?;
         self.append(
             LedgerAction::StagePrepared {

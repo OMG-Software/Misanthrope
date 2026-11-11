@@ -74,6 +74,14 @@ pub fn file_identity(file: &std::fs::File) -> std::io::Result<PrivateFileIdentit
     }
 }
 
+/// Reports whether this open file has exactly the owner and protected DACL that
+/// the Windows store gives its own files. A mismatch is `false`; a failed
+/// query is an error. The handle must have READ_CONTROL.
+#[cfg(windows)]
+pub fn is_private_file(file: &std::fs::File) -> std::io::Result<bool> {
+    windows::is_private_file(file)
+}
+
 /// Inspect supported replacement-stage metadata from the same open file handle.
 /// Linux rejects xattrs, special mode bits, and file attrs. Windows rejects
 /// alternate streams, extended attributes, and unsupported file attributes.

@@ -166,9 +166,9 @@ and one doc test. Native Windows ran 238 tests and one doc test, with
 workspace-local `TEMP` and `TMP`. No tests failed, were ignored, or were filtered.
 
 A3b final verification used default test parallelism with Rust 1.99.1 and passed
-formatting, Clippy, all-target tests, and doc tests. Native Windows ran 302 tests
+formatting, Clippy, all-target tests, and doc tests. Native Windows ran 306 tests
 and one doc test, with `TEMP` and `TMP` on the same NTFS volume as the fixtures.
-Linux under WSL ran 294 tests and one doc test. No tests failed, were ignored, or
+Linux under WSL ran 296 tests and one doc test. No tests failed, were ignored, or
 were filtered. Temporary mutations of the Windows refusal checks were each caught
 by a test, except for two that do not change behaviour on the tested host: a link
 check that `stage_metadata` repeats, and the first of two identity comparisons in

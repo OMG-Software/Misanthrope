@@ -63,6 +63,24 @@ impl SecurityMetadata {
         }
     }
 
+    /// Whether a retained stage's security is acceptable at this point.
+    ///
+    /// A Windows stage keeps the private store's owner-only DACL until the
+    /// commit attempt copies the source security just before the rename. Before
+    /// commit intent it must still be private. After commit intent an
+    /// interrupted attempt can leave either state. Linux stages always match.
+    pub(super) fn permits_stage(
+        &self,
+        stage: &StageMetadata,
+        private: bool,
+        after_commit_intent: bool,
+    ) -> bool {
+        match self {
+            Self::Linux { .. } => self.matches_stage(stage),
+            Self::Windows { .. } => private || (after_commit_intent && self.matches_stage(stage)),
+        }
+    }
+
     /// Match the metadata that the new file must preserve from the captured source.
     pub(super) fn matches_stage(&self, stage: &StageMetadata) -> bool {
         match (self, &stage.security) {
@@ -178,4 +196,85 @@ pub(super) fn descriptor(bytes: &[u8]) -> Result<RecordedArtifact, CheckpointErr
         bytes: u64::try_from(bytes.len()).map_err(|_| CheckpointError::Limit)?,
         sha256: sha256_hex(bytes),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use omgcode_platform::private_store::PrivateFileIdentity;
+
+    use super::*;
+
+    const SOURCE: &str = "O:S-1-5-21-1G:S-1-5-21-1D:AI(A;ID;FA;;;S-1-5-21-1)(A;ID;FR;;;BU)";
+    const PRIVATE: &str = "O:S-1-5-21-1G:S-1-5-21-1D:P(A;;FA;;;S-1-5-21-1)";
+
+    fn windows(descriptor: &str) -> SecurityMetadata {
+        SecurityMetadata::Windows {
+            descriptor: descriptor.to_owned(),
+            not_content_indexed: false,
+        }
+    }
+
+    fn stage(descriptor: &str) -> StageMetadata {
+        StageMetadata {
+            identity: PrivateFileIdentity {
+                volume: 1,
+                file_id: [2; 16],
+            },
+            security: NativeSecurity::Windows {
+                descriptor: descriptor.to_owned(),
+                not_content_indexed: false,
+            },
+        }
+    }
+
+    #[test]
+    fn a_windows_stage_must_stay_private_until_commit_intent() {
+        let source = windows(SOURCE);
+        assert!(source.permits_stage(&stage(PRIVATE), true, false));
+        assert!(
+            !source.permits_stage(&stage(SOURCE), false, false),
+            "a stage carrying the source DACL before commit intent is refused"
+        );
+        assert!(source.permits_stage(&stage(PRIVATE), true, true));
+        assert!(
+            source.permits_stage(&stage(SOURCE), false, true),
+            "an interrupted attempt can leave the source DACL after commit intent"
+        );
+        assert!(
+            !source.permits_stage(&stage(&format!("{PRIVATE}(A;;FR;;;WD)")), false, true),
+            "any other DACL is refused"
+        );
+    }
+
+    #[test]
+    fn a_linux_stage_must_match_its_source_at_every_point() {
+        let source = SecurityMetadata::Linux {
+            owner: 1000,
+            group: 1000,
+            mode: 0o640,
+        };
+        let matching = StageMetadata {
+            identity: PrivateFileIdentity {
+                volume: 1,
+                file_id: [2; 16],
+            },
+            security: NativeSecurity::Unix {
+                owner: 1000,
+                group: 1000,
+                mode: 0o640,
+            },
+        };
+        let private = StageMetadata {
+            security: NativeSecurity::Unix {
+                owner: 1000,
+                group: 1000,
+                mode: 0o600,
+            },
+            ..matching.clone()
+        };
+        for after_commit_intent in [false, true] {
+            assert!(source.permits_stage(&matching, false, after_commit_intent));
+            assert!(!source.permits_stage(&private, true, after_commit_intent));
+        }
+    }
 }

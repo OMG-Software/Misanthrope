@@ -40,10 +40,22 @@ Refuse a source that a stage cannot reproduce:
 - a name that differs from the stored name, including case and 8.3 aliases;
 - hard links, reparse points, a different volume, and non-NTFS filesystems.
 
-Apply the descriptor to the private stage with `SetKernelObjectSecurity`, then
+Keep the stage owner-only until the commit attempt. Windows grants bypass
+traverse checking to everyone by default, so the private parent directories
+do not hide a file whose own DACL admits another principal. A stage that took
+the source DACL early could expose unpublished bytes to anyone that DACL
+admits, and a conflict or failure retains the stage. The stage is created with
+the private store's exact DACL and verified private before `stage_prepared`.
+
+After commit intent and the final check, apply the source descriptor and
+indexing opt-out to the stage with `SetKernelObjectSecurity`, flush it, then
 read it back and compare it exactly. That comparison, not the call, is what
-establishes the result. `SetSecurityInfo` is not used because it recomputes
-inheritance and would change inherited entries.
+establishes the result. Then check live authority and rename. If any step
+before the rename fails, put the owner-only DACL back and verify it. If that
+also fails, the error says so. The core requires a private stage before commit
+intent and accepts either state after it, because a crash can fall between
+the two steps. `SetSecurityInfo` is not used because it recomputes inheritance
+and would change inherited entries.
 
 Publish with one `FileRenameInformationEx` call using replace-if-exists and POSIX
 semantics, from the retained stage handle to the retained target parent. Flush
@@ -60,6 +72,11 @@ identity, times, length, attributes, exact name, streams, security, and bytes.
   documented errors include partial name and metadata changes.
 - Refuse the not-content-indexed attribute: rejected. It is a user preference and
   is commonly inherited across a whole development folder. It is preserved.
+- Copy the source security when the stage is prepared: rejected after review.
+  Conflicts and failures retain the stage, and bypass traverse checking would
+  expose its unpublished bytes to principals the source DACL admits.
+- Copy the security after the rename: rejected. The published file would
+  briefly, or after a crash permanently, carry the wrong DACL.
 - Rely on the retained handle's change time alone: rejected. A caller with
   write-attributes access can restore file times. Security, streams, name, and
   identity are each compared directly.
@@ -95,12 +112,11 @@ or choose a private `--data-dir`. OMGCode does not repair ACLs.
 
 Gaps that remain open:
 
-- The stage takes the source DACL before publication, and a failed operation
-  retains it. Windows grants bypass traverse checking to everyone by default,
-  so the private parent directories do not stop a principal that the copied
-  DACL admits and that knows the stage path or file ID. Such a principal can
-  already read the target, but it can read proposed bytes that were never
-  published. This exposure is not tested natively.
+- A crash, or a failed restore, between applying the source security and the
+  rename leaves a retained stage carrying the source DACL. This window follows
+  commit intent and is short, but it is not closed.
+- Stage privacy is tested through its exact DACL, not by a second local user,
+  because creating one needs elevation.
 - Audit SACLs cannot be observed unelevated and are not preserved.
 - A foreign owner was not tested, because setting one needs elevation.
 - Cross-volume and non-NTFS refusals are unit tested for the comparison only, not

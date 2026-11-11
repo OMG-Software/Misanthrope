@@ -1,7 +1,7 @@
 use super::*;
 use crate::broker::windows::tests::create_junction_bounded;
 use crate::private_store::windows::tests::private_root;
-use crate::private_store::windows::{apply_security, read_security};
+use crate::private_store::windows::{apply_security, is_private_file, read_security};
 use std::fs::{self, OpenOptions};
 use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
@@ -220,7 +220,7 @@ fn publication_works_when_the_copied_dacl_denies_writing() {
 }
 
 #[test]
-fn the_stage_is_private_until_its_bytes_are_written() {
+fn a_new_stage_is_created_private() {
     let fixture = Fixture::with_source(b"before");
     let directory = fixture.directory();
     let file = directory.create_stage().expect("stage");
@@ -309,6 +309,7 @@ fn a_rename_fault_is_one_attempt_and_keeps_the_stage() {
     );
     assert_eq!(fs::read(&fixture.path).expect("unchanged"), b"before");
     assert!(fixture.stage_path().exists(), "stage evidence remains");
+    assert_stage_is_private(&fixture);
 }
 
 #[test]
@@ -343,6 +344,7 @@ fn a_native_rename_error_leaves_the_target_and_is_not_retried() {
     drop(held.lock().expect("slot").take());
     assert_eq!(fs::read(&fixture.path).expect("unchanged"), b"before");
     assert_eq!(fs::read(fixture.stage_path()).expect("stage"), b"after");
+    assert_stage_is_private(&fixture);
 }
 
 #[test]
@@ -363,10 +365,62 @@ fn a_last_moment_denial_preserves_target_and_stage() {
     assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
     assert_eq!(fs::read(&fixture.path).expect("unchanged"), b"before");
     assert!(fixture.stage_path().exists(), "stage evidence remains");
+    assert_stage_is_private(&fixture);
     assert!(
         target.commit(&mut stage, || Ok(())).is_err(),
         "a refused attempt cannot be retried"
     );
+}
+
+/// The retained stage has exactly the owner-only DACL of the private store.
+fn assert_stage_is_private(fixture: &Fixture) {
+    let stage = File::open(fixture.stage_path()).expect("open stage");
+    assert!(
+        is_private_file(&stage).expect("stage security"),
+        "the stage must be private: {}",
+        read_security(&stage).expect("stage security")
+    );
+}
+
+#[test]
+fn the_stage_stays_private_until_commit_while_the_source_grants_others() {
+    let fixture = Fixture::with_source(b"before");
+    let user = current_user_ace_sid(&fixture.path);
+    set_dacl(&fixture.path, &format!("P(A;;FA;;;{user})(A;;FR;;;BU)"));
+    let target = fixture.target();
+    let source = descriptor(target.capture()).to_owned();
+    assert!(
+        source.contains(";;;BU)"),
+        "the source grants Users: {source}"
+    );
+    let mut stage = target
+        .prepare_stage(fixture.directory(), b"after")
+        .expect("stage");
+    assert_stage_is_private(&fixture);
+    assert!(target.recheck(&stage).expect("unchanged target"));
+    assert_stage_is_private(&fixture);
+    target.commit(&mut stage, || Ok(())).expect("publish");
+    assert_eq!(fs::read(&fixture.path).expect("published"), b"after");
+    assert_eq!(
+        read_security(&security_handle(&fixture.path)).expect("published security"),
+        source,
+        "only the published file carries the source DACL"
+    );
+}
+
+#[test]
+fn a_conflict_retains_a_private_stage() {
+    let fixture = Fixture::with_source(b"same");
+    let user = current_user_ace_sid(&fixture.path);
+    set_dacl(&fixture.path, &format!("P(A;;FA;;;{user})(A;;FR;;;BU)"));
+    let target = fixture.target();
+    let stage = target
+        .prepare_stage(fixture.directory(), b"new")
+        .expect("stage");
+    fs::remove_file(&fixture.path).expect("remove source");
+    assert!(!target.recheck(&stage).expect("conflict"));
+    drop(stage);
+    assert_stage_is_private(&fixture);
 }
 
 #[test]
@@ -578,7 +632,10 @@ fn a_tampered_stage_is_refused() {
         .prepare_stage(fixture.directory(), b"new")
         .expect("stage");
     let user = current_user_ace_sid(&fixture.stage_path());
-    set_dacl(&fixture.stage_path(), &format!("P(A;;FA;;;{user})"));
+    set_dacl(
+        &fixture.stage_path(),
+        &format!("P(A;;FA;;;{user})(A;;FR;;;BU)"),
+    );
     assert!(target.recheck(&stage).is_err());
 }
 

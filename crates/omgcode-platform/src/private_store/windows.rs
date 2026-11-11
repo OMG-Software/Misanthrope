@@ -800,6 +800,16 @@ impl WindowsPrivateDirectory {
     }
 }
 
+/// Reports whether `file` has exactly the private owner and DACL this store
+/// creates. Only a mismatch is `false`; a failed query is returned.
+pub fn is_private_file(file: &File) -> io::Result<bool> {
+    match require_private(file, &Principals::current()?) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::InvalidData => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 /// Checks privacy on the opened file before returning its native identity.
 /// The handle must have READ_CONTROL. No pathname lookup or reopen occurs.
 pub fn file_identity(file: &File) -> io::Result<PrivateFileIdentity> {

@@ -271,8 +271,11 @@ Exercise exact security descriptors, each refused metadata kind, sharing
 conflicts, the step order, and post-rename failures. A recheck test must defeat
 the earlier checks before it can show a later one works: restore the file times
 after changing security, streams, or the name, and assert that the retained
-snapshot still matches. Tests do not cover audit SACLs, a foreign owner, a real
-second volume, ReFS, filter drivers, or physical power loss.
+snapshot still matches. Check that the stage keeps its owner-only DACL through
+preparation, rechecks, conflicts, and failures before the rename, even when the
+source grants other principals. Tests do not cover audit SACLs, a foreign owner,
+a second local user, a real second volume, ReFS, filter drivers, or physical
+power loss.
 
 Before enabling another native replacement backend, implement the
 [accepted replacement contract](file-access.md#replacement-contract)

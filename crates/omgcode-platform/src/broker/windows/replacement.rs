@@ -3,7 +3,12 @@
 //! The retained source handle denies write sharing, so ordinary writers are
 //! blocked for the whole operation. It permits delete sharing because the final
 //! rename must replace that name. A removal or swap after the last check can
-//! therefore still go undetected. See ADR-0024.
+//! therefore still go undetected.
+//!
+//! The stage keeps the private store's owner-only DACL until the commit
+//! attempt. Windows grants bypass traverse checking by default, so private
+//! parent directories alone would not hide a stage whose own DACL admits other
+//! principals. See ADR-0024.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
@@ -37,7 +42,7 @@ use crate::broker::{FileCapture, MAX_FILE_BYTES};
 use crate::directory_identity;
 use crate::private_store::windows::{
     DIRECTORY_OPTIONS, FILE_OPTIONS, FILE_READ_ACCESS, STAGE_NAME, apply_native_security,
-    read_native_security, require_ntfs, validate_file_metadata,
+    is_private_file, read_native_security, require_ntfs, validate_file_metadata,
 };
 use crate::private_store::{
     NativeSecurity, PrivateDirectory, PrivateFileIdentity, StageMetadata, stage_metadata,
@@ -232,10 +237,10 @@ impl ReplacementTarget<'_> {
         self.parent.sync_all()
     }
 
-    /// Exclusively create and flush one bounded private stage file.
+    /// Exclusively create, flush, and verify one bounded private stage file.
     ///
-    /// The stage stays private while its bytes are written, then takes the
-    /// source's security and indexing opt-out before it is verified and flushed.
+    /// The stage keeps its owner-only DACL. It takes the source's security and
+    /// indexing opt-out only in `commit`, after the final check.
     pub fn prepare_stage(
         &self,
         directory: PrivateDirectory,
@@ -247,12 +252,11 @@ impl ReplacementTarget<'_> {
         self.check_storage(&directory)?;
         let mut file = directory.create_stage()?;
         file.write_all(proposed)?;
-        apply_native_security(&file, &self.capture.security)?;
         file.sync_all()?;
         directory.sync()?;
         let snapshot = file_snapshot(&file)?;
         let metadata = stage_metadata(&file)?;
-        if metadata.security != self.capture.security || !file_bytes_matches(&file, proposed)? {
+        if !is_private_file(&file)? || !file_bytes_matches(&file, proposed)? {
             return Err(invalid_data(
                 "replacement stage metadata or bytes do not match",
             ));
@@ -361,10 +365,22 @@ impl ReplacementTarget<'_> {
         }
         #[cfg(test)]
         self.run_hook(TestPoint::AfterFinalCheck)?;
-        before_attempt()?;
-        #[cfg(test)]
-        self.run_hook(TestPoint::Rename)?;
-        rename_onto(&stage.file, &self.parent, &self.name)?;
+        let private = stage.metadata.security.clone();
+        let attempt = self.publish_security(stage).and_then(|()| {
+            before_attempt()?;
+            #[cfg(test)]
+            self.run_hook(TestPoint::Rename)?;
+            rename_onto(&stage.file, &self.parent, &self.name)
+        });
+        if let Err(error) = attempt {
+            return Err(match restore_privacy(stage, &private) {
+                Ok(()) => error,
+                Err(restore) => io::Error::new(
+                    error.kind(),
+                    format!("{error}; the stage keeps the source security: {restore}"),
+                ),
+            });
+        }
         #[cfg(test)]
         self.run_hook(TestPoint::PublishedCheck)?;
         if !published_matches(self, stage)? {
@@ -383,6 +399,23 @@ impl ReplacementTarget<'_> {
         self.parent.sync_all()
     }
 
+    /// Give the verified private stage the captured source security and
+    /// indexing opt-out, flush it, and read the result back exactly.
+    fn publish_security(&self, stage: &mut ReplacementStage) -> io::Result<()> {
+        apply_native_security(&stage.file, &self.capture.security)?;
+        stage.file.sync_all()?;
+        let metadata = stage_metadata(&stage.file)?;
+        if metadata.identity != stage.metadata.identity
+            || metadata.security != self.capture.security
+        {
+            return Err(invalid_data(
+                "replacement stage did not take the source security",
+            ));
+        }
+        stage.metadata = metadata;
+        Ok(())
+    }
+
     #[cfg(test)]
     fn run_hook(&self, point: TestPoint) -> io::Result<()> {
         if let Some(hook) = &self.hook {
@@ -397,6 +430,19 @@ impl ReplacementStage {
     pub fn identity(&self) -> io::Result<PrivateFileIdentity> {
         Ok(stage_metadata(&self.file)?.identity)
     }
+}
+
+/// Put back the owner-only DACL after a failed attempt left the name unchanged.
+/// Only the stage changes. The core accepts either state after commit intent.
+fn restore_privacy(stage: &mut ReplacementStage, private: &NativeSecurity) -> io::Result<()> {
+    apply_native_security(&stage.file, private)?;
+    stage.file.sync_all()?;
+    let metadata = stage_metadata(&stage.file)?;
+    if !is_private_file(&stage.file)? || metadata.security != *private {
+        return Err(invalid_data("replacement stage privacy was not restored"));
+    }
+    stage.metadata = metadata;
+    Ok(())
 }
 
 fn validate_stage(stage: &ReplacementStage) -> io::Result<()> {
