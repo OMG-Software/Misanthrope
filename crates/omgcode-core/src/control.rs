@@ -326,6 +326,12 @@ impl ControlStore {
         Ok((self.data_directory.clone(), self.snapshot.store_id))
     }
 
+    /// The control journal path inside `data_directory`. Its length changes
+    /// with every recorded settings change.
+    pub(crate) fn journal_path(data_directory: &Path) -> std::path::PathBuf {
+        data_directory.join(FILE_NAME)
+    }
+
     /// Open or initialize `<data_directory>/control-v1.jsonl` under an exclusive lock.
     /// Existing empty, malformed, or incomplete files cause an error without repair.
     pub fn open(data_directory: &Path) -> Result<Self, ControlError> {

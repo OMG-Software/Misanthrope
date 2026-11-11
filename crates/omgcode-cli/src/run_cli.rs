@@ -103,13 +103,17 @@ pub(crate) fn run(args: RunArgs, data_root: &Path) -> Result<(), CliError> {
         },
     };
     let cancel = CancelSignal::new();
-    cancel_on_interrupt(&cancel).map_err(|error| {
+    let interrupts = cancel_on_interrupt(&cancel).map_err(|error| {
         CliError::new(
             "run",
             format!("Interrupt handling could not be installed: {error}"),
         )
     })?;
-    match run::run(data_root, &request, &cancel) {
+    let result = run::run(data_root, &request, &cancel);
+    // The watcher is joined on every path; its failure cannot change the
+    // recorded outcome, so it is not reported over the run's result.
+    let _ = interrupts.stop();
+    match result {
         Ok(report) => print_json(&json!({ "run": report })),
         Err(RunError::OutcomeNotRecorded { report, source }) => {
             // Keep the output even though the journal still shows the run

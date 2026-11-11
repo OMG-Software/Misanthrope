@@ -8,13 +8,15 @@
 //!
 //! Linux handles `SIGINT` and `SIGTERM`; Windows handles `CTRL_C_EVENT` and
 //! `CTRL_BREAK_EVENT`. The handler stays installed for the life of the
-//! process, so later interrupts are absorbed the same way. A forced kill,
+//! process, so later interrupts are absorbed the same way. Each watcher is
+//! owned by an [`InterruptWatch`], which stops and joins it. A forced kill,
 //! such as `SIGKILL` or closing the console, still ends the caller without an
 //! outcome record.
 
 use std::io;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use crate::process::CancelSignal;
@@ -27,21 +29,66 @@ const WATCH_INTERVAL: Duration = Duration::from_millis(20);
 
 /// Install the interrupt handler and raise `cancel` when an interrupt arrives.
 ///
-/// The watcher thread holds a clone of `cancel` and ends after it raises it.
-/// If the handler cannot be installed, nothing is started and the error is
-/// returned; the caller decides whether to run without interrupt handling.
-pub fn cancel_on_interrupt(cancel: &CancelSignal) -> io::Result<()> {
+/// The returned watch owns the watcher thread, which holds a clone of
+/// `cancel`. Call [`InterruptWatch::stop`] when the run ends; dropping the
+/// watch does the same. If the handler cannot be installed, nothing is
+/// started and the error is returned; the caller decides whether to run
+/// without interrupt handling.
+pub fn cancel_on_interrupt(cancel: &CancelSignal) -> io::Result<InterruptWatch> {
     install()?;
     let cancel = cancel.clone();
-    thread::Builder::new()
+    let stop = Arc::new(AtomicBool::new(false));
+    let stopped = Arc::clone(&stop);
+    let thread = thread::Builder::new()
         .name("omgcode-interrupt".to_owned())
         .spawn(move || {
-            while !INTERRUPTED.load(Ordering::SeqCst) {
+            while !stopped.load(Ordering::SeqCst) {
+                if INTERRUPTED.load(Ordering::SeqCst) {
+                    cancel.cancel();
+                    return;
+                }
                 thread::sleep(WATCH_INTERVAL);
             }
-            cancel.cancel();
         })?;
-    Ok(())
+    Ok(InterruptWatch {
+        stop,
+        thread: Some(thread),
+    })
+}
+
+/// An interrupt watcher for one run. The handler itself stays installed.
+#[must_use = "dropping the watch stops it at once"]
+#[derive(Debug)]
+pub struct InterruptWatch {
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl InterruptWatch {
+    /// Stop the watcher and wait for its thread, which ends within one poll
+    /// interval. An error means the thread panicked.
+    pub fn stop(mut self) -> io::Result<()> {
+        self.finish()
+    }
+
+    fn finish(&mut self) -> io::Result<()> {
+        self.stop.store(true, Ordering::SeqCst);
+        match self.thread.take() {
+            Some(thread) => thread
+                .join()
+                .map_err(|_| io::Error::other("the interrupt watcher panicked")),
+            None => Ok(()),
+        }
+    }
+}
+
+impl Drop for InterruptWatch {
+    fn drop(&mut self) {
+        // Fallback when `stop` was not called: the join cannot block for
+        // longer than one poll interval, and a panic in the thread is
+        // already reported on its own.
+        let _ = self.finish();
+    }
 }
 
 #[cfg(unix)]
@@ -112,8 +159,13 @@ mod tests {
     /// This is the only test that touches the process-wide handler.
     #[test]
     fn an_interrupt_raises_the_cancel_signal() {
+        let idle = CancelSignal::new();
+        let watch = cancel_on_interrupt(&idle).expect("install the handler");
+        // Stopping a watcher ends its thread without raising its signal.
+        watch.stop().expect("stop the idle watcher");
+        assert!(!idle.is_cancelled());
         let cancel = CancelSignal::new();
-        cancel_on_interrupt(&cancel).expect("install the handler");
+        let watch = cancel_on_interrupt(&cancel).expect("install the handler");
         assert!(!cancel.is_cancelled());
         deliver_interrupt();
         let until = Instant::now() + Duration::from_secs(5);
@@ -121,6 +173,8 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         assert!(cancel.is_cancelled(), "the watcher did not cancel the run");
+        watch.stop().expect("stop the finished watcher");
+        assert!(!idle.is_cancelled(), "a stopped watcher raised its signal");
     }
 
     #[cfg(unix)]

@@ -5,9 +5,12 @@
 use clap::{Args, Subcommand, ValueEnum};
 use omgcode_core::control::{ContainerGrantAccess, ControlError, ControlStore, ProfileDeclaration};
 use omgcode_core::policy::{Operation, PermissionSet, PolicyRequest, WorkspaceId};
+use omgcode_core::run;
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::thread;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use crate::{CliError, print_json};
@@ -172,7 +175,10 @@ pub(crate) fn run(action: WorkspaceCommand, data_root: &Path) -> Result<(), CliE
             store
                 .set_development_root(&path, revision)
                 .map_err(control_error)?;
-            print_json(&store.snapshot())
+            let snapshot = store.snapshot();
+            drop(store);
+            stop_withdrawn_runs(data_root)?;
+            print_json(&snapshot)
         }
         WorkspaceCommand::Register { path, revision } => {
             let mut store = open(data_root)?;
@@ -203,19 +209,25 @@ pub(crate) fn run(action: WorkspaceCommand, data_root: &Path) -> Result<(), CliE
             let profile_id = store
                 .remove_profile(&name, revision)
                 .map_err(control_error)?;
-            print_json(&json!({
+            let output = json!({
                 "removed_profile_id": profile_id,
                 "snapshot": store.snapshot(),
-            }))
+            });
+            drop(store);
+            stop_withdrawn_runs(data_root)?;
+            print_json(&output)
         }
         WorkspaceCommand::ContainerRevoke { grant } => {
             let mut store = open_existing(data_root)?
                 .ok_or_else(|| CliError::new("control", "Workspace control is not initialized"))?;
             let revocation = store.revoke_container_grant(grant).map_err(control_error)?;
-            print_json(&json!({
+            let output = json!({
                 "revocation": revocation,
                 "snapshot": store.snapshot(),
-            }))
+            });
+            drop(store);
+            stop_withdrawn_runs(data_root)?;
+            print_json(&output)
         }
     }
 }
@@ -292,7 +304,29 @@ fn set_permissions(args: PermissionsArgs, data_root: &Path) -> Result<(), CliErr
     store
         .set_permissions(id, permissions, args.revision)
         .map_err(control_error)?;
-    print_json(&store.snapshot())
+    let snapshot = store.snapshot();
+    drop(store);
+    stop_withdrawn_runs(data_root)?;
+    print_json(&snapshot)
+}
+
+/// After a change that can withdraw access, wait for the affected runs to
+/// stop. The change is already recorded; a run not observed to stop makes
+/// the command fail so the revocation is not reported as complete.
+fn stop_withdrawn_runs(data_root: &Path) -> Result<(), CliError> {
+    let withdrawn = run::stop_withdrawn_runs(data_root, run::REVOCATION_WAIT)
+        .map_err(|error| CliError::new("run", error.to_string()))?;
+    if withdrawn.unconfirmed.is_empty() {
+        return Ok(());
+    }
+    let runs: Vec<String> = withdrawn.unconfirmed.iter().map(Uuid::to_string).collect();
+    Err(CliError::new(
+        "run",
+        format!(
+            "The settings change was recorded, but these runs were not observed to stop: {}. Inspect them with `runs audit`.",
+            runs.join(", ")
+        ),
+    ))
 }
 
 fn check(args: CheckArgs, data_root: &Path) -> Result<(), CliError> {
@@ -334,12 +368,27 @@ fn audit(limit: usize, data_root: &Path) -> Result<(), CliError> {
     print_json(&json!({"audit": entries}))
 }
 
+/// How long a settings command waits for another command's control lock.
+/// Run watchers hold it briefly while they reread the settings.
+const CONTROL_WAIT: Duration = Duration::from_secs(10);
+const CONTROL_POLL: Duration = Duration::from_millis(20);
+
 fn open(data_root: &Path) -> Result<ControlStore, CliError> {
-    ControlStore::open(data_root).map_err(control_error)
+    waiting(|| ControlStore::open(data_root))
 }
 
 fn open_existing(data_root: &Path) -> Result<Option<ControlStore>, CliError> {
-    ControlStore::open_existing(data_root).map_err(control_error)
+    waiting(|| ControlStore::open_existing(data_root))
+}
+
+fn waiting<T>(mut open: impl FnMut() -> Result<T, ControlError>) -> Result<T, CliError> {
+    let until = Instant::now() + CONTROL_WAIT;
+    loop {
+        match open() {
+            Err(ControlError::Busy) if Instant::now() < until => thread::sleep(CONTROL_POLL),
+            result => return result.map_err(control_error),
+        }
+    }
 }
 
 fn parse_workspace_id(value: &str) -> Result<WorkspaceId, CliError> {

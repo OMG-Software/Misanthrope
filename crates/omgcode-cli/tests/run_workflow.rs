@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 
 use support::run_scene::{Scene, error_message, run_json, shell, system_root, wait};
 use support::{
-    HOST_ENV_SENTINEL, HOST_ENV_SENTINEL_VALUE, assert_control_error, assert_error_code,
-    assert_success, json_output, path_arg,
+    CLI_DEADLINE, HOST_ENV_SENTINEL, HOST_ENV_SENTINEL_VALUE, assert_control_error,
+    assert_error_code, assert_success, cli_command, json_output, path_arg, run_with_deadline,
 };
 
 /// Only the journal header: nothing was recorded for refused runs.
@@ -87,6 +87,7 @@ fn a_run_is_confined_and_recorded_without_its_arguments() {
     assert!(!journal.contains(sentinel));
     assert!(!journal.contains("host-data-sentinel"));
     assert_eq!(audit["pending"], Value::Array(Vec::new()));
+    scene.close();
 }
 
 /// Every refusal happens before anything is recorded or started.
@@ -100,6 +101,12 @@ fn refused_runs_record_nothing() {
     assert_error_code(&output, "run");
     assert!(error_message(&output).contains("execute preference is disabled"));
     scene.set_permission("--execute", "true");
+    for flag in ["--read", "--write"] {
+        scene.set_permission(flag, "false");
+        let output = scene.run("system", &[], &echo);
+        assert!(error_message(&output).contains("read and write preferences"));
+        scene.set_permission(flag, "true");
+    }
 
     let output = scene.run("missing", &[], &echo);
     assert!(error_message(&output).contains("not recorded"));
@@ -129,6 +136,7 @@ fn refused_runs_record_nothing() {
     let output = scene.run("system", &["--timeout-secs", "3601"], &echo);
     assert_error_code(&output, "configuration");
     assert_no_runs(&scene);
+    scene.close();
 }
 
 /// Host services need the preference and the per-run flag; the run record
@@ -147,6 +155,7 @@ fn host_services_needs_the_preference_and_the_flag() {
         assert_eq!(run["start"]["unix_sockets"], "host_services");
         assert_eq!(run["finish"]["confinement"]["kind"], "landlock");
     }
+    scene.close();
 }
 
 /// Windows needs a recorded read-write grant on the workspace.
@@ -158,6 +167,7 @@ fn windows_runs_need_the_workspace_grant() {
     let output = scene.run("system", &[], &shell("echo ungranted"));
     assert!(error_message(&output).contains("grant the workspace directory"));
     assert_no_runs(&scene);
+    scene.close();
 }
 
 /// A moved or replaced profile root is stale and refused; it is usable again
@@ -187,6 +197,7 @@ fn stale_profiles_are_refused() {
     fs::remove_dir(&tools).expect("remove replacement");
     fs::rename(scene.path("tools-old"), &tools).expect("restore tools");
     run_json(&scene.run("system", &[], &shell("echo restored")));
+    scene.close();
 }
 
 /// The deadline terminates the whole tree and is recorded.
@@ -202,6 +213,7 @@ fn the_deadline_terminates_and_is_recorded() {
     let run = run_json(&scene.run("system", &["--timeout-secs", "1"], &shell(script)));
     assert_eq!(run["finish"]["result"]["kind"], "deadline_exceeded");
     assert!(started.elapsed() < Duration::from_secs(9));
+    scene.close();
 }
 
 /// Two runs in the same workspace at once both complete and are recorded.
@@ -234,6 +246,7 @@ fn concurrent_runs_complete_and_are_recorded() {
     let audit = scene.audit();
     assert_eq!(audit["entries"].as_array().expect("entries").len(), 5);
     assert_eq!(audit["pending"], Value::Array(Vec::new()));
+    scene.close();
 }
 
 /// A program inside the workspace can run.
@@ -265,6 +278,7 @@ fn workspace_programs_run() {
     } else {
         assert!(stdout.contains("from-workspace"));
     }
+    scene.close();
 }
 
 /// A run whose caller dies stays pending; archiving waits until the
@@ -273,15 +287,11 @@ fn workspace_programs_run() {
 fn an_abandoned_run_is_pending_until_acknowledged() {
     let scene = Scene::new();
     assert_success(&scene.add_profile("system", &[]));
-    #[cfg(target_os = "linux")]
-    let script = "exec sleep 30";
-    #[cfg(windows)]
-    let script = "for /l %i in (1,0,2) do @rem";
     let mut child = scene
-        .command(&[], &shell(script))
+        .command(&[], &shell(LONG_RUN))
         .spawn()
         .expect("spawn run");
-    let run_id = wait_for_pending(&scene);
+    let run_id = wait_for_start(&scene);
     child.kill().expect("kill the CLI");
     child.wait().expect("reap the CLI");
     let archive = scene.path("archive");
@@ -297,6 +307,27 @@ fn an_abandoned_run_is_pending_until_acknowledged() {
         scene.audit()["entries"].as_array().expect("entries").len(),
         1
     );
+    // A bare file name names a file in the current directory.
+    let name = fs::read_dir(&archive)
+        .expect("archive listing")
+        .next()
+        .expect("archived journal")
+        .expect("archive entry")
+        .file_name();
+    let name = name.to_str().expect("archive name");
+    let mut command = cli_command(&scene.data, &["runs", "audit", "--archive", name]);
+    command.current_dir(&archive);
+    let output = run_with_deadline(command, CLI_DEADLINE).expect("run the CLI");
+    assert!(!output.timed_out);
+    assert_success(&output.output);
+    assert_eq!(
+        json_output(&output.output)["entries"]
+            .as_array()
+            .expect("archived entries")
+            .len(),
+        3
+    );
+    scene.close();
 }
 
 /// An interrupt cancels the run, terminates the tree, and is recorded.
@@ -306,10 +337,10 @@ fn an_interrupt_cancels_and_records_the_run() {
     let scene = Scene::new();
     assert_success(&scene.add_profile("system", &[]));
     let child = scene
-        .command(&[], &shell("sleep 30 & sleep 30"))
+        .command(&[], &shell(LONG_RUN))
         .spawn()
         .expect("spawn run");
-    wait_for_pending(&scene);
+    wait_for_start(&scene);
     let status = Command::new("kill")
         .args(["-INT", &child.id().to_string()])
         .status()
@@ -318,6 +349,7 @@ fn an_interrupt_cancels_and_records_the_run() {
     let run = run_json(&wait(child, Duration::from_secs(20)));
     assert_eq!(run["finish"]["result"]["kind"], "cancelled");
     assert_eq!(scene.audit()["pending"], Value::Array(Vec::new()));
+    scene.close();
 }
 
 /// Profiles are added, shown, listed, and removed with revisions.
@@ -359,18 +391,96 @@ fn profiles_are_managed_with_revisions() {
         &scene.cli(&["workspace", "profile-show", "system"]),
         "control",
     );
+    scene.close();
 }
 
-fn wait_for_pending(scene: &Scene) -> String {
+/// A run that writes `started.txt` once its tree is running, then runs until
+/// it is stopped.
+#[cfg(target_os = "linux")]
+const LONG_RUN: &str = "sleep 30 & echo started > started.txt; wait";
+#[cfg(windows)]
+const LONG_RUN: &str = "echo started>started.txt& for /l %i in (1,0,2) do @rem";
+
+/// Wait until the run's program wrote its start marker, and return the run
+/// identifier. The marker proves the tree is running, not only recorded.
+fn wait_for_start(scene: &Scene) -> String {
+    let marker = scene.workspace.join("started.txt");
     let until = Instant::now() + Duration::from_secs(20);
-    loop {
-        let audit = scene.audit();
-        if let Some(run) = audit["pending"].get(0) {
-            // Give the runner a moment to start the program after the intent.
-            thread::sleep(Duration::from_millis(500));
-            return run["run_id"].as_str().expect("run id").to_owned();
-        }
-        assert!(Instant::now() < until, "the run never became pending");
+    while !marker.exists() {
+        assert!(Instant::now() < until, "the run never started");
         thread::sleep(Duration::from_millis(50));
     }
+    let audit = scene.audit();
+    audit["pending"][0]["run_id"]
+        .as_str()
+        .expect("the started run is pending")
+        .to_owned()
+}
+
+/// The newest journal entry's recorded result.
+fn last_result(scene: &Scene) -> Value {
+    let audit = scene.audit();
+    let entries = audit["entries"].as_array().expect("entries");
+    entries.last().expect("an entry")["action"]["payload"]["finish"]["result"].clone()
+}
+
+/// Narrowing a preference stops a live run before the settings command
+/// reports success, and a live run cannot be acknowledged meanwhile.
+#[test]
+fn narrowing_settings_stops_a_live_run_before_reporting() {
+    let scene = Scene::new();
+    assert_success(&scene.add_profile("system", &[]));
+    let child = scene
+        .command(&[], &shell(LONG_RUN))
+        .spawn()
+        .expect("spawn run");
+    let run_id = wait_for_start(&scene);
+    let output = scene.cli(&["runs", "acknowledge", &run_id]);
+    assert!(error_message(&output).contains("still live"));
+    // A change that withdraws nothing leaves the run going.
+    scene.set_permission("--model-tools", "true");
+    assert_eq!(scene.audit()["pending"][0]["run_id"], run_id.as_str());
+    scene.set_permission("--execute", "false");
+    // The command returned only after the outcome was recorded.
+    assert_eq!(scene.audit()["pending"], Value::Array(Vec::new()));
+    assert_eq!(last_result(&scene)["kind"], "revoked");
+    let run = run_json(&wait(child, Duration::from_secs(30)));
+    assert_eq!(run["finish"]["result"]["kind"], "revoked");
+    assert!(
+        run["revoked_because"]
+            .as_str()
+            .expect("reason")
+            .contains("execute")
+    );
+    scene.close();
+}
+
+/// Removing the run's profile stops the run before the command reports.
+#[test]
+fn removing_the_profile_stops_a_live_run() {
+    let scene = Scene::new();
+    assert_success(&scene.add_profile("system", &[]));
+    let child = scene
+        .command(&[], &shell(LONG_RUN))
+        .spawn()
+        .expect("spawn run");
+    wait_for_start(&scene);
+    let revision = scene.revision().to_string();
+    assert_success(&scene.cli(&[
+        "workspace",
+        "profile-remove",
+        "system",
+        "--revision",
+        &revision,
+    ]));
+    assert_eq!(scene.audit()["pending"], Value::Array(Vec::new()));
+    let run = run_json(&wait(child, Duration::from_secs(30)));
+    assert_eq!(run["finish"]["result"]["kind"], "revoked");
+    assert!(
+        run["revoked_because"]
+            .as_str()
+            .expect("reason")
+            .contains("profile")
+    );
+    scene.close();
 }

@@ -103,7 +103,8 @@ Facts observed during the work, on Windows 11 build 26300 and WSL 6.6:
     elapsed time, and the byte counts.
   - **Pending runs:** a run with no outcome, or with unconfirmed cleanup,
     stays pending. `runs acknowledge` clears it. That claims no outcome and
-    retries nothing.
+    retries nothing. A run whose supervising process still holds its owner
+    lock, `run-owners/<run id>.lock`, cannot be acknowledged.
   - **Limits:** 16 pending runs, 8 MiB, 4,096 events, and 64 KiB per event.
     Each append that adds work must leave room for every pending run's
     remaining events.
@@ -113,7 +114,16 @@ Facts observed during the work, on Windows 11 build 26300 and WSL 6.6:
   host are all required. The mode is recorded in `run_started`.
 - **Locks:** the control and run journal locks are held only while checking
   and appending, never while the program runs. Concurrent runs and settings
-  commands can proceed. A settings change applies to later runs.
+  commands can proceed.
+- **Preferences:** a run needs `execute`, `read`, and `write`, because it
+  writes inside the workspace.
+- **Revocation:** a watcher in the running process rereads the settings after
+  each control journal change. When they no longer allow the run, it stops the
+  tree and records `revoked`. Settings commands that can withdraw access wait
+  for the affected runs to stop and record their outcome, and fail if one does
+  not within 60 seconds. This follows the rule that narrowing permissions
+  stops tasks that keep revoked access, and that revocation is reported only
+  after cleanup is observed.
 - **Interrupts:** the CLI turns `SIGINT` and `SIGTERM` on Linux, and Ctrl+C
   and Ctrl+Break on Windows, into cancellation. The tree is terminated and the
   outcome is recorded as `cancelled`.
@@ -127,6 +137,12 @@ Facts observed during the work, on Windows 11 build 26300 and WSL 6.6:
 - **Automatic toolchain discovery:** convenient, but it would run probes and
   widen access from host state the operator did not review. The user chose
   operator-declared profiles.
+- **Applying settings changes only to later runs:** simpler, but a running
+  tree would keep access the operator had withdrawn. Rejected in review.
+- **Signalling runs directly from the settings command:** needs a channel
+  between processes and a list of live runs that can go stale. The watcher
+  reads the same journal that records the change, and the owner lock shows
+  which runs are live.
 - **Recording runs in the control journal:** one log, but run traffic would
   use settings capacity and its lock. The user chose a separate journal, as the
   file operation journal already does.

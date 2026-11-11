@@ -210,7 +210,8 @@ omgcode runs archive --archive-dir <existing dir>
 - the recorded `start` and `finish`;
 - `stdout` and `stderr`, each as text with `utf8`, `total_bytes`, and
   `truncated`;
-- on Linux, `scratch_removed`.
+- on Linux, `scratch_removed`;
+- for a `revoked` run, `revoked_because`.
 
 The command succeeds whenever the run was supervised and its outcome recorded,
 whatever the program's exit code. Read `run.finish.result`. A failure prints a
@@ -220,7 +221,9 @@ JSON error with code `run`.
 
 While holding the control journal lock, `run` checks:
 
-1. The workspace is registered and its live `execute` preference is enabled.
+1. The workspace is registered, and its live `execute`, `read`, and `write`
+   preferences are enabled. A run writes inside the workspace, so it needs all
+   three.
 2. For `--host-services`: the host is Linux, and the live `host_services`
    preference is enabled.
 3. The profile exists and was declared on this platform. Each root and `PATH`
@@ -240,9 +243,37 @@ While holding the control journal lock, `run` checks:
 6. On Windows, the workspace has an active read-write container grant, and no
    grant of the workspace is `pending` or `revoking`.
 
-A refused run records nothing. Then the intent is synced to the run journal,
-the locks are released, and the program runs. Settings changed during a run
-apply to later runs.
+A refused run records nothing. Then the run takes its owner lock, the intent
+is synced to the run journal, the control and journal locks are released, and
+the program runs.
+
+### Settings changes during a run
+
+A run's watcher rereads the settings each time the control journal changes,
+and checks the run against them:
+
+- the workspace is still registered and inside the development root;
+- `execute`, `read`, and `write` are still enabled, and `host_services` for a
+  run that selected host services;
+- the run's profile still exists with the same identity;
+- on Windows, the workspace still has its active read-write grant, and no
+  grant of the workspace is `revoking`. A `pending` grant only adds access, so
+  it does not stop a run.
+
+When a check fails, or the settings cannot be read, the watcher stops the whole
+tree. The outcome is recorded as `revoked`, and the report gives the reason in
+`revoked_because`.
+
+`workspace permissions`, `profile-remove`, `container-revoke`, and `set-root`
+record their change first. Then they release the control lock and wait up to
+60 seconds for every in-progress run that the new settings no longer allow.
+A run counts as stopped only when its owner lock is free and its outcome is
+recorded. If any run is still pending after the wait, the command fails with
+code `run` and lists those runs; the change itself stays recorded. Inspect them
+with `runs audit`. A change that withdraws nothing returns at once.
+
+Settings commands wait up to 10 seconds for another command's control lock,
+because run watchers hold it briefly while they reread the settings.
 
 ### Environment and confinement
 
@@ -260,6 +291,8 @@ no grant; others need a read-execute [container grant](#container-grants).
 
 `SIGINT` and `SIGTERM` on Linux, and Ctrl+C and Ctrl+Break on Windows, cancel
 the run. The tree is terminated and the outcome is recorded as `cancelled`.
+The interrupt watcher belongs to the run and is stopped and joined when it
+ends.
 
 ### Toolchain profiles
 
@@ -308,7 +341,7 @@ sequence, a UTC timestamp, and a tagged `action`:
 | --- | --- |
 | `created` | Header |
 | `run_started` | Synced before the program starts. Records the run ID, workspace, settings revision, profile ID, name, and revision, program path, argument count, `arguments_sha256`, working directory, and socket mode. |
-| `run_finished` | Records the result (`exited`, `signalled`, `deadline_exceeded`, `cancelled`, `not_started`, `supervision_failed`, or `cleanup_unconfirmed`), the applied confinement, the elapsed time, and the output byte counts |
+| `run_finished` | Records the result (`exited`, `signalled`, `deadline_exceeded`, `cancelled`, `revoked`, `not_started`, `supervision_failed`, or `cleanup_unconfirmed`), the applied confinement, the elapsed time, and the output byte counts |
 | `run_acknowledged` | The operator cleared a pending run |
 
 How it works:
@@ -321,6 +354,9 @@ How it works:
   - `runs audit` lists pending runs.
   - `runs acknowledge` clears one. That claims no outcome and retries
     nothing. On Linux it also removes a leftover scratch directory.
+  - A run whose supervising process is still live cannot be acknowledged.
+    That process holds `<data-dir>/run-owners/<run id>.lock` from before the
+    intent is recorded until the outcome is recorded.
 - **Limits:** at most 16 pending runs; 8 MiB, 4,096 events, and 64 KiB per
   event.
 - **Reserve:** a new run must leave room for every pending run's remaining
@@ -328,7 +364,8 @@ How it works:
   acknowledgement.
 - **Archiving:** `runs archive` moves a journal with no pending runs into an
   existing directory and reports its SHA-256. A new journal starts on the next
-  run. `runs audit --archive` reads an archived file.
+  run. `runs audit --archive` reads an archived file. A bare file name names
+  a file in the current directory.
 - **Locking:** the journal lock is held only while appending. A busy lock is
   retried for up to 10 seconds.
 

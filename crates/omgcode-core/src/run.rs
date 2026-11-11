@@ -8,11 +8,13 @@
 //! run. No model tool calls this. See `docs/execution.md` and ADR-0030.
 
 use std::ffi::OsString;
-use std::fs;
+use std::fs::{self, File};
 use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use omgcode_platform::broker::RelativePath;
 use omgcode_platform::process::{
@@ -24,21 +26,28 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::control::{ControlError, ControlStore, ProfilePlatform, ToolchainProfile};
-use crate::policy::WorkspaceId;
+use crate::policy::{PermissionSet, WorkspaceId};
 use crate::run_journal::{
     ConfinementRecord, PendingRun, RunFinish, RunJournal, RunJournalError, RunResult, RunStart,
     SocketMode, arguments_digest, describe,
 };
 use crate::session::{NativePath, SessionError};
+use crate::storage::{self, StorageError};
 use crate::workspace::DirectoryRecord;
 
-pub use omgcode_platform::interrupt::cancel_on_interrupt;
+pub use omgcode_platform::interrupt::{InterruptWatch, cancel_on_interrupt};
 pub use omgcode_platform::process::{CancelSignal, ProcessLimits};
 pub use omgcode_platform::process::{MAX_CAPTURE_BYTES, MAX_DEADLINE};
 
 /// How long to wait for another command's hold on the control journal.
 const CONTROL_WAIT: Duration = Duration::from_secs(10);
 const CONTROL_POLL: Duration = Duration::from_millis(20);
+/// How often a run's watcher looks for a settings change.
+const WATCH_POLL: Duration = Duration::from_millis(50);
+/// How long a settings command waits for the runs it affects to stop.
+pub const REVOCATION_WAIT: Duration = Duration::from_secs(60);
+/// Directory of per-run owner locks inside the run journal's directory.
+const OWNER_DIRECTORY: &str = "run-owners";
 /// Linux devices a run may read. `/dev/null` is also writable.
 #[cfg(target_os = "linux")]
 const READ_ONLY_DEVICES: [&str; 3] = ["/dev/zero", "/dev/random", "/dev/urandom"];
@@ -102,6 +111,19 @@ pub struct RunReport {
     /// Whether the Linux per-run scratch directory was removed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scratch_removed: Option<bool>,
+    /// Why a settings change stopped the run, when it did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revoked_because: Option<&'static str>,
+}
+
+/// Runs that a settings change no longer allowed.
+#[derive(Debug, Default, Serialize)]
+pub struct WithdrawnRuns {
+    /// Runs that stopped and whose outcome was recorded.
+    pub stopped: Vec<Uuid>,
+    /// Runs still pending after the wait: their supervisor is still live,
+    /// cleanup was unconfirmed, or the supervisor ended without an outcome.
+    pub unconfirmed: Vec<Uuid>,
 }
 
 /// Recent run records for trusted inspection.
@@ -136,6 +158,10 @@ pub enum RunError {
     /// The settings do not allow this run. Nothing was recorded.
     #[error("run refused: {0}")]
     Refused(&'static str),
+    /// The run's supervising process is still live, so its record cannot be
+    /// acknowledged yet.
+    #[error("run {0} is still live; stop it before acknowledging it")]
+    Live(Uuid),
     /// A profile directory was moved, replaced, or removed. Nothing was
     /// recorded. Remove the profile and add it again.
     #[error("toolchain profile is stale: {0}")]
@@ -179,6 +205,12 @@ pub enum RunError {
     },
 }
 
+impl From<StorageError> for RunError {
+    fn from(error: StorageError) -> Self {
+        Self::Journal(error.into())
+    }
+}
+
 impl From<SessionError> for RunError {
     fn from(error: SessionError) -> Self {
         Self::Io(io::Error::new(
@@ -220,12 +252,76 @@ impl Drop for Scratch {
     }
 }
 
+/// The lock a run's supervising process holds from before its intent is
+/// recorded until its outcome is recorded. Other commands use it to tell a
+/// live run from one whose supervisor ended.
+struct OwnerLock {
+    file: Option<File>,
+    path: PathBuf,
+}
+
+impl OwnerLock {
+    fn acquire(journal_root: &Path, run_id: Uuid) -> Result<Self, RunError> {
+        storage::create_private_directories(&journal_root.join(OWNER_DIRECTORY))?;
+        let path = owner_path(journal_root, run_id);
+        let file = storage::open_locked_file(&path, true)?;
+        Ok(Self {
+            file: Some(file),
+            path,
+        })
+    }
+
+    /// Release the lock, then remove its file. A file left behind is
+    /// unlocked, so it never marks a run as live.
+    fn release(mut self) -> io::Result<()> {
+        drop(self.file.take());
+        fs::remove_file(&self.path)
+    }
+}
+
+impl Drop for OwnerLock {
+    fn drop(&mut self) {
+        // Fallback on an early return: closing the handle releases the lock,
+        // and removal is best effort for the reason given on `release`.
+        if self.file.take().is_some() {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn owner_path(journal_root: &Path, run_id: Uuid) -> PathBuf {
+    journal_root
+        .join(OWNER_DIRECTORY)
+        .join(format!("{run_id}.lock"))
+}
+
+/// The state of a run's supervising process.
+enum Owner {
+    /// It still holds its lock.
+    Live,
+    /// It released its lock, which is now held here, or left no lock file.
+    Ended(Option<File>),
+}
+
+fn probe_owner(journal_root: &Path, run_id: Uuid) -> Result<Owner, RunError> {
+    match storage::open_locked_file(&owner_path(journal_root, run_id), false) {
+        Ok(file) => Ok(Owner::Ended(Some(file))),
+        Err(StorageError::Busy) => Ok(Owner::Live),
+        Err(StorageError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+            Ok(Owner::Ended(None))
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 /// Check, record, run, and record the outcome of one command.
 ///
 /// The control and run journal locks are held only while checking and while
 /// appending, never while the program runs, so concurrent runs and settings
-/// commands can proceed. Settings changed during a run apply to later runs.
-/// `cancel` terminates the whole tree; the outcome is then `cancelled`.
+/// commands can proceed. While the program runs, a watcher rereads the
+/// settings after each change. When they no longer allow the run, it stops
+/// the whole tree and the outcome is `revoked`. `cancel` terminates the whole
+/// tree; the outcome is then `cancelled`.
 pub fn run(
     data_root: &Path,
     request: &RunRequest,
@@ -234,23 +330,45 @@ pub fn run(
     let platform = ProfilePlatform::current().ok_or(RunError::Refused(
         "trusted runs exist only on Linux and Windows",
     ))?;
-    let (journal_root, store_id, mut prepared) = {
+    let control_path = ControlStore::journal_path(data_root);
+    let (journal_root, store_id, mut prepared, owner, baseline) = {
         let control = open_control(data_root)?;
         let (journal_root, store_id) = control.file_audit_context()?;
         let prepared = prepare(&control, request, platform, &journal_root)?;
+        // Taken under the control lock, so every later change is seen.
+        let baseline = stamp(&control_path)?;
+        let owner = OwnerLock::acquire(&journal_root, prepared.start.run_id)?;
         let mut journal = RunJournal::open(&journal_root, store_id)?;
         journal.start(prepared.start.clone())?;
-        (journal_root, store_id, prepared)
+        (journal_root, store_id, prepared, owner, baseline)
     };
     let run_id = prepared.start.run_id;
-    let result = process::run_confined(
-        &prepared.spec,
-        &prepared.confinement,
-        &request.limits,
-        cancel,
-    );
+    let stop = CancelSignal::new();
+    let done = AtomicBool::new(false);
+    let revoked = OnceLock::new();
+    let result = thread::scope(|scope| {
+        let watch = Watch {
+            data_root,
+            control_path: &control_path,
+            start: &prepared.start,
+            caller: cancel,
+            stop: &stop,
+            done: &done,
+            revoked: &revoked,
+        };
+        scope.spawn(move || watch.run(baseline));
+        let result = process::run_confined(
+            &prepared.spec,
+            &prepared.confinement,
+            &request.limits,
+            &stop,
+        );
+        done.store(true, Ordering::SeqCst);
+        result
+    });
+    let revoked_because = revoked.get().copied();
     let scratch_removed = prepared.scratch.as_mut().map(Scratch::remove);
-    let (finish, outcome, failure) = settle(run_id, result);
+    let (finish, outcome, failure) = settle(run_id, result, revoked_because.is_some());
     let report = RunReport {
         start: prepared.start,
         finish,
@@ -267,9 +385,13 @@ pub fn run(
                 .unwrap_or_default(),
         ),
         scratch_removed,
+        revoked_because,
     };
     let recorded = RunJournal::open(&journal_root, store_id)
         .and_then(|mut journal| journal.finish(run_id, finish));
+    // Only after the outcome is recorded may other commands treat the run
+    // as ended. A failed removal leaves an unlocked file, which is harmless.
+    let _ = owner.release();
     if let Err(source) = recorded {
         return Err(RunError::OutcomeNotRecorded {
             report: Box::new(report),
@@ -282,10 +404,204 @@ pub fn run(
     }
 }
 
+/// The size and modification time of the control journal.
+type Stamp = (u64, Option<SystemTime>);
+
+fn stamp(path: &Path) -> io::Result<Stamp> {
+    let metadata = fs::symlink_metadata(path)?;
+    Ok((metadata.len(), metadata.modified().ok()))
+}
+
+/// Watches one run: forwards the caller's cancellation, and stops the run
+/// when the recorded settings no longer allow it.
+struct Watch<'a> {
+    data_root: &'a Path,
+    control_path: &'a Path,
+    start: &'a RunStart,
+    caller: &'a CancelSignal,
+    stop: &'a CancelSignal,
+    done: &'a AtomicBool,
+    revoked: &'a OnceLock<&'static str>,
+}
+
+impl Watch<'_> {
+    fn run(&self, mut seen: Stamp) {
+        while !self.done.load(Ordering::SeqCst) {
+            if self.caller.is_cancelled() {
+                self.stop.cancel();
+            }
+            if let Some(reason) = self.recheck(&mut seen) {
+                let _ = self.revoked.set(reason);
+                self.stop.cancel();
+                return;
+            }
+            thread::sleep(WATCH_POLL);
+        }
+    }
+
+    /// Reread the settings when the journal changed. Settings that cannot be
+    /// read withdraw the run; another command's lock is retried next poll.
+    fn recheck(&self, seen: &mut Stamp) -> Option<&'static str> {
+        let Ok(current) = stamp(self.control_path) else {
+            return Some("the settings could not be read");
+        };
+        if current == *seen {
+            return None;
+        }
+        match ControlStore::open_existing(self.data_root) {
+            Ok(Some(control)) => {
+                *seen = current;
+                withdrawn(&control, self.start)
+            }
+            Ok(None) => Some("the settings were removed"),
+            Err(ControlError::Busy) => None,
+            Err(_) => Some("the settings could not be read"),
+        }
+    }
+}
+
+/// Why the recorded settings no longer allow a started run, if they don't.
+/// Settings commands and run watchers use this same rule.
+fn withdrawn(control: &ControlStore, start: &RunStart) -> Option<&'static str> {
+    let Some(registration) = control.workspace(start.workspace_id) else {
+        return Some("the workspace is no longer registered");
+    };
+    if let Err(reason) = permitted(
+        registration.permissions(),
+        start.unix_sockets == SocketMode::HostServices,
+    ) {
+        return Some(reason);
+    }
+    match control.profile(&start.profile_name) {
+        Some(status) if status.profile().id() == start.profile_id => {}
+        _ => return Some("the toolchain profile was removed"),
+    }
+    let Ok(scope) = control.file_scope(start.workspace_id) else {
+        return Some("the workspace is outside the development root");
+    };
+    workspace_access(control, start.workspace_id, &scope.workspace, true).err()
+}
+
+/// The preferences a run needs for its whole life. A run writes inside the
+/// workspace, so it needs `read` and `write` as well as `execute`.
+fn permitted(permissions: PermissionSet, host_services: bool) -> Result<(), &'static str> {
+    if !permissions.execute {
+        return Err("the workspace execute preference is disabled");
+    }
+    if !permissions.read || !permissions.write {
+        return Err("the workspace read and write preferences must both be enabled");
+    }
+    if host_services && !permissions.host_services {
+        return Err("the workspace host_services preference is disabled");
+    }
+    Ok(())
+}
+
+/// The workspace must hold an active read-write grant. Before a run starts,
+/// no grant of the workspace may be pending or being revoked. During a run,
+/// a pending grant only adds access, so only a revocation withdraws it.
+#[cfg(windows)]
+fn workspace_access(
+    control: &ControlStore,
+    workspace_id: WorkspaceId,
+    workspace: &DirectoryRecord,
+    running: bool,
+) -> Result<(), &'static str> {
+    use crate::control::{ContainerGrantAccess, ContainerGrantState};
+
+    let grants: Vec<_> = control
+        .container_grants()
+        .iter()
+        .filter(|status| status.grant().workspace_id() == workspace_id)
+        .collect();
+    if grants.iter().any(|status| match status.state() {
+        ContainerGrantState::Active => false,
+        ContainerGrantState::Pending => !running,
+        ContainerGrantState::Revoking => true,
+    }) {
+        return Err(if running {
+            "a container grant of this workspace is being revoked"
+        } else {
+            "a container grant of this workspace is pending or being revoked; revoke it first"
+        });
+    }
+    if !grants.iter().any(|status| {
+        status.state() == ContainerGrantState::Active
+            && status.grant().access() == ContainerGrantAccess::ReadWrite
+            && status.grant().directory().same_directory(workspace)
+    }) {
+        return Err(if running {
+            "the workspace read-write container grant was revoked"
+        } else {
+            "grant the workspace directory read-write to its container first"
+        });
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+#[allow(clippy::unnecessary_wraps)]
+fn workspace_access(
+    _control: &ControlStore,
+    _workspace_id: WorkspaceId,
+    _workspace: &DirectoryRecord,
+    _running: bool,
+) -> Result<(), &'static str> {
+    Ok(())
+}
+
+/// Wait for every in-progress run that the recorded settings no longer allow
+/// to stop and record its outcome.
+///
+/// Settings commands that can withdraw access call this after their change
+/// is recorded and their control lock is released, so each run's watcher can
+/// read the change. Runs still pending when `wait` ends are reported as
+/// unconfirmed, and the caller must not report the change as complete.
+pub fn stop_withdrawn_runs(data_root: &Path, wait: Duration) -> Result<WithdrawnRuns, RunError> {
+    let (journal_root, store_id, affected) = {
+        let control = open_control(data_root)?;
+        let (journal_root, store_id) = control.file_audit_context()?;
+        let Some(journal) = RunJournal::open_existing(&journal_root, store_id)? else {
+            return Ok(WithdrawnRuns::default());
+        };
+        let affected: Vec<Uuid> = journal
+            .in_progress()
+            .into_iter()
+            .filter(|start| withdrawn(&control, start).is_some())
+            .map(|start| start.run_id)
+            .collect();
+        (journal_root, store_id, affected)
+    };
+    if affected.is_empty() {
+        return Ok(WithdrawnRuns::default());
+    }
+    let until = Instant::now() + wait;
+    for run_id in &affected {
+        // A run still live at the deadline stays pending and is reported below.
+        while matches!(probe_owner(&journal_root, *run_id)?, Owner::Live) && Instant::now() < until
+        {
+            thread::sleep(CONTROL_POLL);
+        }
+    }
+    let journal = RunJournal::open(&journal_root, store_id)?;
+    let (unconfirmed, stopped) = affected.into_iter().partition(|run_id| {
+        journal
+            .pending()
+            .iter()
+            .any(|pending| pending.run_id == *run_id)
+    });
+    Ok(WithdrawnRuns {
+        stopped,
+        unconfirmed,
+    })
+}
+
 /// Map the runner's result to a recorded outcome and, for failures, an error.
+/// A tree stopped because access was withdrawn is recorded as `revoked`.
 fn settle(
     run_id: Uuid,
     result: Result<ProcessOutcome, ProcessError>,
+    revoked: bool,
 ) -> (RunFinish, Option<ProcessOutcome>, Option<RunError>) {
     match result {
         Ok(outcome) => {
@@ -294,6 +610,7 @@ fn settle(
                     Termination::Exited { code } => RunResult::Exited { code },
                     Termination::Signalled { signal } => RunResult::Signalled { signal },
                     Termination::DeadlineExceeded => RunResult::DeadlineExceeded,
+                    Termination::Cancelled if revoked => RunResult::Revoked,
                     Termination::Cancelled => RunResult::Cancelled,
                 },
                 confinement: Some(record_confinement(outcome.confinement)),
@@ -368,23 +685,12 @@ fn prepare(
         .ok_or(ControlError::UnknownWorkspace)?;
     let permissions = registration.permissions();
     let scope = control.file_scope(request.workspace_id)?;
-    if !permissions.execute {
+    if request.host_services && platform == ProfilePlatform::Windows {
         return Err(RunError::Refused(
-            "the workspace execute preference is disabled",
+            "host-service access is not available on Windows",
         ));
     }
-    if request.host_services {
-        if platform == ProfilePlatform::Windows {
-            return Err(RunError::Refused(
-                "host-service access is not available on Windows",
-            ));
-        }
-        if !permissions.host_services {
-            return Err(RunError::Refused(
-                "the workspace host_services preference is disabled",
-            ));
-        }
-    }
+    permitted(permissions, request.host_services).map_err(RunError::Refused)?;
     let status = control
         .profile(&request.profile)
         .ok_or(ControlError::UnknownProfile)?;
@@ -632,29 +938,10 @@ fn platform_setup(
     _run_id: Uuid,
     environment: &mut Vec<(OsString, OsString)>,
 ) -> Result<(Confinement, Option<Scratch>), RunError> {
-    use crate::control::{ContainerGrantAccess, ContainerGrantState, container_name};
+    use crate::control::container_name;
 
-    let grants: Vec<_> = control
-        .container_grants()
-        .iter()
-        .filter(|status| status.grant().workspace_id() == request.workspace_id)
-        .collect();
-    if grants
-        .iter()
-        .any(|status| status.state() != ContainerGrantState::Active)
-    {
-        return Err(RunError::Refused(
-            "a container grant of this workspace is pending or being revoked; revoke it first",
-        ));
-    }
-    if !grants.iter().any(|status| {
-        status.grant().access() == ContainerGrantAccess::ReadWrite
-            && status.grant().directory().same_directory(workspace_record)
-    }) {
-        return Err(RunError::Refused(
-            "grant the workspace directory read-write to its container first",
-        ));
-    }
+    workspace_access(control, request.workspace_id, workspace_record, false)
+        .map_err(RunError::Refused)?;
     let name = container_name(request.workspace_id)?;
     let home = native_form(omgcode_platform::container::profile_folder(&name)?)?;
     let local = std::env::var_os("LOCALAPPDATA").ok_or(RunError::Refused(
@@ -756,9 +1043,12 @@ pub fn audit_archive(
 ) -> Result<RunAuditView, RunError> {
     let control = open_control(data_root)?;
     let (_, store_id) = control.file_audit_context()?;
-    let parent = path
-        .parent()
-        .ok_or(RunError::Refused("the archive needs a parent directory"))?;
+    // A bare file name names a file in the current directory.
+    let parent = match path.parent() {
+        Some(parent) if parent.as_os_str().is_empty() => Path::new("."),
+        Some(parent) => parent,
+        None => return Err(RunError::Refused("the archive needs a parent directory")),
+    };
     let directory = control.file_archive_directory(parent)?;
     let name = path
         .file_name()
@@ -772,12 +1062,22 @@ pub fn audit_archive(
 
 /// Clear a pending run after inspection. This retries nothing.
 ///
-/// A Linux run whose caller ended early can leave its scratch directory;
-/// it is removed here. The result says whether one was found and removed.
+/// A run whose supervising process is still live is refused: its outcome is
+/// still to come. A Linux run whose caller ended early can leave its scratch
+/// directory; it is removed here. The result says whether one was found and
+/// removed.
 pub fn acknowledge(data_root: &Path, run_id: Uuid) -> Result<Option<bool>, RunError> {
     let control = open_control(data_root)?;
     let (root, store_id) = control.file_audit_context()?;
+    // The released owner lock stays held here until the record is written.
+    let Owner::Ended(owner) = probe_owner(&root, run_id)? else {
+        return Err(RunError::Live(run_id));
+    };
     RunJournal::open(&root, store_id)?.acknowledge(run_id)?;
+    if owner.is_some() {
+        drop(owner);
+        let _ = fs::remove_file(owner_path(&root, run_id));
+    }
     let scratch = root.join("run-scratch").join(run_id.to_string());
     Ok(match fs::symlink_metadata(&scratch) {
         Ok(metadata) if metadata.is_dir() => Some(fs::remove_dir_all(&scratch).is_ok()),
@@ -797,4 +1097,132 @@ pub fn archive(data_root: &Path, archive_directory: &Path) -> Result<RunsArchive
         sha256: archived.sha256,
         event_count: archived.event_count,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::run_journal::arguments_digest;
+
+    /// A registered workspace whose settings allow runs, and the journal
+    /// root the runs use.
+    fn store(directory: &Path) -> (PathBuf, WorkspaceId, PathBuf, Uuid) {
+        let data = directory.join("data");
+        let root = directory.join("dev");
+        let workspace = root.join("work");
+        fs::create_dir_all(&workspace).expect("workspace");
+        let mut control = ControlStore::open(&data).expect("control store");
+        control.set_development_root(&root, 0).expect("root");
+        let id = control
+            .register_workspace(&workspace, control.revision())
+            .expect("register")
+            .id();
+        let permissions = PermissionSet {
+            execute: true,
+            ..PermissionSet::default()
+        };
+        control
+            .set_permissions(id, permissions, control.revision())
+            .expect("permissions");
+        let (journal_root, store_id) = control.file_audit_context().expect("context");
+        (data, id, journal_root, store_id)
+    }
+
+    /// A run of a profile that was never recorded, so the settings no longer
+    /// allow it.
+    fn withdrawn_start(workspace_id: WorkspaceId) -> RunStart {
+        RunStart {
+            run_id: Uuid::new_v4(),
+            workspace_id,
+            settings_revision: 3,
+            profile_id: Uuid::new_v4(),
+            profile_name: "removed".into(),
+            profile_revision: 2,
+            program: NativePath::from_path(&std::env::temp_dir().join("tool"))
+                .expect("native path"),
+            argument_count: 0,
+            arguments_sha256: arguments_digest(&[]),
+            working_directory: NativePath::from_path(&std::env::temp_dir()).expect("native path"),
+            unix_sockets: SocketMode::PairsOnly,
+        }
+    }
+
+    /// A withdrawn run is reported as unconfirmed while its supervisor is
+    /// live and while its outcome is missing, and drops out once recorded.
+    #[test]
+    fn withdrawn_runs_are_confirmed_only_when_their_outcome_is_recorded() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (data, workspace_id, journal_root, store_id) = store(directory.path());
+        let start = withdrawn_start(workspace_id);
+        let run_id = start.run_id;
+        let owner = OwnerLock::acquire(&journal_root, run_id).expect("owner lock");
+        RunJournal::open(&journal_root, store_id)
+            .expect("journal")
+            .start(start)
+            .expect("start");
+
+        // The supervisor still holds its lock, so the wait ends unconfirmed.
+        let live = stop_withdrawn_runs(&data, Duration::from_millis(100)).expect("check");
+        assert_eq!(live.unconfirmed, vec![run_id]);
+        assert!(live.stopped.is_empty());
+        let error = acknowledge(&data, run_id).expect_err("a live run");
+        assert!(matches!(error, RunError::Live(id) if id == run_id));
+
+        // A supervisor that ended without an outcome is not a stopped run.
+        drop(owner);
+        let abandoned = stop_withdrawn_runs(&data, Duration::from_millis(100)).expect("check");
+        assert_eq!(abandoned.unconfirmed, vec![run_id]);
+
+        let mut journal = RunJournal::open(&journal_root, store_id).expect("journal");
+        journal
+            .finish(
+                run_id,
+                RunFinish {
+                    result: RunResult::Revoked,
+                    confinement: Some(platform_confinement()),
+                    elapsed_ms: 1,
+                    stdout_bytes: 0,
+                    stderr_bytes: 0,
+                },
+            )
+            .expect("finish");
+        drop(journal);
+        let recorded = stop_withdrawn_runs(&data, Duration::from_millis(100)).expect("check");
+        assert!(recorded.unconfirmed.is_empty() && recorded.stopped.is_empty());
+    }
+
+    /// A live run that the settings still allow is not waited for. Linux
+    /// only: on Windows the run would also need a real container grant on
+    /// the workspace, which the CLI workflow tests cover.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn allowed_runs_are_not_waited_for() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (data, workspace_id, journal_root, store_id) = store(directory.path());
+        let tools = directory.path().join("tools");
+        fs::create_dir(&tools).expect("tools");
+        let mut control = ControlStore::open(&data).expect("control store");
+        let profile = control
+            .add_profile(
+                &crate::control::ProfileDeclaration {
+                    name: "kept".into(),
+                    read_only_roots: vec![tools],
+                    path_entries: Vec::new(),
+                    environment: Vec::new(),
+                },
+                control.revision(),
+            )
+            .expect("profile");
+        drop(control);
+        let mut start = withdrawn_start(workspace_id);
+        start.profile_id = profile.id();
+        start.profile_name = "kept".into();
+        let _owner = OwnerLock::acquire(&journal_root, start.run_id).expect("owner lock");
+        RunJournal::open(&journal_root, store_id)
+            .expect("journal")
+            .start(start)
+            .expect("start");
+        let none = stop_withdrawn_runs(&data, Duration::from_secs(5)).expect("check");
+        assert!(none.unconfirmed.is_empty() && none.stopped.is_empty());
+    }
 }

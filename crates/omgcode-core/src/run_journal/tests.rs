@@ -371,11 +371,45 @@ fn a_second_writer_waits_for_the_lock() {
     let store = store_id();
     let journal = RunJournal::open(directory.path(), store).expect("journal");
     let path = directory.path().to_path_buf();
-    let waiter = thread::spawn(move || RunJournal::open(&path, store).map(|_| ()));
-    thread::sleep(Duration::from_millis(200));
+    let (busy, contended) = std::sync::mpsc::channel();
+    let waiter = thread::spawn(move || {
+        RunJournal::open_observed(&path, store, || {
+            let _ = busy.send(());
+        })
+        .map(|_| ())
+    });
+    // The waiter reports a refused attempt while the first writer holds the
+    // lock, so the test cannot pass without real contention.
+    contended
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the waiter met the held lock");
+    assert!(!waiter.is_finished(), "the waiter opened a held journal");
     drop(journal);
     waiter
         .join()
         .expect("waiter thread")
         .expect("the waiter opens after the release");
+}
+
+/// Only runs without an outcome are listed as in progress.
+#[test]
+fn in_progress_lists_only_runs_without_an_outcome() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let mut journal = RunJournal::open(directory.path(), store_id()).expect("journal");
+    let (going, ended, unconfirmed) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    for run in [going, ended, unconfirmed] {
+        journal.start(start(run)).expect("start");
+    }
+    journal
+        .finish(ended, finished(RunResult::Revoked))
+        .expect("finish");
+    journal
+        .finish(unconfirmed, finished(RunResult::CleanupUnconfirmed))
+        .expect("finish");
+    let listed: Vec<_> = journal
+        .in_progress()
+        .iter()
+        .map(|start| start.run_id)
+        .collect();
+    assert_eq!(listed, vec![going]);
 }

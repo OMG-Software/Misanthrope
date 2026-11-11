@@ -74,6 +74,9 @@ pub enum RunResult {
     DeadlineExceeded,
     /// The operator cancelled the run and the tree was terminated.
     Cancelled,
+    /// A settings change withdrew access the run relied on, and the tree was
+    /// terminated.
+    Revoked,
     /// Nothing started: a check, a confinement rule, or the start failed.
     NotStarted,
     /// Supervision failed after start; the tree was observed empty.
@@ -278,13 +281,38 @@ impl RunJournal {
     /// Open or create the journal for `store_id`, waiting up to ten seconds
     /// for another run's append to finish.
     pub(crate) fn open(data_root: &Path, store_id: Uuid) -> Result<Self, RunJournalError> {
+        Self::open_observed(data_root, store_id, || {})
+    }
+
+    /// Open the journal only if it exists, waiting like [`Self::open`].
+    pub(crate) fn open_existing(
+        data_root: &Path,
+        store_id: Uuid,
+    ) -> Result<Option<Self>, RunJournalError> {
+        match fs::symlink_metadata(data_root.join(FILE_NAME)) {
+            Ok(_) => Self::open(data_root, store_id).map(Some),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// [`Self::open`], calling `on_busy` after each attempt that found the
+    /// lock held. Tests use it to observe real contention.
+    fn open_observed(
+        data_root: &Path,
+        store_id: Uuid,
+        mut on_busy: impl FnMut(),
+    ) -> Result<Self, RunJournalError> {
         if !valid_uuid(store_id) {
             return Err(RunJournalError::Invalid("invalid control store identifier"));
         }
         let until = Instant::now() + LOCK_WAIT;
         loop {
             match Self::try_open(data_root, store_id) {
-                Err(RunJournalError::Busy) if Instant::now() < until => thread::sleep(LOCK_POLL),
+                Err(RunJournalError::Busy) if Instant::now() < until => {
+                    on_busy();
+                    thread::sleep(LOCK_POLL);
+                }
                 result => return result,
             }
         }
@@ -341,6 +369,22 @@ impl RunJournal {
     /// Pending runs, oldest first.
     pub(crate) fn pending(&self) -> &[PendingRun] {
         &self.state.pending
+    }
+
+    /// The recorded intent of each run that has no outcome yet, oldest first.
+    pub(crate) fn in_progress(&self) -> Vec<&RunStart> {
+        self.entries
+            .iter()
+            .filter_map(|entry| match &entry.action {
+                RunAction::RunStarted { start } => Some(start),
+                _ => None,
+            })
+            .filter(|start| {
+                self.state.pending.iter().any(|pending| {
+                    pending.run_id == start.run_id && pending.state == PendingRunState::InProgress
+                })
+            })
+            .collect()
     }
 
     /// The newest `limit` entries, oldest first.

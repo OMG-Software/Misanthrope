@@ -20,6 +20,12 @@ Changes are recorded here before a release version is assigned.
   - **Options:** `--cwd`, `--timeout-secs` (default 600), and
     `--max-output-bytes` (default 1 MiB). Ctrl+C or `SIGTERM` cancels the
     whole tree.
+  - **Preferences:** a run needs `execute`, `read`, and `write`.
+  - **Revocation:** while a program runs, a watcher rereads the settings after
+    each change. When they no longer allow the run, it stops the whole tree
+    and records `revoked`. `workspace permissions`, `profile-remove`,
+    `container-revoke`, and `set-root` wait up to 60 seconds for the runs they
+    affect to stop, and fail if one does not.
   - **Output:** printed, never stored.
 - New trusted commands `workspace profile-add`, `profile-show`, and
   `profile-remove` manage operator-declared toolchain profiles.
@@ -38,7 +44,8 @@ Changes are recorded here before a release version is assigned.
     the confinement, and byte counts. Argument text and output are not
     recorded.
   - **Pending runs:** a run with a missing outcome or unconfirmed cleanup
-    stays pending until `runs acknowledge`. `runs audit` lists records, and
+    stays pending until `runs acknowledge`. A run whose supervising process is
+    still live cannot be acknowledged. `runs audit` lists records, and
     `runs archive` moves a journal with no pending runs.
 - A `host_services` workspace preference, off by default, lets a Linux run
   select host Unix-socket access when the run also passes `--host-services`.
@@ -152,6 +159,12 @@ Changes are recorded here before a release version is assigned.
 - The SonarQube Cloud project key is now `OMG-Software_OMGCode`, matching the
   key a Sonar administrator set on the server. `sonar-project.properties` and
   the repository-checks guide use the new key.
+- `workspace` settings commands wait up to 10 seconds for another command's
+  control lock instead of failing at once. Run watchers hold that lock briefly
+  while they reread the settings.
+- `cancel_on_interrupt` returns an `InterruptWatch` that stops and joins its
+  watcher thread, instead of leaving a detached thread for the life of the
+  process.
 - Rename the project and GitHub repository to OMGCode. Version 0.7.0 uses
   `omgcode-*` Rust crates, the `omgcode` command, `OMGCODE_LM_TOKEN`, the OMGCode
   application-data identity, and `omgcode-` session filenames. Prompt version

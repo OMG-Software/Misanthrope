@@ -26,10 +26,14 @@ directory grants.
 > It has no model write, process, network, Git, or MCP tools. The trusted
 > CLI can replace or restore one existing file through a checkpoint on qualified
 > Linux ext4 or Windows NTFS, and can permanently delete one resolved checkpoint.
-> Workspace files cannot be deleted. The trusted CLI `run` command executes
-> programs under native confinement. That confinement was tested on one Windows
-> build and one Linux kernel only and is not qualified for release. It has no
-> network access and no memory, process-count, or disk limits.
+> The `file` commands cannot delete workspace files. The trusted CLI `run`
+> command executes programs under native confinement, and those programs can
+> create, change, and delete workspace files without a checkpoint. That
+> confinement was tested on one Windows build and one Linux kernel only and is
+> not qualified for release. A run has no IP networking. On Linux, a run that
+> both the `host_services` preference and its `--host-services` flag allow can
+> reach the host's Unix-domain sockets, such as service and credential-agent
+> sockets. Runs have no memory, process-count, or disk limits.
 
 ## Goals
 
