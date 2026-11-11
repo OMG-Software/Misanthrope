@@ -17,7 +17,7 @@ mod linux;
 #[cfg(target_os = "linux")]
 mod replacement;
 #[cfg(windows)]
-mod windows;
+pub(crate) mod windows;
 
 #[cfg(target_os = "linux")]
 use linux::NativeWorkspace;
@@ -136,7 +136,7 @@ fn validate_depth(depth: usize) -> io::Result<()> {
 
 #[cfg(windows)]
 /// Refuse DOS aliases, alternate streams and Win32-normalized spellings.
-fn invalid_windows_name(name: &[u16]) -> bool {
+pub(crate) fn invalid_windows_name(name: &[u16]) -> bool {
     if name.is_empty() || name == [46] || name == [46, 46] || matches!(name.last(), Some(32 | 46)) {
         return true;
     }

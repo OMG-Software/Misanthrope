@@ -4,6 +4,13 @@ Changes are recorded here before a release version is assigned.
 
 ## Unreleased
 
+### Added
+
+- Add a Windows NTFS private-store backend with exact protected per-user DACLs,
+  handle-relative access, and a failing directory flush. It is not wired to the
+  core, so Windows checkpoints and apply still refuse. Microsoft documents no
+  durability contract for the flush; see ADR-0023.
+
 ### Changed
 
 - Rename the project and GitHub repository to OMGCode. Version 0.7.0 uses

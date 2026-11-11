@@ -242,9 +242,10 @@ registered data-root identity and creation time, and uses `openat2` without
 symlink or magic-link traversal. Selecting the trusted data root can cross a
 mount; child traversal cannot. Generated procfs reopening requires procfs and
 verifies the retained file identity again. There is no weaker path fallback.
-Windows refuses checkpoint storage before mutation because a private ACL and
-directory persistence backend is not implemented. No automatic chmod or ACL
-repair occurs.
+Windows still refuses checkpoint storage before mutation. A separate NTFS
+private-store backend exists but the core does not use it yet; see
+[ADR-0023](adr/0023-store-windows-checkpoints-with-verified-acls.md). No
+automatic chmod or ACL repair occurs.
 
 The source and private root must have the same device identifier before
 initialization. This check does not qualify a later rename across mount aliases.
@@ -555,7 +556,10 @@ is made. Replay and archive/restore must never execute a recorded replacement.
 ### Native backend gates
 
 Linux ext4 is the implemented prototype. Windows remains an unqualified
-implementation direction:
+implementation direction. Its private store exists but is not wired to the core.
+[ADR-0023](adr/0023-store-windows-checkpoints-with-verified-acls.md) accepts a
+directory-handle flush for persistence, for which Microsoft gives no contract,
+and records observed rename behaviour:
 
 | Backend | Required primitive and review gate |
 | --- | --- |
