@@ -278,7 +278,10 @@ crash state by copying the exact source descriptor onto a retained stage: recove
 must accept it after commit intent and refuse it before. Write the source DACL
 and the copy through the same API and assert the copy matches exactly: .NET
 `FileSecurity` reorders access entries, and an elevated runner adds its own
-default entries. Tests do not cover audit SACLs, a foreign owner,
+default entries. CI temporary files inherit no entries, so a test that needs
+inherited entries must create them. To reproduce that locally, point `TMP` and
+`TEMP` at a directory without inheritable entries. Tests do not cover audit
+SACLs, a foreign owner,
 a second local user, a real second volume, ReFS, filter drivers, or physical
 power loss.
 

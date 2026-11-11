@@ -7,8 +7,9 @@ use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use windows_sys::Win32::Storage::FileSystem::{
-    FILE_ATTRIBUTE_HIDDEN, FILE_BASIC_INFO, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES, FileBasicInfo,
-    READ_CONTROL, SetFileInformationByHandle, WRITE_DAC, WRITE_OWNER,
+    FILE_ATTRIBUTE_HIDDEN, FILE_BASIC_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_WRITE,
+    FILE_WRITE_ATTRIBUTES, FileBasicInfo, READ_CONTROL, SetFileInformationByHandle, WRITE_DAC,
+    WRITE_OWNER,
 };
 
 struct Fixture {
@@ -89,6 +90,27 @@ fn set_dacl(path: &Path, dacl: &str) {
     apply_security(&file, &format!("{prefix}D:{dacl}")).expect("set DACL");
 }
 
+/// Give a directory explicit inheritable entries, so a file created in it has
+/// inherited entries whatever ACL the runner's temporary directory carries.
+fn set_inheritable_dacl(directory: &Path) {
+    let handle = OpenOptions::new()
+        .access_mode(READ_CONTROL | WRITE_DAC | WRITE_OWNER)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(directory)
+        .expect("directory security handle");
+    let current = read_security(&handle).expect("directory security");
+    let owner = current
+        .strip_prefix("O:")
+        .and_then(|rest| rest.split("G:").next())
+        .expect("owner");
+    let prefix = current.split("D:").next().expect("owner and group");
+    apply_security(
+        &handle,
+        &format!("{prefix}D:PAI(A;OICI;FA;;;{owner})(A;OICI;FR;;;BU)"),
+    )
+    .expect("inheritable DACL");
+}
+
 fn current_user_ace_sid(path: &Path) -> String {
     let current = read_security(&security_handle(path)).expect("current security");
     current
@@ -100,7 +122,9 @@ fn current_user_ace_sid(path: &Path) -> String {
 
 #[test]
 fn publication_replaces_the_name_once_and_keeps_inherited_security() {
-    let fixture = Fixture::with_source(b"before");
+    let fixture = fixture();
+    set_inheritable_dacl(fixture.path.parent().expect("workspace"));
+    fs::write(&fixture.path, b"before").expect("source");
     let target = fixture.target();
     assert!(
         descriptor(&target.capture).contains("D:AI(")
