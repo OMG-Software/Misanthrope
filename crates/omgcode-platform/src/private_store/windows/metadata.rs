@@ -60,8 +60,10 @@ pub(crate) fn read_native_security(file: &File) -> io::Result<NativeSecurity> {
     })
 }
 
-/// Applies captured security and the indexing opt-out to a stage handle.
-pub(crate) fn apply_native_security(file: &File, security: &NativeSecurity) -> io::Result<()> {
+/// Splits captured metadata into its descriptor and indexing opt-out. A caller
+/// writes them separately and chooses the order, so the opt-out changes only
+/// while the stage's DACL is owner-only.
+pub(crate) fn split_native_security(security: &NativeSecurity) -> io::Result<(&str, bool)> {
     let NativeSecurity::Windows {
         descriptor,
         not_content_indexed,
@@ -69,8 +71,7 @@ pub(crate) fn apply_native_security(file: &File, security: &NativeSecurity) -> i
     else {
         return Err(invalid_data("replacement source has foreign metadata"));
     };
-    apply_security(file, descriptor)?;
-    set_content_indexing(file, *not_content_indexed)
+    Ok((descriptor, *not_content_indexed))
 }
 
 /// Reads the canonical owner, group, and DACL from this open handle.
@@ -170,7 +171,7 @@ fn set_descriptor(file: &File, raw: PSECURITY_DESCRIPTOR) -> io::Result<()> {
 
 /// Sets or clears the indexing opt-out. Zero time fields leave timestamps alone.
 #[allow(unsafe_code)]
-fn set_content_indexing(file: &File, not_content_indexed: bool) -> io::Result<()> {
+pub(crate) fn set_content_indexing(file: &File, not_content_indexed: bool) -> io::Result<()> {
     let information = FILE_BASIC_INFO {
         CreationTime: 0,
         LastAccessTime: 0,

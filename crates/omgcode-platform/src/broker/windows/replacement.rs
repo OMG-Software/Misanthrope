@@ -41,8 +41,9 @@ use super::{
 use crate::broker::{FileCapture, MAX_FILE_BYTES};
 use crate::directory_identity;
 use crate::private_store::windows::{
-    DIRECTORY_OPTIONS, FILE_OPTIONS, FILE_READ_ACCESS, STAGE_NAME, apply_native_security,
-    is_private_file, read_native_security, require_ntfs, validate_file_metadata,
+    DIRECTORY_OPTIONS, FILE_OPTIONS, FILE_READ_ACCESS, STAGE_NAME, apply_security, is_private_file,
+    read_native_security, require_ntfs, set_content_indexing, split_native_security,
+    validate_file_metadata,
 };
 use crate::private_store::{
     NativeSecurity, PrivateDirectory, PrivateFileIdentity, StageMetadata, stage_metadata,
@@ -82,6 +83,7 @@ pub struct ReplacementStage {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TestPoint {
     AfterFinalCheck,
+    PublishDescriptor,
     Rename,
     PublishedCheck,
     StageSync,
@@ -378,7 +380,7 @@ impl ReplacementTarget<'_> {
                 Ok(()) => error,
                 Err(restore) => io::Error::new(
                     error.kind(),
-                    format!("{error}; the stage keeps the source security: {restore}"),
+                    format!("{error}; the stage may keep the source security: {restore}"),
                 ),
             });
         }
@@ -402,8 +404,16 @@ impl ReplacementTarget<'_> {
 
     /// Give the verified private stage the captured source security and
     /// indexing opt-out, flush it, and read the result back exactly.
+    ///
+    /// The opt-out changes first, while the DACL is still owner-only. A crash
+    /// between the two writes then leaves a private stage, never the source
+    /// DACL with the stage's old opt-out, which recovery would refuse.
     fn publish_security(&self, stage: &mut ReplacementStage) -> io::Result<()> {
-        apply_native_security(&stage.file, &self.capture.security)?;
+        let (descriptor, not_content_indexed) = split_native_security(&self.capture.security)?;
+        set_content_indexing(&stage.file, not_content_indexed)?;
+        #[cfg(test)]
+        self.run_hook(TestPoint::PublishDescriptor)?;
+        apply_security(&stage.file, descriptor)?;
         stage.file.sync_all()?;
         let metadata = stage_metadata(&stage.file)?;
         if metadata.identity != stage.metadata.identity
@@ -419,7 +429,8 @@ impl ReplacementTarget<'_> {
 
     /// Put back the owner-only DACL after a failed attempt left the name
     /// unchanged. Only the stage changes. The core accepts either state after
-    /// commit intent.
+    /// commit intent. The DACL changes before the opt-out, the reverse of
+    /// publication, so the opt-out again changes only on a private stage.
     fn restore_privacy(
         &self,
         stage: &mut ReplacementStage,
@@ -427,7 +438,9 @@ impl ReplacementTarget<'_> {
     ) -> io::Result<()> {
         #[cfg(test)]
         self.run_hook(TestPoint::RestorePrivacy)?;
-        apply_native_security(&stage.file, private)?;
+        let (descriptor, not_content_indexed) = split_native_security(private)?;
+        apply_security(&stage.file, descriptor)?;
+        set_content_indexing(&stage.file, not_content_indexed)?;
         stage.file.sync_all()?;
         let metadata = stage_metadata(&stage.file)?;
         if !is_private_file(&stage.file)? || metadata.security != *private {

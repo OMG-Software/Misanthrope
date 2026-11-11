@@ -10,6 +10,8 @@ Changes are recorded here before a release version is assigned.
   NTFS. Apply preserves the owner, group, DACL, and content-indexing opt-out, and
   refuses metadata it cannot reproduce. The stage stays owner-only until the
   commit attempt, and a failure before the rename tries to restore that DACL.
+  The opt-out changes only while the stage is private, so a crash between the
+  two metadata writes leaves a stage that recovery accepts.
   A crash or failed restore in that window can leave a retained stage with the
   source DACL, which may expose unpublished bytes to principals it admits.
   Windows makes no power-loss claim and is not qualified for release; see

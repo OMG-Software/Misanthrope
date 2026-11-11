@@ -12,10 +12,13 @@
 //! or renames. See ADR-0023. Same-user and administrator actors are not isolated.
 
 mod metadata;
-pub(super) use metadata::stage_metadata;
-pub(crate) use metadata::{apply_native_security, read_native_security, validate_file_metadata};
 #[cfg(test)]
-pub(crate) use metadata::{apply_security, read_security};
+pub(crate) use metadata::read_security;
+pub(super) use metadata::stage_metadata;
+pub(crate) use metadata::{
+    apply_security, read_native_security, set_content_indexing, split_native_security,
+    validate_file_metadata,
+};
 
 use std::ffi::{OsStr, OsString, c_void};
 use std::fs::{File, OpenOptions};
