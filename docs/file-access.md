@@ -19,9 +19,13 @@ each call; it does not infer a live binding from journal metadata. A future CLI
 or provider integration must preserve those checks.
 
 Trusted apply can replace an existing file on Linux ext4 or Windows NTFS under
-the [replacement contract](#replacement-contract). A create operation still refuses
-every existing entry. Deletion, restore, recursive directory creation, and action
-replay are unavailable. A content check followed by rename cannot guarantee no
+the [replacement contract](#replacement-contract). Trusted restore writes a
+retained checkpoint's original bytes back through that same apply path, and
+trusted checkpoint deletion removes one resolved private entry; see
+[Phase A4](#implemented-restore-and-checkpoint-deletion-phase-a4). A create
+operation still refuses every existing entry. Workspace file deletion,
+restore-as-create, recursive directory creation, and action replay are
+unavailable. A content check followed by rename cannot guarantee no
 lost updates against independent writers. See
 [ADR-0013](adr/0013-enforce-file-access-with-native-handles-and-exclusive-creation.md).
 
@@ -162,7 +166,8 @@ This contract was accepted through PR #10 and
 Phase A2a implements read-only validation of caller-supplied record bytes.
 Phase A2b adds Linux private checkpoint storage and existing-only recovery.
 Phase A2c adds trusted native apply on Linux ext4. Phase A3b adds Windows NTFS
-storage and apply. Restore, deletion, and model write tools remain unavailable.
+storage and apply. Phase A4 adds explicit restore and checkpoint deletion on both.
+Model write tools remain unavailable.
 
 ### Implemented record inspection (Phase A2a)
 
@@ -274,7 +279,8 @@ Standalone preparation stops at `checkpoint_prepared`. It returns
 `applied: false`, leaves the target unchanged, and keeps the operation unresolved.
 The CLI has no standalone preparation command. Apply creates its own checkpoint
 and continues in the same authorized operation. `file diff` remains a read-only
-preview. Restore, export, eviction, and deletion are unavailable.
+preview. Export and eviction are unavailable. Restore and deletion are explicit
+commands; see [Phase A4](#implemented-restore-and-checkpoint-deletion-phase-a4).
 
 `FileBroker::checkpoint_inspect` and `checkpoint_acknowledge` are operator
 recovery APIs. Their trusted CLI routes are:
@@ -464,10 +470,12 @@ Any preparation, quota, validation, or sync failure must prevent replacement.
 Partial preparation remains evidence and can require explicit acknowledgement.
 
 Keep completed, conflicted, and uncertain entries. There is no automatic
-expiration, eviction, export, or pruning in the first increment. At the quota,
-refuse further replacements while preserving inspection and permission changes.
-Deletion/export needs a later reviewed lifecycle; journal rotation must not
-discard referenced checkpoints. Checkpoints contain source bytes and can
+expiration, eviction, export, or pruning. At the quota, refuse further
+replacements while preserving inspection and permission changes. Only an
+explicit trusted deletion of one resolved entry frees capacity; see
+[Phase A4](#implemented-restore-and-checkpoint-deletion-phase-a4). Export needs a
+later reviewed lifecycle; journal rotation must not discard referenced
+checkpoints. Checkpoints contain source bytes and can
 contain secrets. They are private recovery data, never ordinary model context,
 tool output, or conversation events.
 
@@ -646,15 +654,79 @@ authorize cleanup of an entry another actor may have changed.
 
 Recovery inspection must be existing-only and must withhold file contents from
 ordinary audit output. A trusted acknowledgement records operator inspection;
-it does not assert success, repair files, or grant access. Phase A2 provides
-inspection and acknowledgement only; restore remains disabled. A later explicit
-restore must use the same replacement path with a fresh live binding, current
-read/write preferences, and an explicit expected digest/size for the *current*
-target. Checkpoint IDs do not supply those expected values. Detect later user
-changes, checkpoint the current bytes again, and never overwrite them merely
-because an older checkpoint exists. Missing targets and restore-as-create are
-outside this first contract. General deletion and recursive operations remain
-unsupported.
+it does not assert success, repair files, or grant access. Inspection and
+acknowledgement stay read-only; they never restore, delete, or change an ACL.
+Explicit restore is a separate command. It uses the same replacement path with a
+fresh live binding, current read/write preferences, and an explicit expected
+digest/size for the *current* target. Checkpoint IDs do not supply those
+expected values. Restore detects later user changes, checkpoints the current
+bytes again, and never overwrites them merely because an older checkpoint
+exists. Missing targets and restore-as-create are outside this contract.
+Workspace file deletion and recursive operations remain unsupported.
+
+### Implemented restore and checkpoint deletion (Phase A4)
+
+Version 0.11.0 adds two trusted CLI routes on Linux ext4 and Windows NTFS. Both
+are operator commands, not model tool routes. See
+[ADR-0025](adr/0025-restore-and-delete-checkpoints-explicitly.md).
+
+```text
+omgcode --data-dir DATA file restore WORKSPACE_UUID PATH --session SESSION_UUID \
+  --checkpoint OPERATION_UUID --expected-sha256 CURRENT_SHA256 \
+  --expected-bytes CURRENT_BYTES --writers-stopped
+omgcode --data-dir DATA file delete-checkpoint OPERATION_UUID --permanent
+```
+
+`file restore` reads the named checkpoint's `original` payload, rereads it
+through the private store, and compares it with the recorded digest and size.
+The checkpoint must be retained, must have a recorded manifest, and must have
+been recorded for the same workspace and the exact native target path. Its
+outcome can be success, failure, conflict, or acknowledged uncertainty, because
+the original bytes were captured before any of those. The store then closes,
+and the bytes go through `file apply` unchanged. The expected digest and size
+describe the current file. A later edit causes a conflict without mutation. A
+changed restore creates a new operation whose checkpoint holds the bytes it
+replaced, so a restore can itself be restored. Identical bytes change nothing
+and create no operation. A missing target is refused. The output adds
+`restored_from` to the apply receipt. The ledger does not link the two
+operations, so a restore stays readable by 0.10.0.
+
+`file delete-checkpoint` removes one resolved entry: an unresolved operation
+must be acknowledged first. It needs no workspace binding and opens no
+workspace file. It appends a synced `checkpoint_deletion_started` record. Then
+it removes the fixed names `stage`, `proposed`, `original`, and
+`manifest.json` that exist, flushes the entry, removes the empty entry
+directory, and flushes the store directory. Last, it appends
+`checkpoint_deleted`. The intent reserves space for that completion record.
+The ledger keeps the operation's progress, outcome, and acknowledgement, and
+marks its `retention` as `deleted`. A deleted entry no longer counts toward the
+64-entry or 64 MiB caps.
+
+Removal never recurses. Linux pins each name with `openat2`, checks a local
+regular single-link file, calls `unlinkat`, and then requires the pinned inode
+to have no links. Windows opens each name relative to its parent handle without
+following a reparse point. It checks the object, then marks that handle for
+POSIX-semantics deletion, ignoring a read-only attribute. A retained stage can
+carry its source DACL; the private parent's delete-child right permits its
+removal. A file whose DACL denies the owner attribute writes while it is
+read-only is refused. Apply refuses read-only sources, so only an out-of-band
+change can create one. A directory removal fails while any name remains, and an
+unknown name fails inspection before removal.
+
+An interrupted deletion stays pending as `deleting`. `file checkpoints` reports
+it in `pending_deletion`. Until it finishes, file operations, apply, restore,
+acknowledgement, and other deletions are refused. Repeating the same
+`delete-checkpoint` command is the only accepted action. It removes whichever
+fixed names remain, flushes the store directory, and records completion. This is
+an explicit operator request, not an automatic retry. A partial deletion record
+fails inspection closed, as other partial ledger records do.
+
+New deletion records make a ledger unreadable to 0.10.0, which refuses it as an
+unknown record. History is never evicted, so the 4,096-record ledger cap still
+bounds an installation's lifetime operation count. A successful apply uses five
+records and its deletion two. Ledger compaction or rotation is future work.
+Deletion is not power-loss qualified on either platform. Windows directory
+flushes keep the ADR-0023 limitation.
 
 ## Private operation journal and recovery
 

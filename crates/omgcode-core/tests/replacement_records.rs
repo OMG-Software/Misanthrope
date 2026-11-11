@@ -3,8 +3,8 @@
 use std::path::Path;
 
 use omgcode_core::replacement::{
-    InitializationPhase, ReplacementError, ReplacementOutcome, ReplacementProgress,
-    ReplacementScope, inspect_initialization, inspect_ledger,
+    CheckpointRetention, InitializationPhase, ReplacementError, ReplacementOutcome,
+    ReplacementProgress, ReplacementScope, inspect_initialization, inspect_ledger,
 };
 use omgcode_core::session::NativePath;
 use serde_json::{Value, json};
@@ -108,6 +108,20 @@ impl Fixture {
     fn acknowledge(&mut self) {
         self.push(
             "replacement_acknowledged",
+            Some(json!({"operation_id": self.operation})),
+        );
+    }
+
+    fn delete_started(&mut self) {
+        self.push(
+            "checkpoint_deletion_started",
+            Some(json!({"operation_id": self.operation})),
+        );
+    }
+
+    fn deleted(&mut self) {
+        self.push(
+            "checkpoint_deleted",
             Some(json!({"operation_id": self.operation})),
         );
     }
@@ -553,6 +567,116 @@ fn ledger_record_and_retained_operation_caps_do_not_evict_history() {
         inspect_ledger(&many_records, header.scope()),
         Err(ReplacementError::Limit(_))
     ));
+}
+
+#[test]
+fn deletion_keeps_history_and_frees_one_retained_slot() {
+    let mut fixture = ledger();
+    let mut first = None;
+    for _ in 0..64 {
+        fixture.operation = Uuid::new_v4();
+        first.get_or_insert(fixture.operation);
+        fixture.start();
+        fixture.finish("failed");
+    }
+    fixture.operation = first.expect("first operation");
+    fixture.delete_started();
+    let deleting = inspect_ledger(&fixture.bytes(), fixture.scope()).expect("deletion intent");
+    assert_eq!(deleting.pending(), None);
+    let pending = deleting.pending_deletion().expect("unfinished deletion");
+    assert_eq!(pending.operation_id, fixture.operation);
+    assert_eq!(pending.retention, CheckpointRetention::Deleting);
+    assert_eq!(pending.outcome, Some(ReplacementOutcome::Failed));
+
+    fixture.deleted();
+    let deleted = inspect_ledger(&fixture.bytes(), fixture.scope()).expect("deletion outcome");
+    assert!(deleted.pending_deletion().is_none());
+    assert_eq!(deleted.operations.len(), 64);
+    assert_eq!(
+        deleted.operations[0].retention,
+        CheckpointRetention::Deleted
+    );
+    assert_eq!(
+        deleted.operations[0].outcome,
+        Some(ReplacementOutcome::Failed)
+    );
+
+    // History stays, but a deleted entry no longer counts toward the cap.
+    fixture.operation = Uuid::new_v4();
+    fixture.start();
+    let admitted = inspect_ledger(&fixture.bytes(), fixture.scope()).expect("65th operation");
+    assert_eq!(admitted.operations.len(), 65);
+    fixture.finish("failed");
+    fixture.operation = Uuid::new_v4();
+    fixture.start();
+    assert!(matches!(
+        inspect_ledger(&fixture.bytes(), fixture.scope()),
+        Err(ReplacementError::Limit(_))
+    ));
+}
+
+#[test]
+fn deletion_requires_one_resolved_retained_entry_at_a_time() {
+    // Deletion of an unresolved or unknown operation is refused.
+    let mut fixture = ledger();
+    fixture.start();
+    fixture.delete_started();
+    assert!(inspect_ledger(&fixture.bytes(), fixture.scope()).is_err());
+    let mut fixture = ledger();
+    fixture.start();
+    fixture.finish("failed");
+    let resolved = fixture.operation;
+    fixture.operation = Uuid::new_v4();
+    fixture.delete_started();
+    assert!(inspect_ledger(&fixture.bytes(), fixture.scope()).is_err());
+
+    // A completion needs its own intent; nothing can be deleted twice.
+    let mut fixture = ledger();
+    fixture.operation = resolved;
+    fixture.start();
+    fixture.finish("failed");
+    let base = fixture.events.clone();
+    fixture.deleted();
+    assert!(inspect_ledger(&fixture.bytes(), fixture.scope()).is_err());
+    fixture.events.clone_from(&base);
+    fixture.delete_started();
+    fixture.deleted();
+    fixture.delete_started();
+    assert!(inspect_ledger(&fixture.bytes(), fixture.scope()).is_err());
+
+    // An unfinished deletion blocks new intents, acknowledgement, and other
+    // deletions until its own completion record.
+    let mut fixture = ledger();
+    fixture.start();
+    fixture.finish("failed");
+    let deleting = fixture.operation;
+    fixture.operation = Uuid::new_v4();
+    fixture.start();
+    fixture.finish("failed");
+    let other = fixture.operation;
+    fixture.operation = deleting;
+    fixture.delete_started();
+    let base = fixture.events.clone();
+    fixture.operation = Uuid::new_v4();
+    fixture.start();
+    assert!(inspect_ledger(&fixture.bytes(), fixture.scope()).is_err());
+    fixture.events.clone_from(&base);
+    fixture.operation = other;
+    fixture.delete_started();
+    assert!(inspect_ledger(&fixture.bytes(), fixture.scope()).is_err());
+    fixture.events.clone_from(&base);
+    fixture.deleted();
+    assert!(inspect_ledger(&fixture.bytes(), fixture.scope()).is_err());
+    fixture.events.clone_from(&base);
+    fixture.operation = deleting;
+    fixture.acknowledge();
+    assert!(inspect_ledger(&fixture.bytes(), fixture.scope()).is_err());
+    fixture.events.clone_from(&base);
+    fixture.deleted();
+    fixture.operation = other;
+    fixture.delete_started();
+    fixture.deleted();
+    assert!(inspect_ledger(&fixture.bytes(), fixture.scope()).is_ok());
 }
 
 #[test]

@@ -1,7 +1,8 @@
 //! Private checkpoint storage. All workspace authority stays at the file broker.
 //!
 //! The caller holds the control writer for every synchronous operation. Nothing
-//! here replaces a workspace entry, deletes evidence, or replays a journal.
+//! here replaces a workspace entry or replays a journal. Only an explicit
+//! deletion request removes one resolved entry; no error path deletes evidence.
 
 use std::ffi::OsStr;
 use std::fs::{self, File};
@@ -19,11 +20,13 @@ use uuid::Uuid;
 use super::manifest::{MAX_MANIFEST, Manifest, SecurityMetadata, descriptor};
 use super::replay::{ArtifactNames, Envelope, InitializationAction, LedgerAction};
 use super::{
-    InitializationPhase, RecordedArtifact, RecordedReplacement, ReplacementProgress,
-    ReplacementScope, ReplacementSnapshot, inspect_initialization, inspect_ledger,
+    CheckpointRetention, InitializationPhase, RecordedArtifact, RecordedReplacement,
+    ReplacementProgress, ReplacementScope, ReplacementSnapshot, inspect_initialization,
+    inspect_ledger,
 };
 use crate::control::{ControlError, ControlStore};
 use crate::files::FileTarget;
+use crate::session::NativePath;
 use crate::workspace::DirectoryRecord;
 
 mod publication;
@@ -41,6 +44,10 @@ const MAX_STORAGE: u64 = 64 * 1024 * 1024;
 const TAIL_RECORD_BYTES: usize = 1024;
 const RECOVERY_BYTES: usize = 4 * TAIL_RECORD_BYTES;
 const FUTURE_STAGE_BYTES: u64 = 1024 * 1024;
+const MAX_RETAINED: usize = 64;
+/// Fixed entry artifact names, in deletion order: unpublished and private
+/// bytes first, then the manifest that describes them.
+const ENTRY_ARTIFACTS: [&str; 4] = ["stage", "proposed", "original", "manifest.json"];
 
 /// A controlled checkpoint error. No error authorizes cleanup or retry.
 #[derive(Debug, Error)]
@@ -81,6 +88,16 @@ pub enum CheckpointError {
     /// This ID does not identify the current unresolved operation.
     #[error("checkpoint ID does not identify the unresolved operation")]
     WrongOperation,
+    /// A recorded deletion is unfinished. Only repeating that same explicit
+    /// deletion can finish it; other checkpoint work is refused meanwhile.
+    #[error("checkpoint {0} deletion is unfinished; repeat that deletion to finish it")]
+    DeletionPending(Uuid),
+    /// The ID names no retained entry that this request can use.
+    #[error("checkpoint ID does not identify a retained checkpoint for this request")]
+    Unavailable,
+    /// The checkpoint was recorded for a different workspace or target path.
+    #[error("checkpoint was recorded for a different workspace or target")]
+    TargetMismatch,
     /// A failed write or synchronization prevents further writes on this handle.
     #[error("checkpoint writer is poisoned")]
     Poisoned,
@@ -112,6 +129,9 @@ impl CheckpointError {
             Self::Busy => "checkpoint_busy",
             Self::Pending(_) => "checkpoint_pending",
             Self::WrongOperation => "checkpoint_request",
+            Self::DeletionPending(_) => "checkpoint_deletion_pending",
+            Self::Unavailable => "checkpoint_unavailable",
+            Self::TargetMismatch => "checkpoint_target",
             Self::Poisoned => "checkpoint_poisoned",
             Self::Uncertain { .. } => "checkpoint_uncertain",
         }
@@ -129,6 +149,17 @@ pub struct CheckpointReceipt {
     pub proposed: RecordedArtifact,
     /// Always false for preparation without publication.
     pub applied: bool,
+}
+
+/// Outcome of one explicit deletion. No workspace file is opened or changed.
+#[derive(Debug, Serialize)]
+pub struct CheckpointDeletion {
+    /// Deleted operation ID. Its ledger history and outcome are retained.
+    pub operation_id: Uuid,
+    /// Whether this request finished a deletion that an earlier one recorded.
+    pub resumed: bool,
+    /// Observed managed file bytes after the deletion.
+    pub managed_bytes: u64,
 }
 
 /// Observed protected-storage phase. No variant grants authority.
@@ -154,7 +185,10 @@ pub struct CheckpointInspection {
     pub replacement_store_id: Option<Uuid>,
     /// One unfinished or uncertain operation, if any.
     pub pending: Option<Uuid>,
-    /// All retained historical operation metadata, at most 64 entries.
+    /// One recorded, unfinished deletion, if any.
+    pub pending_deletion: Option<Uuid>,
+    /// All recorded operation metadata, including deleted entries' history.
+    /// At most 64 operations are not deleted.
     pub operations: Vec<RecordedReplacement>,
     /// Observed managed file bytes including anchor, ledger, and partial files.
     pub managed_bytes: u64,
@@ -203,6 +237,9 @@ pub(crate) fn check_admission(control: &ControlStore) -> Result<(), CheckpointEr
     if let Some(id) = view.pending {
         return Err(CheckpointError::Pending(id));
     }
+    if let Some(id) = view.pending_deletion {
+        return Err(CheckpointError::DeletionPending(id));
+    }
     Ok(())
 }
 
@@ -217,6 +254,7 @@ pub(crate) fn inspect(control: &ControlStore) -> Result<CheckpointInspection, Ch
             control_store_id: control_id,
             replacement_store_id: None,
             pending: None,
+            pending_deletion: None,
             operations: Vec::new(),
             managed_bytes: 0,
         });
@@ -252,6 +290,7 @@ pub(crate) fn inspect(control: &ControlStore) -> Result<CheckpointInspection, Ch
             control_store_id: control_id,
             replacement_store_id: Some(initialization.scope.replacement_store_id()),
             pending: None,
+            pending_deletion: None,
             operations: Vec::new(),
             managed_bytes: used,
         });
@@ -272,6 +311,88 @@ pub(crate) fn acknowledge(
     }
     let mut store = Store::open_ready(open_root(&expected)?, control_id, true)?;
     record_acknowledgement(&mut store, operation_id)
+}
+
+/// Delete one resolved entry, or finish the recorded deletion of that entry.
+/// The ledger keeps the operation's history. No workspace file is opened.
+pub(crate) fn delete(
+    control: &ControlStore,
+    operation_id: Uuid,
+) -> Result<CheckpointDeletion, CheckpointError> {
+    delete_with(control, operation_id, Faults::default())
+}
+
+/// Delete with one instance-local test fault at a named persistence boundary.
+#[cfg(test)]
+pub(crate) fn delete_with_fault(
+    control: &ControlStore,
+    operation_id: Uuid,
+    point: &'static str,
+) -> Result<CheckpointDeletion, CheckpointError> {
+    delete_with(control, operation_id, Faults { at: Some(point) })
+}
+
+fn delete_with(
+    control: &ControlStore,
+    operation_id: Uuid,
+    faults: Faults,
+) -> Result<CheckpointDeletion, CheckpointError> {
+    let (expected, control_id) = context(control)?;
+    if !state_present(&expected.live_path()?)? {
+        return Err(CheckpointError::Unavailable);
+    }
+    let mut store = Store::open_ready(open_root(&expected)?, control_id, true)?;
+    store.faults = faults;
+    store.delete_entry(operation_id)
+}
+
+/// Return one retained checkpoint's original bytes for an explicit restore.
+///
+/// The entry must be prepared and recorded for the same workspace and native
+/// target path. Its bytes are reread and compared with the recorded digest.
+/// The store is opened read-only and closed before the caller applies them.
+pub(crate) fn read_original(
+    control: &ControlStore,
+    operation_id: Uuid,
+    target: &FileTarget,
+) -> Result<Vec<u8>, CheckpointError> {
+    let (expected, control_id) = context(control)?;
+    if !state_present(&expected.live_path()?)? {
+        return Err(CheckpointError::Unavailable);
+    }
+    let store = Store::open_ready(open_root(&expected)?, control_id, false)?;
+    if let Some(operation) = store.snapshot.pending() {
+        return Err(CheckpointError::Pending(operation.operation_id));
+    }
+    if let Some(operation) = store.snapshot.pending_deletion() {
+        return Err(CheckpointError::DeletionPending(operation.operation_id));
+    }
+    let operation = store
+        .snapshot
+        .operations
+        .iter()
+        .find(|operation| {
+            operation.operation_id == operation_id
+                && operation.retention == CheckpointRetention::Retained
+                && operation.manifest.is_some()
+        })
+        .ok_or(CheckpointError::Unavailable)?;
+    let path = NativePath::from_path(&target.path)
+        .map_err(|_| CheckpointError::Invalid("native target"))?;
+    if operation.workspace_id != target.workspace_id || operation.target != path {
+        return Err(CheckpointError::TargetMismatch);
+    }
+    let entry = store
+        .directory
+        .open_dir(OsStr::new(&operation_id.to_string()))?;
+    let mut file = entry.open_file(OsStr::new("original"), false)?;
+    let bytes = read_bounded(&mut file, MAX_PAYLOAD)?;
+    if descriptor(&bytes)? != operation.expected || std::str::from_utf8(&bytes).is_err() {
+        return Err(CheckpointError::Invalid(
+            "checkpoint payload differs or is not UTF-8",
+        ));
+    }
+    Ok(bytes)
 }
 
 /// Clear only the current blocker, preserving progress and any recorded outcome.
@@ -349,6 +470,8 @@ impl Faults {
                 "commit_intent_sync" => "commit_intent_partial_write",
                 "publication_outcome_sync" => "publication_outcome_partial_write",
                 "ack_sync" => "ack_partial_write",
+                "deletion_intent_sync" => "deletion_intent_partial_write",
+                "deletion_outcome_sync" => "deletion_outcome_partial_write",
                 _ => "unselected_partial_write",
             };
             if self.at == Some(partial) {
@@ -511,6 +634,10 @@ impl Store {
                 .snapshot
                 .pending()
                 .map(|operation| operation.operation_id),
+            pending_deletion: self
+                .snapshot
+                .pending_deletion()
+                .map(|operation| operation.operation_id),
             operations: self.snapshot.operations.clone(),
             managed_bytes: self.used,
         }
@@ -532,7 +659,17 @@ impl Store {
         if let Some(operation) = self.snapshot.pending() {
             return Err(CheckpointError::Pending(operation.operation_id));
         }
-        if self.snapshot.operations.len() >= 64 {
+        if let Some(operation) = self.snapshot.pending_deletion() {
+            return Err(CheckpointError::DeletionPending(operation.operation_id));
+        }
+        if self
+            .snapshot
+            .operations
+            .iter()
+            .filter(|operation| operation.retention != CheckpointRetention::Deleted)
+            .count()
+            >= MAX_RETAINED
+        {
             return Err(CheckpointError::Limit);
         }
         let operation_id = Uuid::new_v4();
@@ -639,6 +776,103 @@ impl Store {
                 source: Box::new(source),
             }
         })
+    }
+
+    /// Record deletion intent, remove the entry's fixed artifacts and then the
+    /// empty entry, and record completion. A repeated request for a recorded
+    /// deletion skips the intent and removes whatever fixed names remain.
+    ///
+    /// The intent reserves its completion record. Errors before the intent is
+    /// written change nothing. Any later failure poisons this writer and is
+    /// uncertain; the deletion stays pending until the same request finishes it.
+    fn delete_entry(&mut self, operation_id: Uuid) -> Result<CheckpointDeletion, CheckpointError> {
+        if self.poisoned {
+            return Err(CheckpointError::Poisoned);
+        }
+        let resumed = match self.snapshot.pending_deletion() {
+            Some(operation) if operation.operation_id == operation_id => true,
+            Some(operation) => {
+                return Err(CheckpointError::DeletionPending(operation.operation_id));
+            }
+            None => {
+                if let Some(operation) = self.snapshot.pending() {
+                    return Err(CheckpointError::Pending(operation.operation_id));
+                }
+                if !self.snapshot.operations.iter().any(|operation| {
+                    operation.operation_id == operation_id
+                        && operation.retention == CheckpointRetention::Retained
+                }) {
+                    return Err(CheckpointError::Unavailable);
+                }
+                false
+            }
+        };
+        if !resumed
+            && let Err(source) = self.append(
+                LedgerAction::CheckpointDeletionStarted { operation_id },
+                1,
+                TAIL_RECORD_BYTES,
+                "deletion_intent_sync",
+            )
+        {
+            if self.poisoned {
+                return Err(CheckpointError::Uncertain {
+                    operation_id: Some(operation_id),
+                    source: Box::new(source),
+                });
+            }
+            return Err(source);
+        }
+        let result = (|| {
+            self.remove_entry(operation_id)?;
+            self.append(
+                LedgerAction::CheckpointDeleted { operation_id },
+                0,
+                0,
+                "deletion_outcome_sync",
+            )?;
+            self.refresh_usage()?;
+            Ok(CheckpointDeletion {
+                operation_id,
+                resumed,
+                managed_bytes: self.used,
+            })
+        })();
+        result.map_err(|source: CheckpointError| {
+            self.poisoned = true;
+            CheckpointError::Uncertain {
+                operation_id: Some(operation_id),
+                source: Box::new(source),
+            }
+        })
+    }
+
+    /// Remove only the fixed artifact names, then the empty entry directory.
+    /// Removal is never recursive: an unknown name makes the directory removal
+    /// fail and leaves the deletion pending. Each parent is flushed afterwards;
+    /// on Windows that flush carries no power-loss guarantee (ADR-0023).
+    fn remove_entry(&mut self, operation_id: Uuid) -> Result<(), CheckpointError> {
+        let name = operation_id.to_string();
+        if self.directory.exists(OsStr::new(&name))? {
+            {
+                // Windows directory handles deny delete sharing, so this
+                // handle closes before its directory is removed.
+                let entry = self.directory.open_dir(OsStr::new(&name))?;
+                for artifact in ENTRY_ARTIFACTS {
+                    if entry.exists(OsStr::new(artifact))? {
+                        entry.remove_file(OsStr::new(artifact))?;
+                        self.faults.check("deletion_artifact")?;
+                    }
+                }
+                entry.sync()?;
+            }
+            self.directory.remove_dir(OsStr::new(&name))?;
+            self.faults.check("deletion_directory")?;
+        }
+        // An interrupted earlier request may have removed the entry without
+        // flushing its parent; flush on every path before recording success.
+        self.directory.sync()?;
+        Ok(())
     }
 
     fn refresh_usage(&mut self) -> Result<(), CheckpointError> {
@@ -839,6 +1073,11 @@ fn inventory(
             .iter()
             .find(|operation| operation.operation_id == id)
             .ok_or(CheckpointError::Invalid("unrecorded private entry"))?;
+        if operation.retention == CheckpointRetention::Deleted {
+            return Err(CheckpointError::Invalid(
+                "a deleted checkpoint entry is still present",
+            ));
+        }
         let entry = directory.open_dir(&name)?;
         for filename in entry.names(4)? {
             let limit = if filename == OsStr::new("manifest.json") {
@@ -861,6 +1100,12 @@ fn inventory(
                 return Err(CheckpointError::Limit);
             }
             add_usage(&mut used, length)?;
+        }
+        if operation.retention == CheckpointRetention::Deleting {
+            // A recorded deletion can leave any subset of the fixed names.
+            // Count them; their content no longer needs to match its record.
+            seen.push(id);
+            continue;
         }
         let security = if operation.progress != ReplacementProgress::Intent {
             let reference = operation
@@ -899,7 +1144,9 @@ fn inventory(
         ));
     }
     if snapshot.operations.iter().any(|operation| {
-        operation.progress != ReplacementProgress::Intent && !seen.contains(&operation.operation_id)
+        operation.retention == CheckpointRetention::Retained
+            && operation.progress != ReplacementProgress::Intent
+            && !seen.contains(&operation.operation_id)
     }) {
         return Err(CheckpointError::Invalid(
             "prepared checkpoint directory is missing",

@@ -1,14 +1,17 @@
 //! Replacement records and protected private checkpoint storage.
 //!
 //! The byte-input inspectors remain read-only. FileBroker checkpoint methods
-//! add protected Linux storage and existing-only recovery. The authorized apply
-//! path publishes one staged file; these records never restore or replay work.
+//! add protected native storage and existing-only recovery. The authorized apply
+//! path publishes one staged file. Explicit restore reuses that path, and
+//! explicit deletion removes one resolved entry; replay never restores,
+//! deletes, or repeats recorded work.
 
 mod manifest;
 mod replay;
 pub(crate) mod store;
 pub use store::{
-    CheckpointError, CheckpointInspection, CheckpointReceipt, CheckpointState, ReplacementReceipt,
+    CheckpointDeletion, CheckpointError, CheckpointInspection, CheckpointReceipt, CheckpointState,
+    ReplacementReceipt,
 };
 
 use serde::{Deserialize, Serialize};
@@ -114,6 +117,19 @@ pub enum ReplacementOutcome {
     Uncertain,
 }
 
+/// Recorded lifecycle of an operation's private entry. Deletion is explicit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckpointRetention {
+    /// The private entry is retained; inspection validates its artifacts.
+    Retained,
+    /// Deletion was recorded and may be partial. Only the same explicit
+    /// deletion request can finish it; nothing else is admitted meanwhile.
+    Deleting,
+    /// Deletion finished. The entry must be absent; its history remains.
+    Deleted,
+}
+
 /// A bounded size/digest claim, not proof of the bytes of any file.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -165,6 +181,8 @@ pub struct RecordedReplacement {
     pub code: Option<String>,
     /// Whether the journal contains explicit acknowledgement of this operation.
     pub acknowledged: bool,
+    /// Recorded private-entry lifecycle; deletion never changes the outcome.
+    pub retention: CheckpointRetention,
 }
 
 /// Fully validated in-memory ledger evidence. No filesystem work is performed.
@@ -172,19 +190,30 @@ pub struct RecordedReplacement {
 pub struct ReplacementSnapshot {
     /// Expected store identities, matched by every record.
     pub scope: ReplacementScope,
-    /// All retained operations in order. No completed history is evicted.
+    /// All recorded operations in order, including deleted entries' history.
+    /// No history is evicted; at most 64 operations are not yet deleted.
     pub operations: Vec<RecordedReplacement>,
     /// Number of complete accepted records, including the header.
     pub event_count: usize,
     /// Exact supplied byte count, including record delimiters.
     pub encoded_bytes: usize,
     pending_operation_id: Option<Uuid>,
+    pending_deletion_id: Option<Uuid>,
 }
 
 impl ReplacementSnapshot {
     /// Return unresolved recorded evidence, never permission to retry or repair.
     pub fn pending(&self) -> Option<&RecordedReplacement> {
-        let id = self.pending_operation_id?;
+        self.find(self.pending_operation_id?)
+    }
+
+    /// Return a recorded, unfinished deletion. Only the same explicit deletion
+    /// request can finish it; this is not permission to delete anything else.
+    pub fn pending_deletion(&self) -> Option<&RecordedReplacement> {
+        self.find(self.pending_deletion_id?)
+    }
+
+    fn find(&self, id: Uuid) -> Option<&RecordedReplacement> {
         self.operations
             .iter()
             .find(|operation| operation.operation_id == id)
@@ -228,7 +257,7 @@ pub fn inspect_initialization(
 /// Validate a complete bounded ledger and preserve every unfinished operation.
 ///
 /// Limits are 8 MiB, 4,096 records, 64 KiB per record including its delimiter,
-/// and 64 retained operation IDs. Duplicate JSON keys and unknown fields fail.
+/// and 64 operation IDs whose entries are not deleted. Duplicate JSON keys and unknown fields fail.
 /// Targets must use this OS's native encoding and broker-relative path syntax.
 /// This function validates only recorded claims, not checkpoint files, native
 /// identities, current policy, aggregate disk quota, durability, or authority.

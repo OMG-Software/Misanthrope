@@ -9,7 +9,7 @@ use std::time::SystemTime;
 
 use rustix::fs::{
     AtFlags, Dir, Mode, OFlags, ResolveFlags, StatxAttributes, StatxFlags, mkdirat, open, openat2,
-    statat, statx,
+    statat, statx, unlinkat,
 };
 use rustix::io::Errno;
 
@@ -285,6 +285,50 @@ impl PrivateDirectory {
         Ok(reopened)
     }
 
+    /// Remove one regular single-link file in this directory without following
+    /// a link. The caller syncs this directory afterwards.
+    ///
+    /// The name is pinned and checked before `unlinkat`, then the pinned inode
+    /// must have no remaining link. A same-user substitution between the check
+    /// and the unlink is reported as an error, not prevented. Nothing is retried.
+    pub fn remove_file(&self, name: &OsStr) -> io::Result<()> {
+        validate_name(name)?;
+        let parent = self.validate()?;
+        let pinned = native_open(
+            &self.file,
+            Path::new(name),
+            OFlags::PATH | OFlags::CLOEXEC,
+            Mode::empty(),
+            child_flags(),
+        )?;
+        let metadata = pinned.metadata()?;
+        if !metadata.is_file() || metadata.nlink() != 1 || metadata.dev() != parent.dev() {
+            return Err(invalid(
+                "private entry to remove is not a local regular single-link file",
+            ));
+        }
+        unlinkat(&self.file, name, AtFlags::empty())?;
+        if pinned.metadata()?.nlink() != 0 {
+            return Err(invalid("removed name did not refer to the checked file"));
+        }
+        Ok(())
+    }
+
+    /// Remove one empty private child directory. A nonempty directory fails;
+    /// this never removes contents. The caller syncs this directory afterwards.
+    pub fn remove_dir(&self, name: &OsStr) -> io::Result<()> {
+        validate_name(name)?;
+        self.validate()?;
+        let child = self.open_dir(name)?;
+        unlinkat(&self.file, name, AtFlags::REMOVEDIR)?;
+        if child.file.metadata()?.nlink() != 0 {
+            return Err(invalid(
+                "removed name did not refer to the checked directory",
+            ));
+        }
+        Ok(())
+    }
+
     /// Borrow the retained native directory handle inside the platform crate.
     pub(crate) fn native_file(&self) -> &File {
         &self.file
@@ -487,6 +531,56 @@ mod tests {
                 .exists(OsStr::new("link"))
                 .expect("nofollow existence observation")
         );
+    }
+
+    #[test]
+    fn removal_is_single_entry_nonrecursive_and_refuses_links() {
+        let root = private_root();
+        let directory = PrivateDirectory::open(root.path()).expect("private root");
+        let child = directory.create_dir(OsStr::new("entry")).expect("entry");
+        private_file(&root.path().join("entry/original"), b"payload");
+        // A stage keeps its source mode, so removal does not require mode 0600.
+        fs::write(root.path().join("entry/stage"), b"stage").expect("stage fixture");
+        fs::set_permissions(
+            root.path().join("entry/stage"),
+            fs::Permissions::from_mode(0o444),
+        )
+        .expect("read-only stage mode");
+
+        let error = directory
+            .remove_dir(OsStr::new("entry"))
+            .expect_err("nonempty directory");
+        assert_eq!(error.raw_os_error(), Some(Errno::NOTEMPTY.raw_os_error()));
+        assert!(root.path().join("entry/original").exists());
+        assert!(directory.remove_file(OsStr::new("entry")).is_err());
+
+        child
+            .remove_file(OsStr::new("stage"))
+            .expect("remove stage");
+        child
+            .remove_file(OsStr::new("original"))
+            .expect("remove payload");
+        assert_eq!(
+            child
+                .remove_file(OsStr::new("original"))
+                .expect_err("already removed")
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+        drop(child);
+        directory
+            .remove_dir(OsStr::new("entry"))
+            .expect("remove empty entry");
+        assert!(!root.path().join("entry").exists());
+
+        private_file(&root.path().join("file"), b"linked");
+        fs::hard_link(root.path().join("file"), root.path().join("hard")).expect("hard link");
+        assert!(directory.remove_file(OsStr::new("file")).is_err());
+        assert!(root.path().join("file").exists());
+        symlink("hard", root.path().join("link")).expect("symlink");
+        assert!(directory.remove_file(OsStr::new("link")).is_err());
+        assert!(fs::symlink_metadata(root.path().join("link")).is_ok());
+        assert!(directory.remove_file(OsStr::new("../escape")).is_err());
     }
 
     #[test]

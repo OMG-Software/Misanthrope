@@ -10,9 +10,9 @@ use time::{OffsetDateTime, UtcOffset};
 use uuid::{Uuid, Variant, Version};
 
 use super::{
-    InitializationPhase, InitializationSnapshot, RecordedArtifact, RecordedFileIdentity,
-    RecordedReplacement, ReplacementError, ReplacementOutcome, ReplacementProgress,
-    ReplacementScope, ReplacementSnapshot,
+    CheckpointRetention, InitializationPhase, InitializationSnapshot, RecordedArtifact,
+    RecordedFileIdentity, RecordedReplacement, ReplacementError, ReplacementOutcome,
+    ReplacementProgress, ReplacementScope, ReplacementSnapshot,
 };
 use crate::policy::WorkspaceId;
 use crate::session::NativePath;
@@ -95,6 +95,14 @@ pub(super) enum LedgerAction {
         code: Option<String>,
     },
     ReplacementAcknowledged {
+        operation_id: Uuid,
+    },
+    /// Durable intent to remove one resolved entry. Older readers refuse it.
+    CheckpointDeletionStarted {
+        operation_id: Uuid,
+    },
+    /// The entry and its files were removed and the parent was flushed.
+    CheckpointDeleted {
         operation_id: Uuid,
     },
 }
@@ -220,6 +228,7 @@ pub(super) fn ledger(
         event_count: 0,
         encoded_bytes: bytes.len(),
         pending_operation_id: None,
+        pending_deletion_id: None,
     };
     let mut event_ids = HashSet::new();
     for (index, line) in records(
@@ -316,6 +325,7 @@ fn apply(snapshot: &mut ReplacementSnapshot, action: LedgerAction) -> Result<(),
             validate_uuid(session_id)?;
             validate_uuid(workspace_id)?;
             if snapshot.pending_operation_id.is_some()
+                || snapshot.pending_deletion_id.is_some()
                 || snapshot
                     .operations
                     .iter()
@@ -323,7 +333,13 @@ fn apply(snapshot: &mut ReplacementSnapshot, action: LedgerAction) -> Result<(),
             {
                 return Err(ReplacementError::Invalid("parallel or reused operation ID"));
             }
-            if snapshot.operations.len() >= MAX_OPERATIONS {
+            if snapshot
+                .operations
+                .iter()
+                .filter(|operation| operation.retention != CheckpointRetention::Deleted)
+                .count()
+                >= MAX_OPERATIONS
+            {
                 return Err(ReplacementError::Limit("retained operations"));
             }
             if snapshot
@@ -361,6 +377,7 @@ fn apply(snapshot: &mut ReplacementSnapshot, action: LedgerAction) -> Result<(),
                 outcome: None,
                 code: None,
                 acknowledged: false,
+                retention: CheckpointRetention::Retained,
             });
             snapshot.pending_operation_id = Some(operation_id);
         }
@@ -447,6 +464,43 @@ fn apply(snapshot: &mut ReplacementSnapshot, action: LedgerAction) -> Result<(),
             let operation = pending(snapshot, operation_id)?;
             operation.acknowledged = true;
             snapshot.pending_operation_id = None;
+        }
+        LedgerAction::CheckpointDeletionStarted { operation_id } => {
+            // Only a resolved entry can be deleted, one at a time. Outcome,
+            // progress, and acknowledgement are history and stay unchanged.
+            if snapshot.pending_operation_id.is_some() || snapshot.pending_deletion_id.is_some() {
+                return Err(ReplacementError::Invalid(
+                    "deletion requires no unresolved operation or deletion",
+                ));
+            }
+            let operation = snapshot
+                .operations
+                .iter_mut()
+                .find(|operation| operation.operation_id == operation_id)
+                .ok_or(ReplacementError::Invalid(
+                    "deletion names no recorded operation",
+                ))?;
+            if operation.retention != CheckpointRetention::Retained {
+                return Err(ReplacementError::Invalid(
+                    "deletion names an entry that is not retained",
+                ));
+            }
+            operation.retention = CheckpointRetention::Deleting;
+            snapshot.pending_deletion_id = Some(operation_id);
+        }
+        LedgerAction::CheckpointDeleted { operation_id } => {
+            if snapshot.pending_deletion_id != Some(operation_id) {
+                return Err(ReplacementError::Invalid(
+                    "deletion outcome does not match the unfinished deletion",
+                ));
+            }
+            let operation = snapshot
+                .operations
+                .iter_mut()
+                .find(|operation| operation.operation_id == operation_id)
+                .ok_or(ReplacementError::Invalid("missing deleted operation"))?;
+            operation.retention = CheckpointRetention::Deleted;
+            snapshot.pending_deletion_id = None;
         }
     }
     Ok(())

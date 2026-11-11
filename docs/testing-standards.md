@@ -251,7 +251,8 @@ bytes and modes, source metadata restrictions, strict inventory, malformed or
 missing artifacts, live authority, unchanged targets, reserved tail capacity,
 64 retained intents, actual-file aggregate quota, initialization interruptions,
 partial writes, sync uncertainty, acknowledgement, and existing-only reopen.
-Recovery output excludes payloads and offers no apply/restore route.
+Recovery output excludes payloads. Inspection and acknowledgement offer no
+apply or restore path; Phase A4 adds restore only as a separate command.
 The tests use actual temporary files. They do not simulate physical power loss,
 foreign-user attacks, privileged bind mounts, or qualify a release filesystem.
 No A2b test demonstrates native replacement or metadata publication.
@@ -285,6 +286,19 @@ SACLs, a foreign owner,
 a second local user, a real second volume, ReFS, filter drivers, or physical
 power loss.
 
+Phase A4 adds restore and checkpoint-deletion tests in the core replacement
+module, the `replacement_records` ledger tests, the platform removal tests, and
+CLI `checkpoint_lifecycle` tests. Run them on native Windows NTFS and Linux ext4.
+Restore tests must show stale-content conflicts, foreign or missing checkpoints,
+denied authority, preserved security metadata, and a new checkpoint holding the
+replaced bytes. Deletion tests must show that unresolved operations are refused,
+that history survives deletion, that one retained slot is freed without
+eviction, and that unknown names and hard links are never removed. Inject a
+failure after each intent, artifact, directory, and outcome boundary, and show
+that only the same request finishes an interrupted deletion. On Windows, cover a
+stage with a foreign DACL, a read-only file, and a refused read-only file whose
+DACL denies attribute writes. Tests do not establish power-loss behavior.
+
 Before enabling another native replacement backend, implement the
 [accepted replacement contract](file-access.md#replacement-contract)
 and run the remaining acceptance cases on native Windows and Linux. Use private,
@@ -302,7 +316,8 @@ commit/sync boundaries; sleeps and pre-operation path swaps are insufficient.
 | Publication | Observe a prepared durable checkpoint before the commit attempt. Preserve required security metadata. Assert one native commit attempt and verify both checkpoint payloads remain intact. No truncate, copy/delete, or weaker fallback. |
 | Failure and reopen | Inject failures at every intent, payload, manifest, stage, native commit, file/directory sync, outcome, and acknowledgement boundary. Inspect the final ledger and disk state. Post-commit uncertainty never becomes clean failure or success without evidence. |
 | Recovery | Reopen never replays work. Missing/corrupt/foreign artifacts fail closed. Inspection is existing-only, acknowledgement does not repair, and caps preserve reserved recovery capacity. Verify no automatic stage deletion or rollback. |
-| Restore boundary | Verify A2 exposes no restore route. Before a later restore feature is enabled, test fresh read/write authority, explicit expected current bytes, detection of later user changes, a new checkpoint preserving them, and missing-target restore-as-create refusal. |
+| Restore boundary | Verify inspection and acknowledgement expose no restore path. Test restore's fresh read/write authority, explicit expected current bytes, detection of later user changes, a new checkpoint preserving them, refusal of foreign, deleted, or pending checkpoints, and missing-target restore-as-create refusal. |
+| Checkpoint deletion | Require an explicit permanent acknowledgement. Refuse pending, unresolved, deleted, and unknown operations. Record intent before removal and keep history afterward. Remove only fixed names, one entry at a time, without recursion, links, or ACL repair. Interrupt every boundary; only the same request may finish it, and other work stays blocked meanwhile. |
 | Compatibility and privacy | Existing settings, file-operation-v1, and session journals remain unchanged. New admission checks both logs. Downgrade remains unsupported while replacement state exists. Keep checkpoint contents out of audit output, model context, and conversation events. |
 
 A passing rename test does not establish checkpoint power-loss durability,

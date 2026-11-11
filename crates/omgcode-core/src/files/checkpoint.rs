@@ -7,7 +7,7 @@ use super::{FileBroker, FileError, FileOperation, FileOutcome, FileTarget, valid
 use crate::policy::{Operation, PolicyRequest, SessionBinding};
 use crate::replacement::store::{self, Store};
 use crate::replacement::{
-    CheckpointError, CheckpointInspection, CheckpointReceipt, RecordedArtifact,
+    CheckpointDeletion, CheckpointError, CheckpointInspection, CheckpointReceipt, RecordedArtifact,
 };
 use crate::session::sha256_hex;
 
@@ -81,6 +81,22 @@ impl FileBroker<'_> {
     /// be inspected on reopen without automatic retry.
     pub fn checkpoint_acknowledge(&mut self, operation_id: Uuid) -> Result<(), FileError> {
         Ok(store::acknowledge(self.control, operation_id)?)
+    }
+
+    /// Permanently delete one resolved checkpoint entry from existing storage.
+    ///
+    /// This is a trusted operator action, not a model tool route. It needs no
+    /// workspace binding and opens no workspace file. The entry's payloads,
+    /// manifest, and any retained stage are removed; the ledger keeps the
+    /// operation's history and outcome. An unresolved operation must first be
+    /// acknowledged. After an interrupted deletion, only the same request is
+    /// accepted, and it removes whatever fixed names remain. Removal is never
+    /// recursive, and no error path deletes other evidence.
+    pub fn checkpoint_delete(
+        &mut self,
+        operation_id: Uuid,
+    ) -> Result<CheckpointDeletion, FileError> {
+        Ok(store::delete(self.control, operation_id)?)
     }
 }
 

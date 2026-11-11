@@ -162,6 +162,14 @@ impl PrivateDirectory {
     pub fn sync(&self) -> io::Result<()> {
         Err(unsupported())
     }
+    /// Refuse unsupported private file removal.
+    pub fn remove_file(&self, _name: &OsStr) -> io::Result<()> {
+        Err(unsupported())
+    }
+    /// Refuse unsupported private directory removal.
+    pub fn remove_dir(&self, _name: &OsStr) -> io::Result<()> {
+        Err(unsupported())
+    }
 }
 
 #[cfg(not(any(target_os = "linux", windows)))]

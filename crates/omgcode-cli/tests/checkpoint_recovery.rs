@@ -176,19 +176,39 @@ fn unused_checkpoint_inspection_and_refused_acknowledgement_create_no_storage() 
 }
 
 #[test]
-/// Rejects unsupported preparation and restore routes without side effects.
-fn checkpoint_recovery_commands_do_not_add_prepare_or_restore_routes() {
+/// Rejects a preparation route and an underspecified restore without side effects.
+fn checkpoint_recovery_commands_add_no_prepare_route_or_implicit_restore() {
     let fixture = Fixture::new(ORIGINAL);
     let before = child_names(&fixture.data);
-    for command in ["prepare", "restore"] {
-        let output = run_cli(
-            &fixture.data,
-            &["file", command, path_arg(&fixture.workspace)],
-        );
-        assert!(!output.status.success(), "unexpected file {command} route");
+    let output = run_cli(
+        &fixture.data,
+        &["file", "prepare", path_arg(&fixture.workspace)],
+    );
+    assert!(!output.status.success(), "unexpected file prepare route");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unrecognized subcommand"));
+
+    let workspace_id = fixture.workspace_id.to_string();
+    let session_id = fixture.session_id.to_string();
+    let output = run_cli(
+        &fixture.data,
+        &[
+            "file",
+            "restore",
+            &workspace_id,
+            "note.txt",
+            "--session",
+            &session_id,
+        ],
+    );
+    assert!(
+        !output.status.success(),
+        "restore ran without preconditions"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for required in ["--checkpoint", "--expected-sha256", "--writers-stopped"] {
         assert!(
-            String::from_utf8_lossy(&output.stderr).contains("unrecognized subcommand"),
-            "unexpected refusal for file {command}"
+            stderr.contains(required),
+            "restore did not require {required}"
         );
     }
     assert_eq!(child_names(&fixture.data), before);

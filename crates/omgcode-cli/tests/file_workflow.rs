@@ -246,10 +246,17 @@ fn cli_creates_lists_reads_and_audits_files_without_recording_contents() {
         capabilities["exclusive_file_creation"],
         expected_availability
     );
-    assert_eq!(
-        capabilities["existing_file_replacement"],
-        cfg!(any(target_os = "linux", target_os = "windows"))
-    );
+    for flag in [
+        "existing_file_replacement",
+        "checkpoint_restore",
+        "checkpoint_deletion",
+    ] {
+        assert_eq!(
+            capabilities[flag],
+            cfg!(any(target_os = "linux", target_os = "windows")),
+            "{flag}"
+        );
+    }
     assert_eq!(capabilities["edit_previews"], native_broker_implemented);
     assert_eq!(capabilities["workspace_file_tools"], false);
 }

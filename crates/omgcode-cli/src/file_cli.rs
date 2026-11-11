@@ -91,6 +91,29 @@ pub(crate) enum FileCommand {
         #[arg(long, required = true, action = clap::ArgAction::SetTrue)]
         writers_stopped: bool,
     },
+    /// Restore a retained checkpoint's original bytes over the current file.
+    ///
+    /// The expected digest and size describe the current file, never the
+    /// checkpoint. The current bytes are checkpointed again before publication.
+    /// Stop every other writer; this does not provide atomic compare-and-swap.
+    Restore {
+        #[command(flatten)]
+        scope: Scope,
+        /// Existing workspace-relative regular file that the checkpoint recorded.
+        path: PathBuf,
+        /// Retained checkpoint operation whose original bytes are restored.
+        #[arg(long)]
+        checkpoint: Uuid,
+        /// Expected SHA-256 of the current file's exact bytes.
+        #[arg(long)]
+        expected_sha256: String,
+        /// Expected byte count of the current file.
+        #[arg(long)]
+        expected_bytes: u64,
+        /// Acknowledge that all other writers are stopped. This does not provide CAS.
+        #[arg(long, required = true, action = clap::ArgAction::SetTrue)]
+        writers_stopped: bool,
+    },
     /// Inspect validated private file-operation metadata and pending recovery.
     Audit {
         #[arg(long, default_value_t = 20)]
@@ -111,6 +134,25 @@ pub(crate) enum FileCommand {
     Checkpoints,
     /// Record inspection of one checkpoint operation without applying or replaying it.
     AcknowledgeCheckpoint { operation_id: Uuid },
+    /// Permanently delete one resolved checkpoint entry; its ledger history stays.
+    ///
+    /// Repeat the same command to finish an interrupted deletion. No workspace
+    /// file is opened or changed.
+    DeleteCheckpoint {
+        operation_id: Uuid,
+        /// Acknowledge that the deleted bytes can no longer be restored.
+        #[arg(long, required = true, action = clap::ArgAction::SetTrue)]
+        permanent: bool,
+    },
+}
+
+/// Restore output: the new operation's receipt and the checkpoint it read.
+#[cfg(any(target_os = "linux", windows))]
+#[derive(serde::Serialize)]
+struct RestoreOutput {
+    restored_from: Uuid,
+    #[serde(flatten)]
+    receipt: omgcode_core::replacement::ReplacementReceipt,
 }
 
 /// Open existing trusted settings. No command silently chooses a development root.
@@ -232,6 +274,41 @@ pub(crate) fn run(command: FileCommand, data_root: &Path) -> Result<(), CliError
                 )
             }
         }
+        FileCommand::Restore {
+            scope,
+            path,
+            checkpoint,
+            expected_sha256,
+            expected_bytes,
+            writers_stopped: _,
+        } => {
+            #[cfg(not(any(target_os = "linux", windows)))]
+            {
+                let _ = (scope, path, checkpoint, expected_sha256, expected_bytes);
+                Err(CliError::new(
+                    "file_unsupported",
+                    "File restore is available only on Linux and Windows",
+                ))
+            }
+            #[cfg(any(target_os = "linux", windows))]
+            {
+                let binding = control
+                    .bind_session(scope.session, scope.workspace)
+                    .map_err(|error| CliError::new("control", error.to_string()))?;
+                let target = target(scope, path);
+                let expected = RecordedArtifact {
+                    bytes: expected_bytes,
+                    sha256: expected_sha256,
+                };
+                let receipt = FileBroker::new(&mut control)
+                    .restore_checkpoint(&binding, &target, checkpoint, &expected)
+                    .map_err(file_error)?;
+                print_json(&RestoreOutput {
+                    restored_from: checkpoint,
+                    receipt,
+                })
+            }
+        }
         FileCommand::Audit { limit, archive } => {
             let mut broker = FileBroker::new(&mut control);
             let view = match archive {
@@ -267,6 +344,14 @@ pub(crate) fn run(command: FileCommand, data_root: &Path) -> Result<(), CliError
                 "applied": false,
             }))
         }
+        FileCommand::DeleteCheckpoint {
+            operation_id,
+            permanent: _,
+        } => print_json(
+            &FileBroker::new(&mut control)
+                .checkpoint_delete(operation_id)
+                .map_err(file_error)?,
+        ),
     }
 }
 
