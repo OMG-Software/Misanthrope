@@ -391,13 +391,19 @@ fn a_second_writer_waits_for_the_lock() {
         .expect("the waiter opens after the release");
 }
 
-/// Only runs without an outcome are listed as in progress.
+/// Pending starts include runs whose cleanup was unconfirmed, and only a
+/// recorded finish counts as an outcome. Acknowledgement records none.
 #[test]
-fn in_progress_lists_only_runs_without_an_outcome() {
+fn pending_starts_and_outcomes_follow_the_recorded_events() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let mut journal = RunJournal::open(directory.path(), store_id()).expect("journal");
-    let (going, ended, unconfirmed) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
-    for run in [going, ended, unconfirmed] {
+    let (going, ended, unconfirmed, abandoned) = (
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+    );
+    for run in [going, ended, unconfirmed, abandoned] {
         journal.start(start(run)).expect("start");
     }
     journal
@@ -406,10 +412,18 @@ fn in_progress_lists_only_runs_without_an_outcome() {
     journal
         .finish(unconfirmed, finished(RunResult::CleanupUnconfirmed))
         .expect("finish");
+    journal.acknowledge(abandoned).expect("acknowledge");
     let listed: Vec<_> = journal
-        .in_progress()
+        .pending_starts()
         .iter()
         .map(|start| start.run_id)
         .collect();
-    assert_eq!(listed, vec![going]);
+    assert_eq!(listed, vec![going, unconfirmed]);
+    assert_eq!(journal.outcome(going), None);
+    assert_eq!(journal.outcome(ended), Some(RunResult::Revoked));
+    assert_eq!(
+        journal.outcome(unconfirmed),
+        Some(RunResult::CleanupUnconfirmed)
+    );
+    assert_eq!(journal.outcome(abandoned), None);
 }

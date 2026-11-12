@@ -371,8 +371,9 @@ impl RunJournal {
         &self.state.pending
     }
 
-    /// The recorded intent of each run that has no outcome yet, oldest first.
-    pub(crate) fn in_progress(&self) -> Vec<&RunStart> {
+    /// The recorded intent of each pending run, oldest first: runs with no
+    /// outcome yet and runs whose cleanup was unconfirmed.
+    pub(crate) fn pending_starts(&self) -> Vec<&RunStart> {
         self.entries
             .iter()
             .filter_map(|entry| match &entry.action {
@@ -380,11 +381,27 @@ impl RunJournal {
                 _ => None,
             })
             .filter(|start| {
-                self.state.pending.iter().any(|pending| {
-                    pending.run_id == start.run_id && pending.state == PendingRunState::InProgress
-                })
+                self.state
+                    .pending
+                    .iter()
+                    .any(|pending| pending.run_id == start.run_id)
             })
             .collect()
+    }
+
+    /// The recorded result of a run, if its outcome was recorded. An
+    /// acknowledged run with no outcome has none.
+    pub(crate) fn outcome(&self, run_id: Uuid) -> Option<RunResult> {
+        self.entries
+            .iter()
+            .rev()
+            .find_map(|entry| match &entry.action {
+                RunAction::RunFinished {
+                    run_id: finished,
+                    finish,
+                } if *finished == run_id => Some(finish.result),
+                _ => None,
+            })
     }
 
     /// The newest `limit` entries, oldest first.

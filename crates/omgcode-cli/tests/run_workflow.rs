@@ -294,6 +294,10 @@ fn an_abandoned_run_is_pending_until_acknowledged() {
     let run_id = wait_for_start(&scene);
     child.kill().expect("kill the CLI");
     child.wait().expect("reap the CLI");
+    // On Linux, killing the CLI leaves the run's process group behind;
+    // on Windows, closing the CLI's job handle already ended the tree.
+    #[cfg(target_os = "linux")]
+    stop_group(&scene);
     let archive = scene.path("archive");
     fs::create_dir(&archive).expect("archive directory");
     let output = scene.cli(&["runs", "archive", "--archive-dir", path_arg(&archive)]);
@@ -395,9 +399,10 @@ fn profiles_are_managed_with_revisions() {
 }
 
 /// A run that writes `started.txt` once its tree is running, then runs until
-/// it is stopped.
+/// it is stopped. On Linux the marker holds the shell's process ID, which is
+/// also the run's process group, because the runner makes it the leader.
 #[cfg(target_os = "linux")]
-const LONG_RUN: &str = "sleep 30 & echo started > started.txt; wait";
+const LONG_RUN: &str = "sleep 30 & echo $$ > started.txt; wait";
 #[cfg(windows)]
 const LONG_RUN: &str = "echo started>started.txt& for /l %i in (1,0,2) do @rem";
 
@@ -415,6 +420,32 @@ fn wait_for_start(scene: &Scene) -> String {
         .as_str()
         .expect("the started run is pending")
         .to_owned()
+}
+
+/// Kill the process group of a run whose CLI was killed, and wait until no
+/// member remains, so the test never leaves a detached tree behind.
+#[cfg(target_os = "linux")]
+fn stop_group(scene: &Scene) {
+    let marker = fs::read_to_string(scene.workspace.join("started.txt")).expect("start marker");
+    let group = format!("-{}", marker.trim().parse::<u32>().expect("process group"));
+    // The group may already be gone; the probe below decides.
+    let _ = Command::new("kill")
+        .args(["-s", "KILL", "--", &group])
+        .status();
+    let until = Instant::now() + Duration::from_secs(10);
+    loop {
+        let alive = Command::new("kill")
+            .args(["-0", "--", &group])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("probe the process group")
+            .success();
+        if !alive {
+            return;
+        }
+        assert!(Instant::now() < until, "the run's process group remained");
+        thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// The newest journal entry's recorded result.
@@ -466,7 +497,7 @@ fn removing_the_profile_stops_a_live_run() {
         .expect("spawn run");
     wait_for_start(&scene);
     let revision = scene.revision().to_string();
-    assert_success(&scene.cli(&[
+    assert_success(&scene.settings_cli(&[
         "workspace",
         "profile-remove",
         "system",
@@ -481,6 +512,37 @@ fn removing_the_profile_stops_a_live_run() {
             .as_str()
             .expect("reason")
             .contains("profile")
+    );
+    scene.close();
+}
+
+/// Revoking any container grant of the workspace, not only its read-write
+/// grant, stops a live run before the command reports. The run never needed
+/// this read-execute grant, but its container held it while it ran.
+#[cfg(windows)]
+#[test]
+fn revoking_a_read_grant_stops_a_live_run() {
+    let mut scene = Scene::new();
+    assert_success(&scene.add_profile("system", &[]));
+    let tools = scene.path("tools");
+    fs::create_dir(&tools).expect("tools directory");
+    scene.grant(&tools, "read-execute");
+    let grant = scene.grants.pop().expect("read grant");
+    let child = scene
+        .command(&[], &shell(LONG_RUN))
+        .spawn()
+        .expect("spawn run");
+    wait_for_start(&scene);
+    assert_success(&scene.settings_cli(&["workspace", "container-revoke", &grant]));
+    // The command returned only after the outcome was recorded.
+    assert_eq!(scene.audit()["pending"], Value::Array(Vec::new()));
+    let run = run_json(&wait(child, Duration::from_secs(30)));
+    assert_eq!(run["finish"]["result"]["kind"], "revoked");
+    assert!(
+        run["revoked_because"]
+            .as_str()
+            .expect("reason")
+            .contains("revoked")
     );
     scene.close();
 }

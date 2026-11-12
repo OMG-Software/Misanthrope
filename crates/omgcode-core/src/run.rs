@@ -121,8 +121,9 @@ pub struct RunReport {
 pub struct WithdrawnRuns {
     /// Runs that stopped and whose outcome was recorded.
     pub stopped: Vec<Uuid>,
-    /// Runs still pending after the wait: their supervisor is still live,
-    /// cleanup was unconfirmed, or the supervisor ended without an outcome.
+    /// Runs not observed to stop: their supervisor is still live, cleanup
+    /// was unconfirmed, or the supervisor ended without an outcome, including
+    /// a run acknowledged without one.
     pub unconfirmed: Vec<Uuid>,
 }
 
@@ -331,16 +332,24 @@ pub fn run(
         "trusted runs exist only on Linux and Windows",
     ))?;
     let control_path = ControlStore::journal_path(data_root);
-    let (journal_root, store_id, mut prepared, owner, baseline) = {
+    let (journal_root, store_id, mut prepared, owner, baseline, revocations) = {
         let control = open_control(data_root)?;
         let (journal_root, store_id) = control.file_audit_context()?;
         let prepared = prepare(&control, request, platform, &journal_root)?;
         // Taken under the control lock, so every later change is seen.
         let baseline = stamp(&control_path)?;
+        let revocations = control.grant_revocations(request.workspace_id);
         let owner = OwnerLock::acquire(&journal_root, prepared.start.run_id)?;
         let mut journal = RunJournal::open(&journal_root, store_id)?;
         journal.start(prepared.start.clone())?;
-        (journal_root, store_id, prepared, owner, baseline)
+        (
+            journal_root,
+            store_id,
+            prepared,
+            owner,
+            baseline,
+            revocations,
+        )
     };
     let run_id = prepared.start.run_id;
     let stop = CancelSignal::new();
@@ -351,6 +360,7 @@ pub fn run(
             data_root,
             control_path: &control_path,
             start: &prepared.start,
+            revocations,
             caller: cancel,
             stop: &stop,
             done: &done,
@@ -418,6 +428,8 @@ struct Watch<'a> {
     data_root: &'a Path,
     control_path: &'a Path,
     start: &'a RunStart,
+    /// Container revocations of the workspace recorded when the run started.
+    revocations: u64,
     caller: &'a CancelSignal,
     stop: &'a CancelSignal,
     done: &'a AtomicBool,
@@ -451,7 +463,12 @@ impl Watch<'_> {
         match ControlStore::open_existing(self.data_root) {
             Ok(Some(control)) => {
                 *seen = current;
-                withdrawn(&control, self.start)
+                withdrawn(&control, self.start).or_else(|| {
+                    // A grant can be added and revoked between two polls, so
+                    // its state alone can miss a revocation; the count cannot.
+                    (control.grant_revocations(self.start.workspace_id) != self.revocations)
+                        .then_some("a container grant of this workspace was revoked")
+                })
             }
             Ok(None) => Some("the settings were removed"),
             Err(ControlError::Busy) => None,
@@ -550,14 +567,45 @@ fn workspace_access(
     Ok(())
 }
 
-/// Wait for every in-progress run that the recorded settings no longer allow
-/// to stop and record its outcome.
+/// The pending runs of one workspace: runs with no outcome yet and runs
+/// whose cleanup was unconfirmed.
+///
+/// `workspace container-revoke` calls this while it holds the control lock,
+/// before it records the revocation. Runs start only under that lock, so the
+/// result is exactly the runs that started before the revocation, which it
+/// then passes to [`stop_withdrawn_runs`].
+pub fn workspace_runs(
+    control: &ControlStore,
+    workspace_id: WorkspaceId,
+) -> Result<Vec<Uuid>, RunError> {
+    let (journal_root, store_id) = control.file_audit_context()?;
+    let Some(journal) = RunJournal::open_existing(&journal_root, store_id)? else {
+        return Ok(Vec::new());
+    };
+    Ok(journal
+        .pending_starts()
+        .into_iter()
+        .filter(|start| start.workspace_id == workspace_id)
+        .map(|start| start.run_id)
+        .collect())
+}
+
+/// Wait for every pending run that the recorded settings no longer allow,
+/// and every pending run in `also_withdrawn`, to stop and record its outcome.
 ///
 /// Settings commands that can withdraw access call this after their change
 /// is recorded and their control lock is released, so each run's watcher can
-/// read the change. Runs still pending when `wait` ends are reported as
-/// unconfirmed, and the caller must not report the change as complete.
-pub fn stop_withdrawn_runs(data_root: &Path, wait: Duration) -> Result<WithdrawnRuns, RunError> {
+/// read the change. A run counts as stopped only when its supervisor released
+/// its owner lock and an outcome other than `cleanup_unconfirmed` is recorded.
+/// A run whose cleanup was unconfirmed, or which was acknowledged without an
+/// outcome, may still have processes, so it is reported as unconfirmed, as is
+/// a run still live when `wait` ends. The caller must not report the change
+/// as complete while any run is unconfirmed.
+pub fn stop_withdrawn_runs(
+    data_root: &Path,
+    wait: Duration,
+    also_withdrawn: &[Uuid],
+) -> Result<WithdrawnRuns, RunError> {
     let (journal_root, store_id, affected) = {
         let control = open_control(data_root)?;
         let (journal_root, store_id) = control.file_audit_context()?;
@@ -565,9 +613,11 @@ pub fn stop_withdrawn_runs(data_root: &Path, wait: Duration) -> Result<Withdrawn
             return Ok(WithdrawnRuns::default());
         };
         let affected: Vec<Uuid> = journal
-            .in_progress()
+            .pending_starts()
             .into_iter()
-            .filter(|start| withdrawn(&control, start).is_some())
+            .filter(|start| {
+                also_withdrawn.contains(&start.run_id) || withdrawn(&control, start).is_some()
+            })
             .map(|start| start.run_id)
             .collect();
         (journal_root, store_id, affected)
@@ -584,16 +634,30 @@ pub fn stop_withdrawn_runs(data_root: &Path, wait: Duration) -> Result<Withdrawn
         }
     }
     let journal = RunJournal::open(&journal_root, store_id)?;
-    let (unconfirmed, stopped) = affected.into_iter().partition(|run_id| {
-        journal
-            .pending()
-            .iter()
-            .any(|pending| pending.run_id == *run_id)
-    });
-    Ok(WithdrawnRuns {
-        stopped,
-        unconfirmed,
-    })
+    confirm_stopped(&journal_root, &journal, affected)
+}
+
+/// Split withdrawn runs into those observed to stop and the rest. The owner
+/// lock is probed again after the journal is read, so a run whose supervisor
+/// is still live is never counted as stopped.
+fn confirm_stopped(
+    journal_root: &Path,
+    journal: &RunJournal,
+    affected: Vec<Uuid>,
+) -> Result<WithdrawnRuns, RunError> {
+    let mut runs = WithdrawnRuns::default();
+    for run_id in affected {
+        let recorded = matches!(
+            journal.outcome(run_id),
+            Some(result) if result != RunResult::CleanupUnconfirmed
+        );
+        if recorded && matches!(probe_owner(journal_root, run_id)?, Owner::Ended(_)) {
+            runs.stopped.push(run_id);
+        } else {
+            runs.unconfirmed.push(run_id);
+        }
+    }
+    Ok(runs)
 }
 
 /// Map the runner's result to a recorded outcome and, for failures, an error.
@@ -1147,6 +1211,138 @@ mod tests {
         }
     }
 
+    fn finished(result: RunResult) -> RunFinish {
+        RunFinish {
+            result,
+            confinement: Some(platform_confinement()),
+            elapsed_ms: 1,
+            stdout_bytes: 0,
+            stderr_bytes: 0,
+        }
+    }
+
+    /// A run of a recorded profile, so the settings still allow it on Linux.
+    #[cfg(target_os = "linux")]
+    fn allowed_start(data: &Path, directory: &Path, workspace_id: WorkspaceId) -> RunStart {
+        let tools = directory.join("tools");
+        fs::create_dir(&tools).expect("tools");
+        let mut control = ControlStore::open(data).expect("control store");
+        let profile = control
+            .add_profile(
+                &crate::control::ProfileDeclaration {
+                    name: "kept".into(),
+                    read_only_roots: vec![tools],
+                    path_entries: Vec::new(),
+                    environment: Vec::new(),
+                },
+                control.revision(),
+            )
+            .expect("profile");
+        let mut start = withdrawn_start(workspace_id);
+        start.profile_id = profile.id();
+        start.profile_name = "kept".into();
+        start
+    }
+
+    /// A withdrawn run whose cleanup was unconfirmed may still have
+    /// processes, so a settings change never reports it stopped.
+    #[test]
+    fn withdrawn_runs_with_unconfirmed_cleanup_stay_unconfirmed() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (data, workspace_id, journal_root, store_id) = store(directory.path());
+        let start = withdrawn_start(workspace_id);
+        let run_id = start.run_id;
+        let mut journal = RunJournal::open(&journal_root, store_id).expect("journal");
+        journal.start(start).expect("start");
+        journal
+            .finish(run_id, finished(RunResult::CleanupUnconfirmed))
+            .expect("finish");
+        drop(journal);
+        let runs = stop_withdrawn_runs(&data, Duration::from_millis(100), &[]).expect("check");
+        assert_eq!(runs.unconfirmed, vec![run_id]);
+        assert!(runs.stopped.is_empty());
+    }
+
+    /// Acknowledging a run records no outcome, so it is not evidence that a
+    /// withdrawn run stopped; only a recorded outcome is.
+    #[test]
+    fn acknowledged_runs_are_not_confirmed_as_stopped() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (_data, workspace_id, journal_root, store_id) = store(directory.path());
+        let (abandoned, recorded) = (withdrawn_start(workspace_id), withdrawn_start(workspace_id));
+        let (abandoned_id, recorded_id) = (abandoned.run_id, recorded.run_id);
+        let mut journal = RunJournal::open(&journal_root, store_id).expect("journal");
+        journal.start(abandoned).expect("start");
+        journal.start(recorded).expect("start");
+        journal.acknowledge(abandoned_id).expect("acknowledge");
+        journal
+            .finish(recorded_id, finished(RunResult::Revoked))
+            .expect("finish");
+        let runs = confirm_stopped(&journal_root, &journal, vec![abandoned_id, recorded_id])
+            .expect("confirm");
+        assert_eq!(runs.unconfirmed, vec![abandoned_id]);
+        assert_eq!(runs.stopped, vec![recorded_id]);
+    }
+
+    /// Runs that a container revocation names are waited for even when the
+    /// remaining settings would allow them. Linux only, for the reason given
+    /// on `allowed_runs_are_not_waited_for`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn named_runs_are_waited_for_even_when_allowed() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (data, workspace_id, journal_root, store_id) = store(directory.path());
+        let start = allowed_start(&data, directory.path(), workspace_id);
+        let run_id = start.run_id;
+        let _owner = OwnerLock::acquire(&journal_root, run_id).expect("owner lock");
+        RunJournal::open(&journal_root, store_id)
+            .expect("journal")
+            .start(start)
+            .expect("start");
+        let control = open_control(&data).expect("control");
+        assert_eq!(
+            workspace_runs(&control, workspace_id).expect("runs"),
+            vec![run_id]
+        );
+        assert!(
+            workspace_runs(&control, WorkspaceId::fresh())
+                .expect("runs")
+                .is_empty()
+        );
+        drop(control);
+        let runs =
+            stop_withdrawn_runs(&data, Duration::from_millis(100), &[run_id]).expect("check");
+        assert_eq!(runs.unconfirmed, vec![run_id]);
+    }
+
+    /// The revocation count a run's watcher compares changes when a
+    /// revocation of the workspace is requested. It survives the grant's
+    /// removal and replay, and other workspaces keep their own count.
+    #[test]
+    fn revocation_counts_survive_the_removed_grant_and_replay() {
+        use crate::control::ContainerGrantAccess;
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (data, workspace_id, _journal_root, _store_id) = store(directory.path());
+        let tools = directory.path().join("tools");
+        fs::create_dir(&tools).expect("tools");
+        let mut control = ControlStore::open(&data).expect("control store");
+        let grant_id =
+            control.test_record_grant(workspace_id, &tools, ContainerGrantAccess::ReadExecute);
+        assert_eq!(control.grant_revocations(workspace_id), 0);
+        assert_eq!(
+            control.container_grant_workspace(grant_id),
+            Some(workspace_id)
+        );
+        control.test_record_revocation(grant_id);
+        assert_eq!(control.grant_revocations(workspace_id), 1);
+        assert_eq!(control.grant_revocations(WorkspaceId::fresh()), 0);
+        drop(control);
+        let reopened = open_control(&data).expect("control");
+        assert!(reopened.container_grants().is_empty());
+        assert_eq!(reopened.grant_revocations(workspace_id), 1);
+    }
+
     /// A withdrawn run is reported as unconfirmed while its supervisor is
     /// live and while its outcome is missing, and drops out once recorded.
     #[test]
@@ -1162,7 +1358,7 @@ mod tests {
             .expect("start");
 
         // The supervisor still holds its lock, so the wait ends unconfirmed.
-        let live = stop_withdrawn_runs(&data, Duration::from_millis(100)).expect("check");
+        let live = stop_withdrawn_runs(&data, Duration::from_millis(100), &[]).expect("check");
         assert_eq!(live.unconfirmed, vec![run_id]);
         assert!(live.stopped.is_empty());
         let error = acknowledge(&data, run_id).expect_err("a live run");
@@ -1170,7 +1366,7 @@ mod tests {
 
         // A supervisor that ended without an outcome is not a stopped run.
         drop(owner);
-        let abandoned = stop_withdrawn_runs(&data, Duration::from_millis(100)).expect("check");
+        let abandoned = stop_withdrawn_runs(&data, Duration::from_millis(100), &[]).expect("check");
         assert_eq!(abandoned.unconfirmed, vec![run_id]);
 
         let mut journal = RunJournal::open(&journal_root, store_id).expect("journal");
@@ -1187,7 +1383,7 @@ mod tests {
             )
             .expect("finish");
         drop(journal);
-        let recorded = stop_withdrawn_runs(&data, Duration::from_millis(100)).expect("check");
+        let recorded = stop_withdrawn_runs(&data, Duration::from_millis(100), &[]).expect("check");
         assert!(recorded.unconfirmed.is_empty() && recorded.stopped.is_empty());
     }
 
@@ -1199,30 +1395,13 @@ mod tests {
     fn allowed_runs_are_not_waited_for() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let (data, workspace_id, journal_root, store_id) = store(directory.path());
-        let tools = directory.path().join("tools");
-        fs::create_dir(&tools).expect("tools");
-        let mut control = ControlStore::open(&data).expect("control store");
-        let profile = control
-            .add_profile(
-                &crate::control::ProfileDeclaration {
-                    name: "kept".into(),
-                    read_only_roots: vec![tools],
-                    path_entries: Vec::new(),
-                    environment: Vec::new(),
-                },
-                control.revision(),
-            )
-            .expect("profile");
-        drop(control);
-        let mut start = withdrawn_start(workspace_id);
-        start.profile_id = profile.id();
-        start.profile_name = "kept".into();
+        let start = allowed_start(&data, directory.path(), workspace_id);
         let _owner = OwnerLock::acquire(&journal_root, start.run_id).expect("owner lock");
         RunJournal::open(&journal_root, store_id)
             .expect("journal")
             .start(start)
             .expect("start");
-        let none = stop_withdrawn_runs(&data, Duration::from_secs(5)).expect("check");
+        let none = stop_withdrawn_runs(&data, Duration::from_secs(5), &[]).expect("check");
         assert!(none.unconfirmed.is_empty() && none.stopped.is_empty());
     }
 }

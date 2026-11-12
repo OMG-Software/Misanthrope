@@ -256,9 +256,13 @@ and checks the run against them:
 - `execute`, `read`, and `write` are still enabled, and `host_services` for a
   run that selected host services;
 - the run's profile still exists with the same identity;
-- on Windows, the workspace still has its active read-write grant, and no
-  grant of the workspace is `revoking`. A `pending` grant only adds access, so
-  it does not stop a run.
+- on Windows, the workspace still has its active read-write grant, no grant of
+  the workspace is `revoking`, and no revocation of any grant of the workspace
+  was requested since the run started. Every grant applies to the container,
+  so revoking any of them withdraws the run, including a grant added after it
+  started. The watcher compares a per-workspace count of revocation requests,
+  which it cannot miss between two polls. A `pending` grant only adds access,
+  so it does not stop a run.
 
 When a check fails, or the settings cannot be read, the watcher stops the whole
 tree. The outcome is recorded as `revoked`, and the report gives the reason in
@@ -266,11 +270,23 @@ tree. The outcome is recorded as `revoked`, and the report gives the reason in
 
 `workspace permissions`, `profile-remove`, `container-revoke`, and `set-root`
 record their change first. Then they release the control lock and wait up to
-60 seconds for every in-progress run that the new settings no longer allow.
-A run counts as stopped only when its owner lock is free and its outcome is
-recorded. If any run is still pending after the wait, the command fails with
-code `run` and lists those runs; the change itself stays recorded. Inspect them
-with `runs audit`. A change that withdraws nothing returns at once.
+60 seconds for every pending run that the new settings no longer allow.
+`container-revoke` also waits for every pending run of the grant's workspace
+that started before the revocation; it lists them while it holds the control
+lock, under which every run starts.
+
+A run counts as stopped only when its owner lock is free and an outcome other
+than `cleanup_unconfirmed` is recorded. These runs are reported as not stopped,
+and the command fails with code `run` and lists them:
+
+- a run still live after the wait;
+- a run whose cleanup was unconfirmed, because processes may remain, until it
+  is acknowledged;
+- a run whose supervisor ended without an outcome, even if it was acknowledged
+  while the command waited.
+
+The change itself stays recorded. Inspect the runs with `runs audit`. A change
+that withdraws nothing returns at once.
 
 Settings commands wait up to 10 seconds for another command's control lock,
 because run watchers hold it briefly while they reread the settings.

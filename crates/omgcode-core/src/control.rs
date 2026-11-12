@@ -4,7 +4,7 @@
 //! Settings are user input, never model tools. Directory checks here detect
 //! ordinary replacement and configuration mistakes; they are not an I/O broker.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -158,6 +158,11 @@ pub struct ControlSnapshot {
     container_grants: Vec<ContainerGrantStatus>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     profiles: Vec<ProfileStatus>,
+    /// Container revocations requested per workspace since the journal was
+    /// created. Derived on replay and never serialized; run watchers compare
+    /// it with the count when their run started.
+    #[serde(skip)]
+    grant_revocations: BTreeMap<WorkspaceId, u64>,
 }
 
 /// Operator-facing workspace view that reports every preference explicitly.
@@ -418,6 +423,7 @@ impl ControlStore {
                 configuration_only: true,
                 container_grants: Vec::new(),
                 profiles: Vec::new(),
+                grant_revocations: BTreeMap::new(),
             },
             entries: Vec::new(),
             bytes: 0,

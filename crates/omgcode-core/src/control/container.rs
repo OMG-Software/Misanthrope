@@ -150,6 +150,70 @@ impl ControlStore {
         &self.snapshot.container_grants
     }
 
+    /// How many container revocations were requested for `workspace_id`
+    /// since the journal was created. A run compares this with the count
+    /// when it started: any revocation of its workspace withdraws it, even
+    /// one whose grant was added after the run started.
+    pub(crate) fn grant_revocations(&self, workspace_id: WorkspaceId) -> u64 {
+        self.snapshot
+            .grant_revocations
+            .get(&workspace_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Record a requested and applied grant without changing any ACL, for
+    /// tests of code that reads grant state.
+    #[cfg(test)]
+    pub(crate) fn test_record_grant(
+        &mut self,
+        workspace_id: WorkspaceId,
+        path: &Path,
+        access: ContainerGrantAccess,
+    ) -> Uuid {
+        let grant = ContainerGrant {
+            id: Uuid::new_v4(),
+            workspace_id,
+            container: container_name(workspace_id)
+                .expect("name")
+                .as_str()
+                .to_owned(),
+            sid: "S-1-15-2-1-2-3-4-5-6-7".to_owned(),
+            directory: DirectoryRecord::capture(path).expect("directory"),
+            access,
+        };
+        let id = grant.id;
+        let revision = self.next_revision().expect("revision");
+        self.append(Action::ContainerGrantRequested { grant }, revision)
+            .expect("request");
+        self.append(
+            Action::ContainerGrantApplied { grant_id: id },
+            self.revision(),
+        )
+        .expect("applied");
+        id
+    }
+
+    /// Record a requested and confirmed revocation without changing any ACL.
+    #[cfg(test)]
+    pub(crate) fn test_record_revocation(&mut self, grant_id: Uuid) {
+        for action in [
+            Action::ContainerRevokeRequested { grant_id },
+            Action::ContainerGrantRevoked { grant_id },
+        ] {
+            self.append(action, self.revision()).expect("revocation");
+        }
+    }
+
+    /// The workspace a recorded grant belongs to.
+    pub fn container_grant_workspace(&self, grant_id: Uuid) -> Option<WorkspaceId> {
+        self.snapshot
+            .container_grants
+            .iter()
+            .find(|status| status.grant.id == grant_id)
+            .map(|status| status.grant.workspace_id)
+    }
+
     /// Grant the workspace container access to `path` and record it.
     ///
     /// Read-write grants are limited to the workspace directory. A read-execute
@@ -362,6 +426,16 @@ pub(super) fn apply(state: &mut ControlSnapshot, action: &Action) -> Result<(), 
             transition(state, *grant_id, |current| {
                 (current != ContainerGrantState::Revoking).then_some(ContainerGrantState::Revoking)
             })?;
+            let workspace_id = state
+                .container_grants
+                .iter()
+                .find(|status| status.grant.id == *grant_id)
+                .map(|status| status.grant.workspace_id)
+                .ok_or(ControlError::Invalid("unknown container grant"))?;
+            let count = state.grant_revocations.entry(workspace_id).or_insert(0);
+            *count = count
+                .checked_add(1)
+                .ok_or(ControlError::Invalid("too many container revocations"))?;
         }
         Action::ContainerGrantRevoked { grant_id } => {
             let index = state

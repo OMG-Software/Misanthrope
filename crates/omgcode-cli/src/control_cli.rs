@@ -177,7 +177,7 @@ pub(crate) fn run(action: WorkspaceCommand, data_root: &Path) -> Result<(), CliE
                 .map_err(control_error)?;
             let snapshot = store.snapshot();
             drop(store);
-            stop_withdrawn_runs(data_root)?;
+            stop_withdrawn_runs(data_root, &[])?;
             print_json(&snapshot)
         }
         WorkspaceCommand::Register { path, revision } => {
@@ -214,19 +214,26 @@ pub(crate) fn run(action: WorkspaceCommand, data_root: &Path) -> Result<(), CliE
                 "snapshot": store.snapshot(),
             });
             drop(store);
-            stop_withdrawn_runs(data_root)?;
+            stop_withdrawn_runs(data_root, &[])?;
             print_json(&output)
         }
         WorkspaceCommand::ContainerRevoke { grant } => {
             let mut store = open_existing(data_root)?
                 .ok_or_else(|| CliError::new("control", "Workspace control is not initialized"))?;
+            // Every run of the workspace that started before this revocation
+            // is withdrawn. Runs start only under the lock held here.
+            let affected = match store.container_grant_workspace(grant) {
+                Some(workspace_id) => run::workspace_runs(&store, workspace_id)
+                    .map_err(|error| CliError::new("run", error.to_string()))?,
+                None => Vec::new(),
+            };
             let revocation = store.revoke_container_grant(grant).map_err(control_error)?;
             let output = json!({
                 "revocation": revocation,
                 "snapshot": store.snapshot(),
             });
             drop(store);
-            stop_withdrawn_runs(data_root)?;
+            stop_withdrawn_runs(data_root, &affected)?;
             print_json(&output)
         }
     }
@@ -306,15 +313,15 @@ fn set_permissions(args: PermissionsArgs, data_root: &Path) -> Result<(), CliErr
         .map_err(control_error)?;
     let snapshot = store.snapshot();
     drop(store);
-    stop_withdrawn_runs(data_root)?;
+    stop_withdrawn_runs(data_root, &[])?;
     print_json(&snapshot)
 }
 
 /// After a change that can withdraw access, wait for the affected runs to
 /// stop. The change is already recorded; a run not observed to stop makes
 /// the command fail so the revocation is not reported as complete.
-fn stop_withdrawn_runs(data_root: &Path) -> Result<(), CliError> {
-    let withdrawn = run::stop_withdrawn_runs(data_root, run::REVOCATION_WAIT)
+fn stop_withdrawn_runs(data_root: &Path, also_withdrawn: &[Uuid]) -> Result<(), CliError> {
+    let withdrawn = run::stop_withdrawn_runs(data_root, run::REVOCATION_WAIT, also_withdrawn)
         .map_err(|error| CliError::new("run", error.to_string()))?;
     if withdrawn.unconfirmed.is_empty() {
         return Ok(());
