@@ -84,9 +84,13 @@ rejects store, session, workspace, revision, expiry,
 availability, and flag mismatches before reporting configuration eligibility.
 Checks append audit events without changing the settings revision.
 
-Trusted CLI runs exist since 0.16.0. Each run checks the live settings once,
-before it starts. A preference change during a run applies to later runs; it
-does not stop a running tree. Live task revocation, per-target grants, and
+Trusted CLI runs exist since 0.16.0. A run needs the live `execute`, `read`,
+and `write` preferences, and `host_services` when it selects host services.
+It checks them before it starts and again after every settings change while
+it runs. A change that withdraws one stops the running tree, which is recorded
+as `revoked`. The `permissions` command reports success only after the runs it
+affects have stopped; see [settings changes during a
+run](execution.md#settings-changes-during-a-run). Per-target grants and
 approval UI remain required before a model can request execution.
 
 ## Persistence and audit
@@ -154,8 +158,9 @@ Version 0.14.0 refuses a settings log that records a grant. The
 operator-declared toolchain profiles that `omgcode run` uses. Adding and
 removing need the expected revision and increment it, through the
 `profile_added` and `profile_removed` events. `workspace status` lists
-profiles under `profiles` and omits the field when there are none, so settings
-without profiles keep their exact output. Version 0.15.0 refuses a settings log
+profiles under `profiles` and omits the field until a profile exists. Each
+permission view now also includes `host_services`, so the output is not the
+same as version 0.15.0's. Version 0.15.0 refuses a settings log
 that records a profile. The
 [execution guide](execution.md#toolchain-profiles) owns the rules. Profile
 variables are stored here in plain text; never put secrets in them.

@@ -8,13 +8,19 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
-use super::{assert_success, json_output, path_arg, run_cli, run_cli_for};
+use super::{
+    assert_success, cli_command, json_output, path_arg, run_cli, run_cli_for, run_with_deadline,
+};
 
 /// CLI deadline for a container grant or revocation.
 const GRANT_DEADLINE: Duration = Duration::from_secs(300);
 
 /// A development root with one registered workspace whose `execute`
 /// preference is on, and, on Windows, a read-write grant on the workspace.
+///
+/// End each test with [`Scene::close`], which revokes every grant and fails
+/// the test if a revocation fails. `Drop` is only a fallback for a test that
+/// already failed: it tries the same revocations and reports, never panics.
 pub(crate) struct Scene {
     pub(crate) temporary: TempDir,
     pub(crate) data: PathBuf,
@@ -86,13 +92,64 @@ impl Scene {
             ],
             GRANT_DEADLINE,
         );
-        assert_success(&output);
+        if !output.status.success() {
+            // A failed command can still leave a pending grant whose ACL
+            // entry exists. Track every grant of this workspace so the
+            // scene revokes it, then fail.
+            self.track_recorded_grants();
+            assert_success(&output);
+        }
         self.grants.push(
             json_output(&output)["grant_id"]
                 .as_str()
                 .expect("grant id")
                 .to_owned(),
         );
+    }
+
+    /// Add every recorded grant of this workspace that is not yet tracked.
+    fn track_recorded_grants(&mut self) {
+        let output = self.cli(&["workspace", "status"]);
+        if !output.status.success() {
+            return;
+        }
+        let status = json_output(&output);
+        for grant in status["container_grants"].as_array().into_iter().flatten() {
+            if grant["workspace_id"].as_str() == Some(self.id.as_str())
+                && let Some(id) = grant["id"].as_str()
+                && !self.grants.iter().any(|known| known == id)
+            {
+                self.grants.push(id.to_owned());
+            }
+        }
+    }
+
+    /// Revoke every grant and fail on any revocation that fails.
+    pub(crate) fn close(mut self) {
+        let failures = self.revoke_grants();
+        assert!(failures.is_empty(), "grant revocation failed: {failures:?}");
+    }
+
+    /// Revoke each tracked grant once, returning the failures. Revoking the
+    /// last grant also deletes the container profile, so test runs leave no
+    /// per-user AppContainer state behind.
+    fn revoke_grants(&mut self) -> Vec<String> {
+        let mut failures = Vec::new();
+        for grant in std::mem::take(&mut self.grants) {
+            let command = cli_command(&self.data, &["workspace", "container-revoke", &grant]);
+            match run_with_deadline(command, GRANT_DEADLINE) {
+                Ok(result) if result.timed_out => {
+                    failures.push(format!("{grant}: timed out"));
+                }
+                Ok(result) if !result.output.status.success() => failures.push(format!(
+                    "{grant}: {}",
+                    String::from_utf8_lossy(&result.output.stderr)
+                )),
+                Ok(_) => {}
+                Err(error) => failures.push(format!("{grant}: {error}")),
+            }
+        }
+        failures
     }
 
     pub(crate) fn revision(&self) -> u64 {
@@ -210,14 +267,9 @@ impl Scene {
 
 impl Drop for Scene {
     fn drop(&mut self) {
-        // Revoking the last grant also deletes the container profile, so
-        // test runs leave no per-user AppContainer state behind.
-        for grant in &self.grants {
-            let _ = run_cli_for(
-                &self.data,
-                &["workspace", "container-revoke", grant],
-                GRANT_DEADLINE,
-            );
+        // Fallback for a test that failed before `close`; it must not panic.
+        for failure in self.revoke_grants() {
+            eprintln!("grant revocation failed during cleanup: {failure}");
         }
     }
 }
@@ -265,6 +317,8 @@ pub(crate) fn error_message(output: &Output) -> String {
         .to_owned()
 }
 
+/// Wait for a `run` CLI process. On timeout, stop its run and reap the CLI
+/// before failing, so no task outlives the test.
 pub(crate) fn wait(mut child: std::process::Child, limit: Duration) -> Output {
     let until = Instant::now() + limit;
     loop {
@@ -272,9 +326,33 @@ pub(crate) fn wait(mut child: std::process::Child, limit: Duration) -> Output {
             return child.wait_with_output().expect("collect output");
         }
         if Instant::now() >= until {
-            let _ = child.kill();
+            stop_run(&mut child);
             panic!("the run did not finish within {limit:?}");
         }
         thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// End a `run` CLI and its supervised tree, then reap the CLI.
+///
+/// On Linux the tree is in its own process group, so killing the CLI alone
+/// would leave it running: SIGTERM makes the CLI cancel the tree and record
+/// the outcome first. On Windows, killing the CLI closes its job handle,
+/// which ends the whole tree.
+fn stop_run(child: &mut std::process::Child) {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = Command::new("kill")
+            .args(["-TERM", &child.id().to_string()])
+            .status();
+        let grace = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < grace {
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }

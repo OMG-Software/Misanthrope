@@ -133,6 +133,19 @@ pub(crate) fn run_cli(data_root: &Path, args: &[&str]) -> Output {
 
 /// Run the CLI with isolated token state and a chosen deadline.
 pub(crate) fn run_cli_for(data_root: &Path, args: &[&str], deadline: Duration) -> Output {
+    let result =
+        run_with_deadline(cli_command(data_root, args), deadline).expect("run OMGCode CLI");
+    assert!(
+        !result.timed_out,
+        "CLI exceeded its {deadline:?} deadline: stdout={} stderr={}",
+        String::from_utf8_lossy(&result.output.stdout),
+        String::from_utf8_lossy(&result.output.stderr)
+    );
+    result.output
+}
+
+/// The CLI command with isolated token state, before it is started.
+pub(crate) fn cli_command(data_root: &Path, args: &[&str]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_omgcode"));
     command
         .env_remove("OMGCODE_LM_TOKEN")
@@ -141,14 +154,7 @@ pub(crate) fn run_cli_for(data_root: &Path, args: &[&str], deadline: Duration) -
         .arg("--data-dir")
         .arg(data_root)
         .args(args);
-    let result = run_with_deadline(command, deadline).expect("run OMGCode CLI");
-    assert!(
-        !result.timed_out,
-        "CLI exceeded its {deadline:?} deadline: stdout={} stderr={}",
-        String::from_utf8_lossy(&result.output.stdout),
-        String::from_utf8_lossy(&result.output.stderr)
-    );
-    result.output
+    command
 }
 
 /// Parse stdout as the CLI's one-line JSON result.

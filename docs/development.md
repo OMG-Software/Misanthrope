@@ -14,8 +14,9 @@ deletion removes one resolved private entry. The trusted `run` command starts
 one program in a workspace whose `execute` preference is enabled, under
 Landlock and a seccomp socket filter on Linux or a per-workspace AppContainer
 on Windows. It uses an operator-declared toolchain profile and records each
-run in a run journal. The CLI cannot delete workspace files, use Git, or
-connect to MCP servers.
+run in a run journal. A program started by `run` can create, change, and
+delete workspace files without a checkpoint. The CLI's `file` commands cannot
+delete workspace files, and the CLI cannot use Git or connect to MCP servers.
 When a workspace enables `model_tools`, chat lets the local model read and list
 files in that workspace. Model write, process, network, Git, and MCP tools are
 not implemented. Trusted commands record and apply the Windows container
@@ -532,7 +533,7 @@ profiles, or confinement, run them on both platforms with the toolchain
 variables listed in `crates/omgcode-cli/tests/toolchain_acceptance.rs`:
 
 ```text
-cargo test -p omgcode-cli --test toolchain_acceptance -- --ignored
+cargo test -p omgcode-cli --test toolchain_acceptance --locked -- --ignored
 ```
 
 Do not infer whole-user/process containment, Git safety, credential storage,

@@ -6,7 +6,7 @@
 //! missing dependency fails as an ordinary recorded exit.
 //!
 //! The cases need host toolchains, so they are ignored by default. Run them
-//! with `cargo test -p omgcode-cli --test toolchain_acceptance -- --ignored`
+//! with `cargo test -p omgcode-cli --test toolchain_acceptance --locked -- --ignored`
 //! after setting the variables below. A case whose variable is missing fails;
 //! it never passes silently.
 //!
@@ -371,6 +371,7 @@ fn rust_projects_build_test_and_run_confined() {
         &["cargo", "build", "--offline"],
     );
     assert!(missing.contains("omgcode-missing-dependency"), "{missing}");
+    scene.close();
 }
 
 const PY_GREET: &str = "def greeting():\n    return \"accept-ok\"\n";
@@ -484,6 +485,7 @@ fn python_scripts_tests_and_subprocesses_run_confined() {
         &[python, "-c", "import omgcode_missing_dependency"],
     );
     assert!(missing.contains("ModuleNotFoundError"), "{missing}");
+    scene.close();
 }
 
 const NODE_GREET: &str = "exports.greeting = () => 'accept-ok';\n";
@@ -611,6 +613,7 @@ fn node_scripts_tests_and_children_run_confined() {
         &["node", "-e", "require('omgcode-missing-dependency')"],
     );
     assert!(missing.contains("Cannot find module"), "{missing}");
+    scene.close();
 }
 
 const GO_MOD: &str = "module example.com/accept\n\ngo 1.21\n";
@@ -738,6 +741,7 @@ fn go_modules_build_test_and_run_confined() {
     write(&scene, "go-missing/main.go", GO_MISSING);
     let missing = fail(&scene, "go", "go-missing", &["go", "build", "./..."]);
     assert!(missing.contains("example.com/omgcode/missing"), "{missing}");
+    scene.close();
 }
 
 const C_HEADER: &str = "const char *greeting(void);\n";
@@ -905,6 +909,7 @@ fn c_and_cpp_programs_build_and_run_confined() {
 
     let missing = fail(&scene, "cc", "c", C_MISSING_BUILD);
     assert!(missing.contains("omgcode_missing.h"), "{missing}");
+    scene.close();
 }
 
 const JAVA_MAIN: &str = r#"import java.io.IOException;
@@ -1038,4 +1043,5 @@ fn java_programs_compile_and_run_confined() {
         ],
     );
     assert!(missing.contains("org.omgcode.missing"), "{missing}");
+    scene.close();
 }
