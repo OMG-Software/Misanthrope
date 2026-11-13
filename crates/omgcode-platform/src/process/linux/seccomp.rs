@@ -3,13 +3,14 @@
 //! Every filter kills the process for a foreign ABI (32-bit or x32) and makes
 //! `setsid` and `setpgid` fail with `EPERM`, so no descendant can leave the
 //! runner's process group. A confined filter also refuses the `io_uring` calls,
-//! which can create sockets without `socket`, and every non-Unix address
-//! family. Its Unix-domain rule follows [`UnixSocketAccess`]: by default only
-//! `socketpair` of stream or sequenced-packet type is allowed; the host-services
-//! mode also allows `socket(AF_UNIX)`. Refused calls fail with `EPERM`.
-//! Descendants inherit the filter.
+//! which can create sockets without `socket`, and every address family except
+//! those its modes allow. Its Unix-domain rule follows [`UnixSocketAccess`]: by
+//! default only `socketpair` of stream or sequenced-packet type is allowed; the
+//! host-services mode also allows `socket(AF_UNIX)`. With
+//! [`NetworkAccess::Internet`], `socket(AF_INET)` and `socket(AF_INET6)` are
+//! allowed too. Refused calls fail with `EPERM`. Descendants inherit the filter.
 
-use crate::process::{ProcessError, UnixSocketAccess};
+use crate::process::{NetworkAccess, ProcessError, UnixSocketAccess};
 
 // Stable kernel ABI values for a classic BPF seccomp program, combined from
 // the class, size, mode, and operation bits in `linux/bpf_common.h`.
@@ -49,8 +50,14 @@ pub(super) const X32_SYSCALL_BIT: u32 = 0x4000_0000;
 pub(super) enum FilterScope {
     /// Process-group escape denial only, for an unconfined run.
     ProcessGroup,
-    /// Process-group escape denial plus socket and `io_uring` denial.
-    Confined(UnixSocketAccess),
+    /// Process-group escape denial plus `io_uring` denial and these socket
+    /// rules.
+    Confined {
+        /// Which Unix-domain sockets may be created.
+        unix_sockets: UnixSocketAccess,
+        /// Whether IP sockets may be created.
+        network: NetworkAccess,
+    },
 }
 
 /// Build the filter for `scope` on this architecture.
@@ -66,28 +73,58 @@ pub(super) fn filter(scope: FilterScope) -> Result<Vec<libc::sock_filter>, Proce
     program.deny(libc::SYS_setpgid)?;
     match scope {
         FilterScope::ProcessGroup => {}
-        FilterScope::Confined(access) => {
+        FilterScope::Confined {
+            unix_sockets,
+            network,
+        } => {
             program.deny(libc::SYS_io_uring_setup)?;
             program.deny(libc::SYS_io_uring_enter)?;
             program.deny(libc::SYS_io_uring_register)?;
-            unix_sockets(&mut program, access)?;
+            socket_rules(&mut program, unix_sockets, network)?;
         }
     }
     program.finish()
 }
 
-/// Append the socket rules. Every instruction after them is a verdict, so a
-/// call that is neither `socket` nor `socketpair` is allowed here.
+/// Append the socket rules. The accumulator must hold `nr`. Every
+/// instruction after them is a verdict, so a call that is neither `socket`
+/// nor `socketpair` is allowed here.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-fn unix_sockets(program: &mut Program, access: UnixSocketAccess) -> Result<(), ProcessError> {
-    let socket = syscall_number(libc::SYS_socket)?;
-    let socketpair = syscall_number(libc::SYS_socketpair)?;
-    match access {
+fn socket_rules(
+    program: &mut Program,
+    unix_sockets: UnixSocketAccess,
+    network: NetworkAccess,
+) -> Result<(), ProcessError> {
+    // `socket`: allow only the families the modes name, then deny.
+    let mut socket = Program::default();
+    socket.load(SECCOMP_DATA_ARG0_LOW);
+    if network == NetworkAccess::Internet {
+        socket.jump_eq(family(libc::AF_INET)?, Target::Allow, Target::Next);
+        socket.jump_eq(family(libc::AF_INET6)?, Target::Allow, Target::Next);
+    }
+    match unix_sockets {
+        UnixSocketAccess::PairsOnly => socket.always(Target::Deny),
+        UnixSocketAccess::HostServices => {
+            socket.jump_eq(family(libc::AF_UNIX)?, Target::Allow, Target::Deny);
+        }
+    }
+    program.jump_eq(
+        syscall_number(libc::SYS_socket)?,
+        Target::Next,
+        Target::Skip(socket.length()?),
+    );
+    program.append(socket);
+    // `socketpair`: Unix-domain only. The accumulator still holds `nr` here,
+    // because only the `socket` block above loaded an argument.
+    program.jump_eq(
+        syscall_number(libc::SYS_socketpair)?,
+        Target::Next,
+        Target::Allow,
+    );
+    program.load(SECCOMP_DATA_ARG0_LOW);
+    program.jump_eq(family(libc::AF_UNIX)?, Target::Next, Target::Deny);
+    match unix_sockets {
         UnixSocketAccess::PairsOnly => {
-            program.jump_eq(socket, Target::Deny, Target::Next);
-            program.jump_eq(socketpair, Target::Next, Target::Allow);
-            program.load(SECCOMP_DATA_ARG0_LOW);
-            program.jump_eq(af_unix()?, Target::Next, Target::Deny);
             // A datagram pair could send to a host path with `sendto`; stream
             // and sequenced-packet sockets refuse or ignore a destination.
             program.load(SECCOMP_DATA_ARG1_LOW);
@@ -99,13 +136,7 @@ fn unix_sockets(program: &mut Program, access: UnixSocketAccess) -> Result<(), P
                 Target::Deny,
             );
         }
-        UnixSocketAccess::HostServices => {
-            // `socket` skips the socketpair test and joins the domain check.
-            program.jump_eq(socket, Target::Skip(1), Target::Next);
-            program.jump_eq(socketpair, Target::Next, Target::Allow);
-            program.load(SECCOMP_DATA_ARG0_LOW);
-            program.jump_eq(af_unix()?, Target::Allow, Target::Deny);
-        }
+        UnixSocketAccess::HostServices => program.always(Target::Allow),
     }
     Ok(())
 }
@@ -122,9 +153,8 @@ fn syscall_number(number: libc::c_long) -> Result<u32, ProcessError> {
         .map_err(|_| ProcessError::Unsupported("system call number is out of range"))
 }
 
-fn af_unix() -> Result<u32, ProcessError> {
-    u32::try_from(libc::AF_UNIX)
-        .map_err(|_| ProcessError::Unsupported("address family is out of range"))
+fn family(family: libc::c_int) -> Result<u32, ProcessError> {
+    u32::try_from(family).map_err(|_| ProcessError::Unsupported("address family is out of range"))
 }
 
 fn socket_type(kind: libc::c_int) -> Result<u32, ProcessError> {
@@ -180,6 +210,23 @@ impl Program {
     fn jump_ge(&mut self, value: u32, on_true: Target, on_false: Target) {
         self.instructions
             .push(Instruction::JumpGe(value, on_true, on_false));
+    }
+
+    /// Continue at `target` whatever the accumulator holds.
+    fn always(&mut self, target: Target) {
+        self.jump_eq(0, target, target);
+    }
+
+    /// Append `other`'s instructions. Their verdict targets resolve against
+    /// this program's verdicts.
+    fn append(&mut self, other: Self) {
+        self.instructions.extend(other.instructions);
+    }
+
+    /// The instruction count, as a forward skip.
+    fn length(&self) -> Result<u8, ProcessError> {
+        u8::try_from(self.instructions.len())
+            .map_err(|_| ProcessError::Unsupported("the seccomp filter is too long"))
     }
 
     /// Fail this system call with `EPERM`. The accumulator must hold `nr`.

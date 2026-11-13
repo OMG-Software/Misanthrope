@@ -2,7 +2,7 @@
 //! against synthetic `seccomp_data`, so every branch is checked without
 //! installing the filter in the test process.
 
-use crate::process::UnixSocketAccess;
+use crate::process::{NetworkAccess, UnixSocketAccess};
 
 use super::{
     AUDIT_ARCH, FilterScope, SECCOMP_RET_ALLOW, SECCOMP_RET_ERRNO, SECCOMP_RET_KILL_PROCESS, filter,
@@ -80,12 +80,39 @@ fn evaluate(program: &[libc::sock_filter], call: &Call) -> u32 {
     panic!("the program did not return");
 }
 
+fn confined_with(unix_sockets: UnixSocketAccess, network: NetworkAccess) -> Vec<libc::sock_filter> {
+    filter(FilterScope::Confined {
+        unix_sockets,
+        network,
+    })
+    .expect("confined filter")
+}
+
 fn confined() -> Vec<libc::sock_filter> {
-    filter(FilterScope::Confined(UnixSocketAccess::PairsOnly)).expect("confined filter")
+    confined_with(UnixSocketAccess::PairsOnly, NetworkAccess::Denied)
 }
 
 fn host_services() -> Vec<libc::sock_filter> {
-    filter(FilterScope::Confined(UnixSocketAccess::HostServices)).expect("host-services filter")
+    confined_with(UnixSocketAccess::HostServices, NetworkAccess::Denied)
+}
+
+fn networked() -> Vec<libc::sock_filter> {
+    confined_with(UnixSocketAccess::PairsOnly, NetworkAccess::Internet)
+}
+
+fn networked_host_services() -> Vec<libc::sock_filter> {
+    confined_with(UnixSocketAccess::HostServices, NetworkAccess::Internet)
+}
+
+/// Every filter shape the runner builds.
+fn every_program() -> [Vec<libc::sock_filter>; 5] {
+    [
+        confined(),
+        host_services(),
+        networked(),
+        networked_host_services(),
+        group_only(),
+    ]
 }
 
 fn group_only() -> Vec<libc::sock_filter> {
@@ -98,7 +125,7 @@ fn af(family: libc::c_int) -> u64 {
 
 #[test]
 fn every_jump_lands_inside_the_program() {
-    for program in [confined(), host_services(), group_only()] {
+    for program in every_program() {
         assert_eq!(
             program.last().map(|last| last.code),
             Some(0x06),
@@ -116,7 +143,7 @@ fn every_jump_lands_inside_the_program() {
 
 #[test]
 fn foreign_architectures_are_killed() {
-    for program in [confined(), host_services(), group_only()] {
+    for program in every_program() {
         let mut call = Call::new(libc::SYS_getpid, &[]);
         call.arch = 0x4000_0003;
         assert_eq!(evaluate(&program, &call), SECCOMP_RET_KILL_PROCESS);
@@ -126,7 +153,7 @@ fn foreign_architectures_are_killed() {
 #[cfg(target_arch = "x86_64")]
 #[test]
 fn x32_calls_are_killed() {
-    for program in [confined(), host_services(), group_only()] {
+    for program in every_program() {
         let mut call = Call::new(libc::SYS_getpid, &[]);
         call.nr |= super::X32_SYSCALL_BIT;
         assert_eq!(evaluate(&program, &call), SECCOMP_RET_KILL_PROCESS);
@@ -135,7 +162,7 @@ fn x32_calls_are_killed() {
 
 #[test]
 fn leaving_the_process_group_is_denied_in_both_scopes() {
-    for program in [confined(), host_services(), group_only()] {
+    for program in every_program() {
         for number in [libc::SYS_setsid, libc::SYS_setpgid] {
             assert_eq!(evaluate(&program, &Call::new(number, &[])), DENIED);
         }
@@ -144,7 +171,7 @@ fn leaving_the_process_group_is_denied_in_both_scopes() {
 
 #[test]
 fn ordinary_calls_are_allowed() {
-    for program in [confined(), host_services(), group_only()] {
+    for program in every_program() {
         for number in [
             libc::SYS_read,
             libc::SYS_openat,
@@ -175,8 +202,13 @@ fn every_socket_family_is_denied_when_confined() {
 }
 
 #[test]
-fn io_uring_is_denied_in_both_unix_socket_modes() {
-    for program in [confined(), host_services()] {
+fn io_uring_is_denied_in_every_confined_mode() {
+    for program in [
+        confined(),
+        host_services(),
+        networked(),
+        networked_host_services(),
+    ] {
         for number in [
             libc::SYS_io_uring_setup,
             libc::SYS_io_uring_enter,
@@ -249,4 +281,53 @@ fn the_process_group_filter_leaves_sockets_alone() {
     let datagram = u64::try_from(libc::SOCK_DGRAM).expect("type");
     let pair = Call::new(libc::SYS_socketpair, &[af(libc::AF_UNIX), datagram]);
     assert_eq!(evaluate(&program, &pair), SECCOMP_RET_ALLOW);
+}
+
+#[test]
+fn network_access_allows_ip_sockets_of_any_type() {
+    for program in [networked(), networked_host_services()] {
+        let datagram = u64::try_from(libc::SOCK_DGRAM).expect("type");
+        let flags = u64::try_from(libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK).expect("flags");
+        for family in [libc::AF_INET, libc::AF_INET6] {
+            for kind in [1, datagram, 1 | flags] {
+                let call = Call::new(libc::SYS_socket, &[af(family), kind, 0]);
+                assert_eq!(
+                    evaluate(&program, &call),
+                    SECCOMP_RET_ALLOW,
+                    "family {family} type {kind}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn network_access_denies_every_other_family() {
+    for program in [networked(), networked_host_services()] {
+        for family in [libc::AF_NETLINK, libc::AF_PACKET, libc::AF_VSOCK] {
+            let call = Call::new(libc::SYS_socket, &[af(family), 1, 0]);
+            assert_eq!(evaluate(&program, &call), DENIED, "family {family}");
+        }
+        for family in [libc::AF_INET, libc::AF_INET6] {
+            let pair = Call::new(libc::SYS_socketpair, &[af(family), 1, 0]);
+            assert_eq!(evaluate(&program, &pair), DENIED, "pair family {family}");
+        }
+    }
+}
+
+#[test]
+fn network_access_keeps_the_unix_socket_mode() {
+    let unix = af(libc::AF_UNIX);
+    let stream = u64::try_from(libc::SOCK_STREAM).expect("type");
+    let datagram = u64::try_from(libc::SOCK_DGRAM).expect("type");
+    let pairs_only = networked();
+    let socket = Call::new(libc::SYS_socket, &[unix, stream, 0]);
+    assert_eq!(evaluate(&pairs_only, &socket), DENIED);
+    let pair = Call::new(libc::SYS_socketpair, &[unix, stream]);
+    assert_eq!(evaluate(&pairs_only, &pair), SECCOMP_RET_ALLOW);
+    let datagram_pair = Call::new(libc::SYS_socketpair, &[unix, datagram]);
+    assert_eq!(evaluate(&pairs_only, &datagram_pair), DENIED);
+    let host = networked_host_services();
+    assert_eq!(evaluate(&host, &socket), SECCOMP_RET_ALLOW);
+    assert_eq!(evaluate(&host, &datagram_pair), SECCOMP_RET_ALLOW);
 }

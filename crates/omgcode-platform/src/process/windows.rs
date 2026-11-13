@@ -24,7 +24,9 @@ use windows_sys::Win32::Foundation::{
     HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation, WAIT_OBJECT_0,
     WAIT_TIMEOUT,
 };
-use windows_sys::Win32::Security::SECURITY_CAPABILITIES;
+use windows_sys::Win32::Security::{
+    SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES, WinCapabilityInternetClientSid,
+};
 use windows_sys::Win32::System::IO::{
     CreateIoCompletionPort, GetQueuedCompletionStatus, OVERLAPPED,
 };
@@ -39,7 +41,7 @@ use windows_sys::Win32::System::JobObjects::{
 };
 use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::SystemServices::{
-    JOB_OBJECT_MSG_ACTIVE_PROCESS_LIMIT, JOB_OBJECT_MSG_JOB_MEMORY_LIMIT,
+    JOB_OBJECT_MSG_ACTIVE_PROCESS_LIMIT, JOB_OBJECT_MSG_JOB_MEMORY_LIMIT, SE_GROUP_ENABLED,
 };
 use windows_sys::Win32::System::Threading::{
     CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
@@ -52,9 +54,9 @@ use windows_sys::Win32::System::Threading::{
 };
 
 use super::{
-    AppliedConfinement, CancelSignal, Capture, Confinement, ProcessError, ProcessLimits,
-    ProcessOutcome, ProcessSpec, ProcessTree, ResourceLimit, Termination, TreeLimits, TreeUsage,
-    UnixSocketAccess, is_batch_script, stop_tree, supervise,
+    AppliedConfinement, CancelSignal, Capture, Confinement, NetworkAccess, ProcessError,
+    ProcessLimits, ProcessOutcome, ProcessSpec, ProcessTree, ResourceLimit, Termination,
+    TreeLimits, TreeUsage, UnixSocketAccess, is_batch_script, stop_tree, supervise,
 };
 use crate::container::ContainerAccess;
 use crate::container::windows::{derive_sid, granted_access, profile_exists};
@@ -116,8 +118,9 @@ pub(super) fn run(
     let container = confinement
         .map(|confinement| prepare_container(spec, confinement))
         .transpose()?;
+    let network = confinement.map_or(NetworkAccess::Denied, |confinement| confinement.network);
     let applied = if container.is_some() {
-        AppliedConfinement::AppContainer
+        AppliedConfinement::AppContainer { network }
     } else {
         AppliedConfinement::Unconfined
     };
@@ -144,18 +147,22 @@ pub(super) fn run(
         for handle in inherited {
             set_inheritable(handle, true).map_err(ProcessError::Spawn)?;
         }
-        let result =
-            AttributeList::new(inherited, job.as_raw_handle() as HANDLE, container.as_ref())
-                .and_then(|mut attributes| {
-                    create_suspended(
-                        &application,
-                        &mut command_line,
-                        &environment,
-                        &directory,
-                        inherited,
-                        &mut attributes,
-                    )
-                });
+        let result = AttributeList::new(
+            inherited,
+            job.as_raw_handle() as HANDLE,
+            container.as_ref(),
+            network,
+        )
+        .and_then(|mut attributes| {
+            create_suspended(
+                &application,
+                &mut command_line,
+                &environment,
+                &directory,
+                inherited,
+                &mut attributes,
+            )
+        });
         // The child has its own copies; ours must close so the pipes can end.
         drop(null_input);
         drop(stdout_write);
@@ -671,7 +678,7 @@ fn set_inheritable(handle: HANDLE, inheritable: bool) -> io::Result<()> {
 /// A process/thread attribute list that names the inherited handles, the job,
 /// and, for a confined run, the AppContainer.
 ///
-/// The handle and job arrays, the capabilities structure, and the SID it
+/// The handle and job arrays, the capabilities structure, and the SIDs it
 /// points to are heap-allocated because the list keeps pointers to them until
 /// `DeleteProcThreadAttributeList`, which runs in `Drop`.
 struct AttributeList {
@@ -680,11 +687,20 @@ struct AttributeList {
     jobs: Box<[HANDLE; 1]>,
     capabilities: Option<Box<SECURITY_CAPABILITIES>>,
     container: Option<Sid>,
+    /// The `internetClient` capability SID, for a run with network access.
+    internet_client: Option<Sid>,
+    /// The capability array `capabilities` points to.
+    capability_list: Option<Box<[SID_AND_ATTRIBUTES; 1]>>,
 }
 
 impl AttributeList {
     #[allow(unsafe_code)]
-    fn new(handles: [HANDLE; 3], job: HANDLE, container: Option<&Sid>) -> io::Result<Self> {
+    fn new(
+        handles: [HANDLE; 3],
+        job: HANDLE,
+        container: Option<&Sid>,
+        network: NetworkAccess,
+    ) -> io::Result<Self> {
         let count = if container.is_some() { 3 } else { 2 };
         let mut size = 0usize;
         // SAFETY: a null list with a writable size queries the required size.
@@ -700,6 +716,8 @@ impl AttributeList {
             jobs: Box::new([job]),
             capabilities: None,
             container: container.cloned(),
+            internet_client: None,
+            capability_list: None,
         };
         // SAFETY: the buffer is writable, 8-byte aligned, and at least `size` bytes.
         let result =
@@ -743,17 +761,35 @@ impl AttributeList {
             return Err(io::Error::last_os_error());
         }
         if let Some(sid) = &list.container {
-            // No capabilities: no network, no loopback, no brokered resources.
+            // Without network access, no capabilities: no network, no
+            // loopback, no brokered resources. With it, only `internetClient`:
+            // outbound internet, still no private network or loopback.
+            let (capability_pointer, capability_count) = match network {
+                NetworkAccess::Denied => (null_mut(), 0),
+                NetworkAccess::Internet => {
+                    let internet = Sid::well_known(WinCapabilityInternetClientSid)?;
+                    let mut entries = Box::new([SID_AND_ATTRIBUTES {
+                        Sid: internet.as_psid(),
+                        Attributes: SE_GROUP_ENABLED.unsigned_abs(),
+                    }]);
+                    let pointer = entries.as_mut_ptr();
+                    list.internet_client = Some(internet);
+                    list.capability_list = Some(entries);
+                    (pointer, 1)
+                }
+            };
             let capabilities = Box::new(SECURITY_CAPABILITIES {
                 AppContainerSid: sid.as_psid(),
-                Capabilities: null_mut(),
-                CapabilityCount: 0,
+                Capabilities: capability_pointer,
+                CapabilityCount: capability_count,
                 Reserved: 0,
             });
             let pointer: *const SECURITY_CAPABILITIES = &raw const *capabilities;
             list.capabilities = Some(capabilities);
-            // SAFETY: the list is initialized. The boxed structure and the SID
-            // storage it points to are owned by the list and outlive it.
+            // SAFETY: the list is initialized. The boxed structure, the
+            // capability array, and the SID storage they point to are owned by
+            // the list and outlive it; moving a box or a `Sid` into the list
+            // does not move the heap storage the pointers name.
             let result = unsafe {
                 UpdateProcThreadAttribute(
                     list.pointer(),

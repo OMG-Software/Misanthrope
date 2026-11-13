@@ -33,6 +33,8 @@ const MAX_BYTES: usize = 8 * 1024 * 1024;
 const MAX_EVENT_BYTES: usize = 64 * 1024;
 const MAX_EVENTS: usize = 4096;
 const MAX_RECENT_ENTRIES: usize = 100;
+/// Most resolver and certificate paths one networked run may record.
+pub(crate) const MAX_NETWORK_SUPPORT_PATHS: usize = 32;
 /// Most runs that may be pending at once, including unacknowledged ones.
 pub(crate) const MAX_PENDING_RUNS: usize = 16;
 /// Budget for one outcome or acknowledgement event. Real ones are about
@@ -123,6 +125,15 @@ pub struct UsageRecord {
     pub peak_memory_bytes: Option<u64>,
 }
 
+/// The network access a run selected.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkRecord {
+    /// Host resolver and certificate paths the run could read because it
+    /// selected network access, as real paths. Linux only; empty on Windows.
+    pub support_paths: Vec<NativePath>,
+}
+
 /// The intent recorded before a program starts.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -154,6 +165,10 @@ pub struct RunStart {
     /// had none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<LimitsRecord>,
+    /// Present when the run selected network access, since 0.18.0. Earlier
+    /// runs never had it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<NetworkRecord>,
 }
 
 /// The outcome recorded after a run.
@@ -685,6 +700,9 @@ impl RunJournal {
                         limits.max_memory_bytes == 0
                             || limits.max_processes == 0
                             || limits.max_cpu_ms == 0
+                    })
+                    || start.network.as_ref().is_some_and(|network| {
+                        network.support_paths.len() > MAX_NETWORK_SUPPORT_PATHS
                     })
                 {
                     return Err(RunJournalError::Invalid("invalid or duplicate run start"));

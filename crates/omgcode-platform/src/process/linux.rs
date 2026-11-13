@@ -47,11 +47,15 @@ pub(super) fn run(
             AppliedConfinement::Unconfined,
         ),
         Some(confinement) => {
-            let filter = seccomp::filter(FilterScope::Confined(confinement.unix_sockets))?;
+            let filter = seccomp::filter(FilterScope::Confined {
+                unix_sockets: confinement.unix_sockets,
+                network: confinement.network,
+            })?;
             let ruleset = Ruleset::prepare(confinement)?;
             let applied = AppliedConfinement::Landlock {
                 abi: ruleset.abi(),
                 unix_sockets: confinement.unix_sockets,
+                network: confinement.network,
             };
             (filter, Some(ruleset), applied)
         }

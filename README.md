@@ -30,10 +30,13 @@ directory grants.
 > command executes programs under native confinement, and those programs can
 > create, change, and delete workspace files without a checkpoint. That
 > confinement was tested on one Windows build and one Linux kernel only and is
-> not qualified for release. A run has no IP networking. On Linux, a run that
-> both the `host_services` preference and its `--host-services` flag allow can
-> reach the host's Unix-domain sockets, such as service and credential-agent
-> sockets. Runs have no memory, process-count, or disk limits.
+> not qualified for release. A run has no IP networking unless both the
+> `task_network` preference and its `--network` flag allow it; a networked
+> Linux run can then reach any address, including loopback and the local
+> network. On Linux, a run that both the `host_services` preference and its
+> `--host-services` flag allow can reach the host's Unix-domain sockets, such
+> as service and credential-agent sockets. Runs have memory, process-count,
+> and CPU-time limits but no disk limit.
 
 ## Goals
 

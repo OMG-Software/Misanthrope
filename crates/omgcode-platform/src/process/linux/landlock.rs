@@ -10,6 +10,10 @@
 //! ABI 3 is the minimum: earlier versions do not handle truncation, so a
 //! read-only file could still be truncated by path. Rights that later ABIs add
 //! are handled when the kernel reports them; rights added after ABI 6 are not.
+//! From ABI 4, an explicit TCP bind is always denied, and TCP connect is denied
+//! unless the run has [`NetworkAccess::Internet`]. Landlock does not check the
+//! port the kernel chooses when `listen` is called on an unbound socket, so a
+//! networked run can still accept TCP connections.
 
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -17,7 +21,7 @@ use std::path::Path;
 
 use rustix::fs::{CWD, FileType, Mode, OFlags, ResolveFlags};
 
-use crate::process::{Confinement, ProcessError, UnixSocketAccess};
+use crate::process::{Confinement, NetworkAccess, ProcessError, UnixSocketAccess};
 
 /// The oldest ABI accepted. See the module documentation.
 pub(super) const MINIMUM_ABI: u32 = 3;
@@ -92,8 +96,10 @@ impl RulesetPlan {
 }
 
 /// Choose what to handle for a kernel that reports `abi`. Fails closed below
-/// [`MINIMUM_ABI`].
-pub(super) fn plan(abi: u32) -> Result<RulesetPlan, ProcessError> {
+/// [`MINIMUM_ABI`]. Network access leaves TCP connect unhandled, and so
+/// allowed to every port; TCP bind stays handled, with no rule allowing it.
+/// That stops an explicit bind only, not `listen` on an unbound socket.
+pub(super) fn plan(abi: u32, network: NetworkAccess) -> Result<RulesetPlan, ProcessError> {
     if abi < MINIMUM_ABI {
         return Err(ProcessError::Unsupported(
             "confined execution needs Landlock ABI 3 or later",
@@ -104,7 +110,11 @@ pub(super) fn plan(abi: u32) -> Result<RulesetPlan, ProcessError> {
         handled_fs |= ACCESS_FS_IOCTL_DEV;
     }
     let (handled_net, net_size) = if abi >= 4 {
-        (ACCESS_NET_BIND_TCP | ACCESS_NET_CONNECT_TCP, 16)
+        let connect = match network {
+            NetworkAccess::Denied => ACCESS_NET_CONNECT_TCP,
+            NetworkAccess::Internet => 0,
+        };
+        (ACCESS_NET_BIND_TCP | connect, 16)
     } else {
         (0, 8)
     };
@@ -131,7 +141,7 @@ pub(super) struct Ruleset {
 impl Ruleset {
     /// Detect the ABI, create the ruleset, and add every confinement path.
     pub(super) fn prepare(confinement: &Confinement) -> Result<Self, ProcessError> {
-        let plan = plan(abi_version()?)?;
+        let plan = plan(abi_version()?, confinement.network)?;
         let descriptor = create(&plan)?;
         for path in &confinement.read_only {
             add_path(&descriptor, path, plan.read_only_access())?;
@@ -274,7 +284,10 @@ mod tests {
     fn abis_before_three_are_refused() {
         for abi in 0..MINIMUM_ABI {
             assert!(
-                matches!(plan(abi), Err(ProcessError::Unsupported(_))),
+                matches!(
+                    plan(abi, NetworkAccess::Denied),
+                    Err(ProcessError::Unsupported(_))
+                ),
                 "{abi}"
             );
         }
@@ -282,7 +295,7 @@ mod tests {
 
     #[test]
     fn abi_three_handles_truncation_without_network_or_scope() {
-        let plan = plan(3).expect("ABI 3");
+        let plan = plan(3, NetworkAccess::Denied).expect("ABI 3");
         assert_eq!(plan.handled_fs & ACCESS_FS_TRUNCATE, ACCESS_FS_TRUNCATE);
         assert_eq!(plan.handled_fs & ACCESS_FS_REFER, ACCESS_FS_REFER);
         assert_eq!(plan.handled_fs & ACCESS_FS_IOCTL_DEV, 0);
@@ -291,16 +304,16 @@ mod tests {
 
     #[test]
     fn later_abis_add_tcp_device_and_scope_rules() {
-        let four = plan(4).expect("ABI 4");
+        let four = plan(4, NetworkAccess::Denied).expect("ABI 4");
         assert_eq!(
             four.handled_net,
             ACCESS_NET_BIND_TCP | ACCESS_NET_CONNECT_TCP
         );
         assert_eq!((four.scoped, four.attr_size), (0, 16));
-        let five = plan(5).expect("ABI 5");
+        let five = plan(5, NetworkAccess::Denied).expect("ABI 5");
         assert_eq!(five.handled_fs & ACCESS_FS_IOCTL_DEV, ACCESS_FS_IOCTL_DEV);
         for abi in [6, 7, 42] {
-            let plan = plan(abi).expect("ABI 6 or later");
+            let plan = plan(abi, NetworkAccess::Denied).expect("ABI 6 or later");
             assert_eq!(plan.scoped, SCOPE_ABSTRACT_UNIX_SOCKET | SCOPE_SIGNAL);
             assert_eq!(plan.attr_size, size_of::<RulesetAttr>());
         }
@@ -309,7 +322,9 @@ mod tests {
     #[test]
     fn read_only_rules_never_grant_changes() {
         for abi in 3..=7 {
-            let access = plan(abi).expect("plan").read_only_access();
+            let access = plan(abi, NetworkAccess::Denied)
+                .expect("plan")
+                .read_only_access();
             assert_eq!(
                 access,
                 ACCESS_FS_EXECUTE | ACCESS_FS_READ_FILE | ACCESS_FS_READ_DIR
@@ -319,7 +334,7 @@ mod tests {
 
     #[test]
     fn read_write_rules_withhold_devices_and_sockets_by_default() {
-        let plan = plan(6).expect("plan");
+        let plan = plan(6, NetworkAccess::Denied).expect("plan");
         let pairs = plan.read_write_access(UnixSocketAccess::PairsOnly);
         assert_eq!(pairs & (ACCESS_FS_MAKE_CHAR | ACCESS_FS_MAKE_BLOCK), 0);
         assert_eq!(pairs & ACCESS_FS_MAKE_SOCK, 0);
@@ -327,5 +342,16 @@ mod tests {
         let host = plan.read_write_access(UnixSocketAccess::HostServices);
         assert_eq!(host & ACCESS_FS_MAKE_SOCK, ACCESS_FS_MAKE_SOCK);
         assert_eq!(host & (ACCESS_FS_MAKE_CHAR | ACCESS_FS_MAKE_BLOCK), 0);
+    }
+
+    #[test]
+    fn network_access_allows_tcp_connect_but_never_bind() {
+        for abi in [4, 5, 6, 7] {
+            let plan = plan(abi, NetworkAccess::Internet).expect("plan");
+            assert_eq!(plan.handled_net, ACCESS_NET_BIND_TCP, "{abi}");
+            assert_eq!(plan.attr_size, if abi >= 6 { 24 } else { 16 });
+        }
+        let three = plan(3, NetworkAccess::Internet).expect("ABI 3");
+        assert_eq!((three.handled_net, three.attr_size), (0, 8));
     }
 }
