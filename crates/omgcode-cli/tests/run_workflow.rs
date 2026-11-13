@@ -116,6 +116,8 @@ fn refused_runs_record_nothing() {
     } else {
         "host_services preference is disabled"
     }));
+    let output = scene.run("system", &["--network"], &echo);
+    assert!(error_message(&output).contains("task_network preference is disabled"));
     let output = scene.run("system", &[], &["no-such-program-x1"]);
     assert!(error_message(&output).contains("no profile PATH entry"));
 
@@ -155,6 +157,88 @@ fn host_services_needs_the_preference_and_the_flag() {
         assert_eq!(run["start"]["unix_sockets"], "host_services");
         assert_eq!(run["finish"]["confinement"]["kind"], "landlock");
     }
+    scene.close();
+}
+
+/// Network access needs the `task_network` preference and the per-run flag;
+/// the start record lists the host files it exposed. The preference alone
+/// changes nothing. On Linux the resolver files are readable only with it.
+#[test]
+fn network_needs_the_preference_and_the_flag() {
+    let scene = Scene::new();
+    assert_success(&scene.add_profile("system", &[]));
+    scene.set_permission("--task-network", "true");
+    #[cfg(target_os = "linux")]
+    let probe = shell("cat /etc/hosts > /dev/null && echo hosts-readable");
+    #[cfg(windows)]
+    let probe = shell("echo networked");
+
+    let plain = run_json(&scene.run("system", &[], &probe));
+    assert!(plain["start"].get("network").is_none(), "{plain}");
+    let networked = run_json(&scene.run("system", &["--network"], &probe));
+    let support = networked["start"]["network"]["support_paths"]
+        .as_array()
+        .expect("support paths");
+    #[cfg(target_os = "linux")]
+    {
+        let readable = |run: &Value| {
+            run["stdout"]["text"]
+                .as_str()
+                .expect("stdout")
+                .contains("hosts-readable")
+        };
+        assert!(!readable(&plain), "{plain}");
+        assert!(readable(&networked), "{networked}");
+        assert!(!support.is_empty());
+        assert_eq!(networked["finish"]["confinement"]["kind"], "landlock");
+    }
+    #[cfg(windows)]
+    {
+        assert!(support.is_empty(), "{networked}");
+        assert_eq!(networked["finish"]["confinement"]["kind"], "app_container");
+    }
+    assert_eq!(networked["finish"]["result"]["kind"], "exited");
+    scene.close();
+}
+
+/// Live check that a networked run resolves a name and completes a TLS
+/// handshake with the system `curl`, and that the same run fails without
+/// `--network`. It needs internet access, so it runs only when asked:
+/// `OMGCODE_TEST_INTERNET_URL=https://example.com/ cargo test -- --ignored`.
+#[test]
+#[ignore = "needs internet access, curl, and OMGCODE_TEST_INTERNET_URL"]
+fn a_networked_run_fetches_over_tls() {
+    let url = std::env::var("OMGCODE_TEST_INTERNET_URL").expect("OMGCODE_TEST_INTERNET_URL");
+    let scene = Scene::new();
+    assert_success(&scene.add_profile("system", &[]));
+    scene.set_permission("--task-network", "true");
+    let curl = system_root().join(if cfg!(windows) {
+        "curl.exe"
+    } else {
+        "bin/curl"
+    });
+    let command = [
+        path_arg(&curl),
+        "-sS",
+        "--max-time",
+        "20",
+        "-o",
+        "fetched.html",
+        "-w",
+        "%{http_code}",
+        url.as_str(),
+    ];
+    let denied = run_json(&scene.run("system", &[], &command));
+    assert_ne!(denied["finish"]["result"]["code"], 0, "{denied}");
+    let fetched = run_json(&scene.run("system", &["--network"], &command));
+    assert_eq!(fetched["finish"]["result"]["kind"], "exited", "{fetched}");
+    assert_eq!(fetched["finish"]["result"]["code"], 0, "{fetched}");
+    let status = fetched["stdout"]["text"].as_str().expect("stdout");
+    assert!(
+        status.starts_with('2') || status.starts_with('3'),
+        "{status}"
+    );
+    assert!(scene.workspace.join("fetched.html").exists());
     scene.close();
 }
 

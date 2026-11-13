@@ -18,8 +18,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use omgcode_platform::broker::RelativePath;
 use omgcode_platform::process::{
-    self, AppliedConfinement, CapturedOutput, Confinement, ProcessError, ProcessOutcome,
-    ProcessSpec, ResourceLimit, Termination, UnixSocketAccess,
+    self, AppliedConfinement, CapturedOutput, Confinement, NetworkAccess, ProcessError,
+    ProcessOutcome, ProcessSpec, ResourceLimit, Termination, UnixSocketAccess,
 };
 use serde::Serialize;
 use thiserror::Error;
@@ -28,8 +28,8 @@ use uuid::Uuid;
 use crate::control::{ControlError, ControlStore, ProfilePlatform, ToolchainProfile};
 use crate::policy::{PermissionSet, WorkspaceId};
 use crate::run_journal::{
-    ConfinementRecord, LimitKind, LimitsRecord, PendingRun, RunFinish, RunJournal, RunJournalError,
-    RunResult, RunStart, SocketMode, UsageRecord, arguments_digest, describe,
+    ConfinementRecord, LimitKind, LimitsRecord, NetworkRecord, PendingRun, RunFinish, RunJournal,
+    RunJournalError, RunResult, RunStart, SocketMode, UsageRecord, arguments_digest, describe,
 };
 use crate::session::{NativePath, SessionError};
 use crate::storage::{self, StorageError};
@@ -79,6 +79,10 @@ pub struct RunRequest {
     /// Ask for host-service Unix-socket access. Needs the workspace
     /// `host_services` preference; refused on Windows.
     pub host_services: bool,
+    /// Ask for outbound IP network access. Needs the workspace
+    /// `task_network` preference. On Linux the run can then reach any address,
+    /// loopback included; on Windows only the internet. See ADR-0032.
+    pub network: bool,
     /// Deadline, output, cleanup, and tree bounds. Tree limits are required;
     /// a request without them is refused before anything is recorded.
     pub limits: ProcessLimits,
@@ -504,6 +508,7 @@ fn withdrawn(control: &ControlStore, start: &RunStart) -> Option<&'static str> {
     if let Err(reason) = permitted(
         registration.permissions(),
         start.unix_sockets == SocketMode::HostServices,
+        start.network.is_some(),
     ) {
         return Some(reason);
     }
@@ -519,7 +524,11 @@ fn withdrawn(control: &ControlStore, start: &RunStart) -> Option<&'static str> {
 
 /// The preferences a run needs for its whole life. A run writes inside the
 /// workspace, so it needs `read` and `write` as well as `execute`.
-fn permitted(permissions: PermissionSet, host_services: bool) -> Result<(), &'static str> {
+fn permitted(
+    permissions: PermissionSet,
+    host_services: bool,
+    network: bool,
+) -> Result<(), &'static str> {
     if !permissions.execute {
         return Err("the workspace execute preference is disabled");
     }
@@ -528,6 +537,9 @@ fn permitted(permissions: PermissionSet, host_services: bool) -> Result<(), &'st
     }
     if host_services && !permissions.host_services {
         return Err("the workspace host_services preference is disabled");
+    }
+    if network && !permissions.task_network {
+        return Err("the workspace task_network preference is disabled");
     }
     Ok(())
 }
@@ -756,7 +768,7 @@ fn record_confinement(applied: AppliedConfinement) -> ConfinementRecord {
         AppliedConfinement::Landlock { abi, .. } => ConfinementRecord::Landlock { abi },
         // `run_confined` never reports an unconfined run; record the
         // container either way rather than claim less than applied.
-        AppliedConfinement::AppContainer | AppliedConfinement::Unconfined => {
+        AppliedConfinement::AppContainer { .. } | AppliedConfinement::Unconfined => {
             ConfinementRecord::AppContainer
         }
     }
@@ -790,7 +802,7 @@ fn prepare(
             "host-service access is not available on Windows",
         ));
     }
-    permitted(permissions, request.host_services).map_err(RunError::Refused)?;
+    permitted(permissions, request.host_services, request.network).map_err(RunError::Refused)?;
     let status = control
         .profile(&request.profile)
         .ok_or(ControlError::UnknownProfile)?;
@@ -829,7 +841,7 @@ fn prepare(
     let search_path = std::env::join_paths(&path_entries)
         .map_err(|_| RunError::Refused("a PATH entry contains the platform's list separator"))?;
     let mut environment = vec![(OsString::from("PATH"), search_path)];
-    let (confinement, scratch) = platform_setup(
+    let (confinement, scratch, support_paths) = platform_setup(
         control,
         request,
         &scope.workspace,
@@ -863,6 +875,16 @@ fn prepare(
             max_processes: tree.max_processes,
             max_cpu_ms: millis(tree.max_cpu_time),
         }),
+        network: if request.network {
+            Some(NetworkRecord {
+                support_paths: support_paths
+                    .iter()
+                    .map(|path| NativePath::from_path(path))
+                    .collect::<Result<_, _>>()?,
+            })
+        } else {
+            None
+        },
     };
     Ok(Prepared {
         start,
@@ -979,7 +1001,18 @@ fn search(name: &Path, path_entries: &[PathBuf]) -> Option<PathBuf> {
     None
 }
 
-/// Build the platform confinement and the runner-owned variables.
+/// The platform network mode a request selects.
+#[cfg(any(target_os = "linux", windows))]
+fn network_access(request: &RunRequest) -> NetworkAccess {
+    if request.network {
+        NetworkAccess::Internet
+    } else {
+        NetworkAccess::Denied
+    }
+}
+
+/// Build the platform confinement and the runner-owned variables. Also
+/// return the resolver and certificate paths added for network access.
 #[cfg(target_os = "linux")]
 #[allow(clippy::too_many_arguments)]
 fn platform_setup(
@@ -991,7 +1024,7 @@ fn platform_setup(
     data_root: &Path,
     run_id: Uuid,
     environment: &mut Vec<(OsString, OsString)>,
-) -> Result<(Confinement, Option<Scratch>), RunError> {
+) -> Result<(Confinement, Option<Scratch>, Vec<PathBuf>), RunError> {
     let parent = data_root.join("run-scratch");
     crate::storage::create_private_directories(&parent)
         .map_err(|error| io::Error::other(error.to_string()))?;
@@ -1014,6 +1047,12 @@ fn platform_setup(
             .map(PathBuf::from)
             .filter(|device| device.exists()),
     );
+    let support_paths = if request.network {
+        process::network_support_paths()?
+    } else {
+        Vec::new()
+    };
+    read_only.extend(support_paths.iter().cloned());
     let confinement = Confinement {
         read_only,
         read_write: vec![workspace.to_path_buf(), path, PathBuf::from("/dev/null")],
@@ -1022,12 +1061,15 @@ fn platform_setup(
         } else {
             UnixSocketAccess::PairsOnly
         },
+        network: network_access(request),
         container: None,
     };
-    Ok((confinement, Some(scratch)))
+    Ok((confinement, Some(scratch), support_paths))
 }
 
-/// Build the platform confinement and the runner-owned variables.
+/// Build the platform confinement and the runner-owned variables. Windows
+/// adds no support paths for network access: name resolution and
+/// certificates come from system services.
 ///
 /// The workspace must hold an active read-write grant, and no grant of the
 /// workspace may be pending or being revoked. Profile roots are checked
@@ -1044,7 +1086,7 @@ fn platform_setup(
     _data_root: &Path,
     _run_id: Uuid,
     environment: &mut Vec<(OsString, OsString)>,
-) -> Result<(Confinement, Option<Scratch>), RunError> {
+) -> Result<(Confinement, Option<Scratch>, Vec<PathBuf>), RunError> {
     use crate::control::container_name;
 
     workspace_access(control, request.workspace_id, workspace_record, false)
@@ -1066,9 +1108,10 @@ fn platform_setup(
         read_only: roots,
         read_write: vec![workspace.to_path_buf()],
         unix_sockets: UnixSocketAccess::PairsOnly,
+        network: network_access(request),
         container: Some(name),
     };
-    Ok((confinement, None))
+    Ok((confinement, None, Vec::new()))
 }
 
 #[cfg(not(any(target_os = "linux", windows)))]
@@ -1082,7 +1125,7 @@ fn platform_setup(
     _data_root: &Path,
     _run_id: Uuid,
     _environment: &mut Vec<(OsString, OsString)>,
-) -> Result<(Confinement, Option<Scratch>), RunError> {
+) -> Result<(Confinement, Option<Scratch>, Vec<PathBuf>), RunError> {
     Err(RunError::Refused(
         "trusted runs exist only on Linux and Windows",
     ))
@@ -1252,6 +1295,7 @@ mod tests {
             working_directory: NativePath::from_path(&std::env::temp_dir()).expect("native path"),
             unix_sockets: SocketMode::PairsOnly,
             limits: None,
+            network: None,
         }
     }
 
@@ -1324,6 +1368,7 @@ mod tests {
                 arguments: Vec::new(),
                 working_directory: None,
                 host_services: false,
+                network: false,
                 limits: ProcessLimits {
                     tree: Some(tree),
                     ..ProcessLimits::default()
@@ -1478,6 +1523,74 @@ mod tests {
         drop(journal);
         let recorded = stop_withdrawn_runs(&data, Duration::from_millis(100), &[]).expect("check");
         assert!(recorded.unconfirmed.is_empty() && recorded.stopped.is_empty());
+    }
+
+    /// Network access needs the `task_network` preference on top of the
+    /// execute, read, and write preferences, independently of host services.
+    #[test]
+    fn network_access_needs_the_task_network_preference() {
+        let base = PermissionSet {
+            execute: true,
+            read: true,
+            write: true,
+            ..PermissionSet::default()
+        };
+        let networked = PermissionSet {
+            task_network: true,
+            ..base
+        };
+        assert_eq!(permitted(base, false, false), Ok(()));
+        assert_eq!(
+            permitted(base, false, true),
+            Err("the workspace task_network preference is disabled")
+        );
+        assert_eq!(permitted(networked, false, true), Ok(()));
+        assert_eq!(
+            permitted(networked, true, true),
+            Err("the workspace host_services preference is disabled")
+        );
+        let no_execute = PermissionSet {
+            execute: false,
+            ..networked
+        };
+        assert_eq!(
+            permitted(no_execute, false, true),
+            Err("the workspace execute preference is disabled")
+        );
+    }
+
+    /// Turning `task_network` off withdraws a networked run but leaves a run
+    /// without network access alone. Linux only, for the reason given on
+    /// `allowed_runs_are_not_waited_for`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn disabling_task_network_withdraws_only_networked_runs() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (data, workspace_id, _journal_root, _store_id) = store(directory.path());
+        let plain = allowed_start(&data, directory.path(), workspace_id);
+        let mut networked = plain.clone();
+        networked.network = Some(NetworkRecord {
+            support_paths: Vec::new(),
+        });
+        let control = open_control(&data).expect("control");
+        assert_eq!(withdrawn(&control, &plain), None);
+        assert_eq!(
+            withdrawn(&control, &networked),
+            Some("the workspace task_network preference is disabled")
+        );
+        drop(control);
+        let mut control = ControlStore::open(&data).expect("control store");
+        let permissions = PermissionSet {
+            execute: true,
+            task_network: true,
+            ..PermissionSet::default()
+        };
+        control
+            .set_permissions(workspace_id, permissions, control.revision())
+            .expect("permissions");
+        drop(control);
+        let control = open_control(&data).expect("control");
+        assert_eq!(withdrawn(&control, &networked), None);
     }
 
     /// A live run that the settings still allow is not waited for. Linux

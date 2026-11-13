@@ -3,19 +3,24 @@
 //! (`ERROR_ACCESS_DENIED`), or `os-<code>`. A grandchild repeats two probes to
 //! show that descendants stay in the container. The same probes run
 //! unconfined as a positive control, so a denial is not a broken probe.
+//! Capability probes print `held` or `absent` for the child's own token.
 
 use std::collections::BTreeMap;
 use std::env;
 use std::ffi::OsString;
 use std::fs;
 use std::io;
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::os::windows::io::{FromRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
 use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+use windows_sys::Win32::Security::{
+    CheckTokenCapability, WELL_KNOWN_SID_TYPE, WinCapabilityInternetClientSid,
+    WinCapabilityPrivateNetworkClientServerSid,
+};
 use windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
 use windows_sys::Win32::System::Pipes::{
     CreateNamedPipeW, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES,
@@ -23,18 +28,21 @@ use windows_sys::Win32::System::Pipes::{
 };
 
 use super::super::{
-    AppliedConfinement, CancelSignal, Confinement, ProcessError, ProcessOutcome, ProcessSpec,
-    Termination, UnixSocketAccess, run, run_confined,
+    AppliedConfinement, CancelSignal, Confinement, NetworkAccess, ProcessError, ProcessOutcome,
+    ProcessSpec, Termination, UnixSocketAccess, run, run_confined,
 };
 use super::{FIXTURE_ENV, HARNESS_ARGS, limits, spec, text};
 use crate::container::windows::tests::{TestContainer, identity, unique_name};
 use crate::container::{ContainerAccess, grant, revoke};
+use crate::private_store::windows::Sid;
 
 const READ_ONLY_FILE: &str = "OMGCODE_PROBE_READ_ONLY_FILE";
 const SECRET_FILE: &str = "OMGCODE_PROBE_SECRET_FILE";
 const WORKSPACE: &str = "OMGCODE_PROBE_WORKSPACE";
 const HOST_PIPE: &str = "OMGCODE_PROBE_HOST_PIPE";
 const HOST_TCP: &str = "OMGCODE_PROBE_HOST_TCP";
+/// `host:port` of an internet service, for the opt-in live probe.
+const INTERNET_HOST: &str = "OMGCODE_PROBE_INTERNET_HOST";
 const ACCESS_DENIED: i32 = 5;
 
 /// Child side: run every probe and print its result.
@@ -59,8 +67,51 @@ pub(super) fn probes() -> i32 {
     report("temp-round-trip", workspace_round_trip(&env::temp_dir()));
     report("tcp-connect-host", tcp_connect());
     report("pipe-connect-host", pipe_connect());
+    capability("internet-client", WinCapabilityInternetClientSid);
+    capability(
+        "private-network",
+        WinCapabilityPrivateNetworkClientServerSid,
+    );
+    if let Some(host) = env::var_os(INTERNET_HOST) {
+        report(
+            "internet-connect",
+            internet_connect(&host.to_string_lossy()),
+        );
+    }
     report("grandchild", grandchild());
     0
+}
+
+/// Print whether this process's token holds a capability.
+#[allow(unsafe_code)]
+fn capability(name: &str, kind: WELL_KNOWN_SID_TYPE) {
+    let outcome = Sid::well_known(kind).and_then(|sid| {
+        let mut held = 0;
+        // SAFETY: a null token handle names this thread's or process's token;
+        // the SID is valid while `sid` lives and `held` is writable.
+        let result =
+            unsafe { CheckTokenCapability(std::ptr::null_mut(), sid.as_psid(), &mut held) };
+        if result == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(held != 0)
+    });
+    let outcome = match outcome {
+        Ok(true) => "held".to_owned(),
+        Ok(false) => "absent".to_owned(),
+        Err(error) => format!("error-{error}"),
+    };
+    println!("PROBE:{name}={outcome}");
+}
+
+/// Resolve `host` and connect to its first address. The resolver and the
+/// connection both need network access.
+fn internet_connect(host: &str) -> io::Result<()> {
+    let address = host
+        .to_socket_addrs()?
+        .next()
+        .ok_or_else(|| io::Error::other("the host has no address"))?;
+    TcpStream::connect_timeout(&address, Duration::from_secs(10)).map(drop)
 }
 
 /// Grandchild side: two probes, then exit.
@@ -233,6 +284,7 @@ impl Scene {
             read_only: vec![self.read_only_directory.clone(), self.bin.clone()],
             read_write: vec![self.workspace.clone()],
             unix_sockets: UnixSocketAccess::PairsOnly,
+            network: NetworkAccess::Denied,
             container: Some((*self.name).clone()),
         }
     }
@@ -313,11 +365,18 @@ fn the_container_reaches_only_granted_paths_and_no_host_service() {
         &CancelSignal::new(),
     )
     .expect("confined run");
-    assert_eq!(outcome.confinement, AppliedConfinement::AppContainer);
+    assert_eq!(
+        outcome.confinement,
+        AppliedConfinement::AppContainer {
+            network: NetworkAccess::Denied
+        }
+    );
     let results = results(&outcome);
     assert_results(
         &results,
         &[
+            ("internet-client", "absent"),
+            ("private-network", "absent"),
             ("read-allowed", "ok"),
             ("list-allowed", "ok"),
             ("write-read-only", "denied"),
@@ -367,6 +426,70 @@ fn the_same_probes_succeed_unconfined() {
             ("grandchild-tcp-connect-host", "ok"),
         ],
     );
+}
+
+/// With network access the tree holds `internetClient` and nothing more:
+/// still no private network, no loopback host service, and no ungranted
+/// path.
+#[test]
+fn a_networked_container_holds_only_internet_client() {
+    let scene = Scene::new();
+    let mut confinement = scene.confinement();
+    confinement.network = NetworkAccess::Internet;
+    let outcome = run_confined(&scene.spec(), &confinement, &limits(), &CancelSignal::new())
+        .expect("networked run");
+    assert_eq!(
+        outcome.confinement,
+        AppliedConfinement::AppContainer {
+            network: NetworkAccess::Internet
+        }
+    );
+    let results = results(&outcome);
+    assert_results(
+        &results,
+        &[
+            ("internet-client", "held"),
+            ("private-network", "absent"),
+            ("read-secret", "denied"),
+            ("pipe-connect-host", "denied"),
+            ("workspace-round-trip", "ok"),
+            ("grandchild", "ok"),
+            ("grandchild-read-secret", "denied"),
+        ],
+    );
+    for name in ["tcp-connect-host", "grandchild-tcp-connect-host"] {
+        let result = results.get(name).map(String::as_str);
+        assert!(
+            result.is_some_and(|result| result != "ok"),
+            "{name}: {result:?}; all results: {results:?}"
+        );
+    }
+}
+
+/// Live check that a networked container resolves and reaches an internet
+/// host. It needs internet access, so it runs only when asked:
+/// `OMGCODE_TEST_INTERNET_HOST=example.com:80 cargo test -- --ignored`.
+#[test]
+#[ignore = "needs internet access and OMGCODE_TEST_INTERNET_HOST"]
+fn a_networked_container_reaches_the_internet() {
+    let host = env::var_os("OMGCODE_TEST_INTERNET_HOST").expect("OMGCODE_TEST_INTERNET_HOST");
+    let scene = Scene::new();
+    let mut spec = scene.spec();
+    spec.environment
+        .push((OsString::from(INTERNET_HOST), host.clone()));
+    let mut confinement = scene.confinement();
+    let denied = run_confined(&spec, &confinement, &limits(), &CancelSignal::new())
+        .expect("run without network");
+    let denied = results(&denied);
+    assert_ne!(
+        denied.get("internet-connect").map(String::as_str),
+        Some("ok"),
+        "reached {host:?} without network access"
+    );
+    confinement.network = NetworkAccess::Internet;
+    let allowed =
+        run_confined(&spec, &confinement, &limits(), &CancelSignal::new()).expect("networked run");
+    assert_results(&results(&allowed), &[("internet-connect", "ok")]);
 }
 
 #[test]

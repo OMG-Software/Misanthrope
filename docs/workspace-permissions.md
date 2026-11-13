@@ -85,7 +85,9 @@ availability, and flag mismatches before reporting configuration eligibility.
 Checks append audit events without changing the settings revision.
 
 Trusted CLI runs exist since 0.16.0. A run needs the live `execute`, `read`,
-and `write` preferences, and `host_services` when it selects host services.
+and `write` preferences, `host_services` when it selects host services, and,
+since 0.18.0, `task_network` when it selects network access with
+`--network`.
 It checks them before it starts and again after every settings change while
 it runs. A change that withdraws one stops the running tree, which is recorded
 as `revoked`. The `permissions` command reports success only after the runs it
@@ -164,6 +166,16 @@ same as version 0.15.0's. Version 0.15.0 refuses a settings log
 that records a profile. The
 [execution guide](execution.md#toolchain-profiles) owns the rules. Profile
 variables are stored here in plain text; never put secrets in them.
+
+## Task network
+
+`workspace permissions <id> --revision <n> --task-network true` lets a
+trusted `run` of that workspace select outbound IP networking when the run
+also passes `--network`. Both are required; the preference alone changes
+nothing. It is off by default. Turning it off stops networked runs of the
+workspace. Model connections never use it. A networked Linux run can reach
+every destination, including loopback and the local network; see
+[network access](execution.md#network-access).
 
 ## Host services
 

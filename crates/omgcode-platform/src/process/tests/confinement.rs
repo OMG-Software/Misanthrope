@@ -8,15 +8,16 @@ use std::env;
 use std::ffi::{CString, OsString};
 use std::fs;
 use std::io;
-use std::net::{TcpListener, TcpStream, UdpSocket};
+use std::net::{TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::{UnixDatagram, UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use super::super::{
-    AppliedConfinement, CancelSignal, Confinement, ProcessError, ProcessSpec, Termination,
-    UnixSocketAccess, run_confined,
+    AppliedConfinement, CancelSignal, Confinement, NetworkAccess, ProcessError, ProcessSpec,
+    Termination, UnixSocketAccess, network_support_paths, run_confined,
 };
 use super::{FIXTURE_ENV, HARNESS_ARGS, limits, spec, text};
 
@@ -25,6 +26,8 @@ const SECRET_FILE: &str = "OMGCODE_PROBE_SECRET_FILE";
 const WORKSPACE: &str = "OMGCODE_PROBE_WORKSPACE";
 const HOST_SOCKET: &str = "OMGCODE_PROBE_HOST_SOCKET";
 const HOST_TCP: &str = "OMGCODE_PROBE_HOST_TCP";
+/// `host:port` of an internet service, for the opt-in live probe.
+const INTERNET_HOST: &str = "OMGCODE_PROBE_INTERNET_HOST";
 
 /// Child side: run every probe and print its result.
 pub(super) fn probes() -> i32 {
@@ -59,8 +62,24 @@ pub(super) fn probes() -> i32 {
     report("unix-stream-pair", UnixStream::pair().map(drop));
     report("unix-datagram-pair", UnixDatagram::pair().map(drop));
     report("io-uring-setup", io_uring_setup());
+    if let Some(host) = env::var_os(INTERNET_HOST) {
+        report(
+            "internet-connect",
+            internet_connect(&host.to_string_lossy()),
+        );
+    }
     report("grandchild", grandchild());
     0
+}
+
+/// Resolve `host` and connect to its first address. The resolver and the
+/// connection both need network access and the resolver files.
+fn internet_connect(host: &str) -> io::Result<()> {
+    let address = host
+        .to_socket_addrs()?
+        .next()
+        .ok_or_else(|| io::Error::other("the host has no address"))?;
+    TcpStream::connect_timeout(&address, Duration::from_secs(10)).map(drop)
 }
 
 /// Grandchild side: two probes, then exit.
@@ -200,7 +219,7 @@ impl Scene {
         }
     }
 
-    fn confinement(&self, unix_sockets: UnixSocketAccess) -> Confinement {
+    fn confinement(&self, unix_sockets: UnixSocketAccess, network: NetworkAccess) -> Confinement {
         let mut read_only = vec![
             PathBuf::from("/usr"),
             self.read_only_directory.clone(),
@@ -210,10 +229,14 @@ impl Scene {
         if cache.exists() {
             read_only.push(cache);
         }
+        if network == NetworkAccess::Internet {
+            read_only.extend(network_support_paths().expect("network support paths"));
+        }
         Confinement {
             read_only,
             read_write: vec![self.workspace.clone()],
             unix_sockets,
+            network,
             container: None,
         }
     }
@@ -243,10 +266,20 @@ impl Scene {
     fn run(
         &self,
         unix_sockets: UnixSocketAccess,
+        network: NetworkAccess,
+    ) -> (AppliedConfinement, BTreeMap<String, String>) {
+        self.run_spec(&self.spec(), unix_sockets, network)
+    }
+
+    fn run_spec(
+        &self,
+        spec: &ProcessSpec,
+        unix_sockets: UnixSocketAccess,
+        network: NetworkAccess,
     ) -> (AppliedConfinement, BTreeMap<String, String>) {
         let outcome = run_confined(
-            &self.spec(),
-            &self.confinement(unix_sockets),
+            spec,
+            &self.confinement(unix_sockets, network),
             &limits(),
             &CancelSignal::new(),
         )
@@ -286,8 +319,8 @@ fn assert_results(results: &BTreeMap<String, String>, expected: &[(&str, &str)])
     }
 }
 
-/// Results that must hold in both Unix-socket modes.
-const COMMON: [(&str, &str); 14] = [
+/// Results that must hold in every Unix-socket and network mode.
+const COMMON: [(&str, &str); 11] = [
     ("read-allowed", "ok"),
     ("list-allowed", "ok"),
     ("write-read-only", "EACCES"),
@@ -297,34 +330,37 @@ const COMMON: [(&str, &str); 14] = [
     ("list-secret-dir", "EACCES"),
     ("write-secret", "EACCES"),
     ("workspace-round-trip", "ok"),
-    ("tcp-connect-host", "EPERM"),
-    ("udp-bind", "EPERM"),
-    ("tcp6-bind", "EPERM"),
     ("unix-stream-pair", "ok"),
     ("io-uring-setup", "EPERM"),
 ];
 
-const GRANDCHILD: [(&str, &str); 3] = [
-    ("grandchild", "ok"),
-    ("grandchild-read-secret", "EACCES"),
+/// Results that must hold without network access.
+const NO_NETWORK: [(&str, &str); 4] = [
+    ("tcp-connect-host", "EPERM"),
+    ("udp-bind", "EPERM"),
+    ("tcp6-bind", "EPERM"),
     ("grandchild-tcp-connect-host", "EPERM"),
 ];
+
+const GRANDCHILD: [(&str, &str); 2] = [("grandchild", "ok"), ("grandchild-read-secret", "EACCES")];
 
 #[test]
 fn the_default_mode_confines_files_and_refuses_every_host_socket() {
     let scene = Scene::new();
-    let (applied, results) = scene.run(UnixSocketAccess::PairsOnly);
+    let (applied, results) = scene.run(UnixSocketAccess::PairsOnly, NetworkAccess::Denied);
     assert!(
         matches!(
             applied,
             AppliedConfinement::Landlock {
                 abi: 3..,
-                unix_sockets: UnixSocketAccess::PairsOnly
+                unix_sockets: UnixSocketAccess::PairsOnly,
+                network: NetworkAccess::Denied,
             }
         ),
         "{applied:?}"
     );
     assert_results(&results, &COMMON);
+    assert_results(&results, &NO_NETWORK);
     assert_results(&results, &GRANDCHILD);
     assert_results(
         &results,
@@ -345,18 +381,20 @@ fn the_default_mode_confines_files_and_refuses_every_host_socket() {
 #[test]
 fn host_services_mode_reaches_unix_sockets_but_not_ip_or_files() {
     let scene = Scene::new();
-    let (applied, results) = scene.run(UnixSocketAccess::HostServices);
+    let (applied, results) = scene.run(UnixSocketAccess::HostServices, NetworkAccess::Denied);
     assert!(
         matches!(
             applied,
             AppliedConfinement::Landlock {
                 abi: 3..,
-                unix_sockets: UnixSocketAccess::HostServices
+                unix_sockets: UnixSocketAccess::HostServices,
+                network: NetworkAccess::Denied,
             }
         ),
         "{applied:?}"
     );
     assert_results(&results, &COMMON);
+    assert_results(&results, &NO_NETWORK);
     assert_results(&results, &GRANDCHILD);
     assert_results(
         &results,
@@ -368,10 +406,79 @@ fn host_services_mode_reaches_unix_sockets_but_not_ip_or_files() {
     );
 }
 
+/// Network access opens IP sockets to every destination, loopback included,
+/// for the whole tree. Files and Unix sockets keep their rules. On Landlock
+/// ABI 4 and later, TCP bind stays denied.
+#[test]
+fn network_access_reaches_ip_but_keeps_files_and_unix_rules() {
+    let scene = Scene::new();
+    let (applied, results) = scene.run(UnixSocketAccess::PairsOnly, NetworkAccess::Internet);
+    let AppliedConfinement::Landlock {
+        abi,
+        unix_sockets: UnixSocketAccess::PairsOnly,
+        network: NetworkAccess::Internet,
+    } = applied
+    else {
+        panic!("{applied:?}");
+    };
+    assert_results(&results, &COMMON);
+    assert_results(&results, &GRANDCHILD);
+    let tcp_bind = if abi >= 4 { "EACCES" } else { "ok" };
+    assert_results(
+        &results,
+        &[
+            ("tcp-connect-host", "ok"),
+            ("grandchild-tcp-connect-host", "ok"),
+            ("udp-bind", "ok"),
+            ("tcp6-bind", tcp_bind),
+            ("unix-connect-host", "EPERM"),
+            ("unix-bind-workspace", "EPERM"),
+            ("unix-datagram-pair", "EPERM"),
+        ],
+    );
+}
+
+#[test]
+fn network_support_paths_are_real_and_exist() {
+    let paths = network_support_paths().expect("network support paths");
+    for path in &paths {
+        assert!(path.is_absolute(), "{path:?}");
+        assert_eq!(
+            &fs::canonicalize(path).expect("resolve"),
+            path,
+            "{path:?} is not a real path"
+        );
+    }
+    if Path::new("/etc/hosts").exists() {
+        assert!(!paths.is_empty());
+    }
+}
+
+/// Live check that a networked run resolves and reaches an internet host
+/// through the support paths. It needs internet access, so it runs only when
+/// asked: `OMGCODE_TEST_INTERNET_HOST=example.com:80 cargo test -- --ignored`.
+#[test]
+#[ignore = "needs internet access and OMGCODE_TEST_INTERNET_HOST"]
+fn a_networked_run_reaches_the_internet() {
+    let host = env::var_os("OMGCODE_TEST_INTERNET_HOST").expect("OMGCODE_TEST_INTERNET_HOST");
+    let scene = Scene::new();
+    let mut spec = scene.spec();
+    spec.environment
+        .push((OsString::from(INTERNET_HOST), host.clone()));
+    let (_, denied) = scene.run_spec(&spec, UnixSocketAccess::PairsOnly, NetworkAccess::Denied);
+    assert_ne!(
+        denied.get("internet-connect").map(String::as_str),
+        Some("ok"),
+        "reached {host:?} without network access"
+    );
+    let (_, allowed) = scene.run_spec(&spec, UnixSocketAccess::PairsOnly, NetworkAccess::Internet);
+    assert_results(&allowed, &[("internet-connect", "ok")]);
+}
+
 #[test]
 fn a_program_outside_the_rules_cannot_start() {
     let scene = Scene::new();
-    let mut confinement = scene.confinement(UnixSocketAccess::PairsOnly);
+    let mut confinement = scene.confinement(UnixSocketAccess::PairsOnly, NetworkAccess::Denied);
     let executable = executable_directory();
     confinement
         .read_only
@@ -406,7 +513,7 @@ fn unusable_confinement_paths_start_nothing() {
     fs::create_dir(scene.workspace.join("nested")).expect("nested directory");
     let record = scene.workspace.join("started.txt");
     for (name, path) in cases {
-        let mut confinement = scene.confinement(UnixSocketAccess::PairsOnly);
+        let mut confinement = scene.confinement(UnixSocketAccess::PairsOnly, NetworkAccess::Denied);
         confinement.read_write.push(path);
         let mut spec = scene.spec();
         spec.environment

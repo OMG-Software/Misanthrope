@@ -1,11 +1,12 @@
 //! Filesystem and network confinement requested for one run.
 //!
 //! The rules are an allowlist: a confined program can reach only the listed
-//! paths, cannot create IP sockets, follows the selected Unix-domain socket
-//! mode, and passes the same restrictions to every descendant. Linux
-//! applies them with Landlock and seccomp. Windows runs the tree in an
-//! AppContainer and checks that each listed path is already granted to it.
-//! See `docs/execution.md`, ADR-0028, and ADR-0029.
+//! paths, creates IP sockets only when [`NetworkAccess::Internet`] is
+//! selected, follows the selected Unix-domain socket mode, and passes the same
+//! restrictions to every descendant. Linux applies them with Landlock and
+//! seccomp. Windows runs the tree in an AppContainer and checks that each
+//! listed path is already granted to it. See `docs/execution.md`, ADR-0028,
+//! ADR-0029, and ADR-0032.
 
 use std::path::{Path, PathBuf};
 
@@ -47,13 +48,39 @@ pub struct Confinement {
     /// Which Unix-domain sockets the tree may create. Defaults to pairs only.
     /// Windows refuses [`UnixSocketAccess::HostServices`].
     pub unix_sockets: UnixSocketAccess,
+    /// Whether the tree may use IP networking. Defaults to none.
+    pub network: NetworkAccess,
     /// The AppContainer identity for the run. Windows requires it; Linux
     /// ignores it.
     pub container: Option<ContainerName>,
 }
 
-/// Which Unix-domain sockets a confined tree may create. IP and every other
-/// address family stay denied in both modes.
+/// Whether a confined tree may use IP networking.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NetworkAccess {
+    /// No IP sockets on Linux; no network capability on Windows. This is the
+    /// default.
+    #[default]
+    Denied,
+    /// Outbound IP networking, which differs by platform:
+    ///
+    /// - **Linux:** `socket` may create `AF_INET` and `AF_INET6` sockets of
+    ///   any type the user may create. Nothing limits the destination: the
+    ///   tree can reach **loopback services, the local network, and cloud
+    ///   metadata endpoints** as well as the internet. On Landlock ABI 4 and
+    ///   later, TCP `bind` stays denied, so the tree cannot serve TCP; UDP and
+    ///   older ABIs are not limited.
+    /// - **Windows:** the AppContainer gets the `internetClient` capability:
+    ///   outbound connections to the internet and public networks. Private
+    ///   networks, loopback, and inbound connections stay denied.
+    ///
+    /// Either way the tree can send any workspace data it can read to any
+    /// host it can reach. Select this only on an explicit operator decision.
+    Internet,
+}
+
+/// Which Unix-domain sockets a confined tree may create. IP follows
+/// [`NetworkAccess`]; every other address family stays denied in both modes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum UnixSocketAccess {
     /// Only `socketpair` of stream or sequenced-packet type, for IPC inside
@@ -97,23 +124,76 @@ fn validate_path(path: &Path) -> Result<(), ProcessError> {
     Ok(())
 }
 
+/// Host files that name resolution and TLS read on Linux. With network access
+/// a confined program can open sockets, but it can read only listed paths, so
+/// without these it can neither resolve a name nor verify a certificate.
+#[cfg(target_os = "linux")]
+const NETWORK_SUPPORT_PATHS: [&str; 12] = [
+    "/etc/resolv.conf",
+    "/etc/hosts",
+    "/etc/nsswitch.conf",
+    "/etc/gai.conf",
+    "/etc/host.conf",
+    "/etc/services",
+    "/etc/protocols",
+    "/etc/ssl",
+    "/etc/pki",
+    "/etc/ca-certificates",
+    "/usr/share/ca-certificates",
+    "/usr/local/share/ca-certificates",
+];
+
+/// The fixed resolver and certificate paths a networked Linux run reads, as
+/// real paths without symbolic links, which confinement rules require. Paths
+/// that do not exist are left out. The caller lists them read-only and should
+/// record them, because they expose host configuration such as `/etc/hosts`.
+///
+/// `/etc/resolv.conf` is often a link into `/run`; the rule then names the
+/// file the link pointed to when the run started.
+///
+/// # Errors
+///
+/// Fails when a path exists but cannot be resolved.
+#[cfg(target_os = "linux")]
+pub fn network_support_paths() -> std::io::Result<Vec<PathBuf>> {
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for listed in NETWORK_SUPPORT_PATHS {
+        match std::fs::canonicalize(listed) {
+            Ok(path) => {
+                if !paths.contains(&path) {
+                    paths.push(path);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(paths)
+}
+
 /// The confinement that was in force for a run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AppliedConfinement {
     /// No filesystem or network confinement: the run came from [`super::run`].
     Unconfined,
     /// A Landlock ruleset at this ABI version, plus the seccomp socket filter.
-    /// ABI 4 and later also deny TCP bind and connect through Landlock; ABI 6
-    /// and later also scope signals and abstract Unix sockets to the tree.
+    /// ABI 4 and later also deny TCP bind and, without network access, TCP
+    /// connect through Landlock; ABI 6 and later also scope signals and
+    /// abstract Unix sockets to the tree.
     Landlock {
         /// The Landlock ABI version the kernel reported and the ruleset used.
         abi: u32,
         /// The Unix-domain socket mode the seccomp filter enforced.
         unix_sockets: UnixSocketAccess,
+        /// The IP network access the seccomp filter and ruleset allowed.
+        network: NetworkAccess,
     },
-    /// An AppContainer with no capabilities, derived from
-    /// [`Confinement::container`], inside the run's job object. It has no
-    /// network access, including loopback, and reaches only granted paths and
-    /// paths every application package can reach.
-    AppContainer,
+    /// An AppContainer derived from [`Confinement::container`], inside the
+    /// run's job object. It reaches only granted paths and paths every
+    /// application package can reach. Without network access it has no
+    /// capabilities and no network, including loopback.
+    AppContainer {
+        /// The network access its capabilities allowed.
+        network: NetworkAccess,
+    },
 }

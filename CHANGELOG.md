@@ -6,6 +6,19 @@ Changes are recorded here before a release version is assigned.
 
 ### Added
 
+- Version 0.18.0 adds outbound network access for trusted runs. See ADR-0032.
+  - **Gating:** `omgcode run ... --network` needs the workspace
+    `task_network` preference. Without both, a run has no IP networking, as
+    before. Turning the preference off stops networked runs, recorded as
+    `revoked`.
+  - **Linux:** the socket filter allows `AF_INET` and `AF_INET6` sockets.
+    Every destination is reachable, including loopback and the local
+    network. On Landlock ABI 4 and later, TCP bind stays denied. The run can
+    read a fixed list of resolver and certificate paths.
+  - **Windows:** the AppContainer gets the `internetClient` capability only.
+    Loopback and private networks stay blocked.
+  - **Records:** `run_started` records `network` with the support paths.
+    Records written by 0.17.0 still replay.
 - Version 0.17.0 limits every trusted run as a whole tree. See ADR-0031.
   - **Limits:** `--max-memory-mib` (default 8192), `--max-processes`
     (default 1024), and `--max-cpu-secs` (default 7200). Values out of range

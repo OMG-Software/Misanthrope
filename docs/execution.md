@@ -37,6 +37,10 @@ in memory, live processes, and CPU time for its whole tree. Windows applies
 them to the run's Job Object. Linux applies them to a child of the runner's
 delegated cgroup v2, and refuses a run when the runner is not in one.
 
+Version 0.18.0 adds [network access](#network-access). A trusted run passes
+`--network` to get outbound IP networking, and the workspace `task_network`
+preference must allow it. Runs without the flag keep no IP networking.
+
 ## Accepted decisions
 
 The user selected these on 2026-11-11; see
@@ -106,6 +110,7 @@ specification and limits as `run`, plus a `Confinement`:
 | `read_only` | Paths that may be read, listed, and executed. Toolchain roots, system libraries, and the program belong here. |
 | `read_write` | Paths that may also be written, created, renamed, truncated, and removed beneath. The workspace and a private scratch directory belong here. |
 | `unix_sockets` | `PairsOnly` (default) or `HostServices`; see below. Windows refuses `HostServices`. |
+| `network` | `Denied` (default) or `Internet`; see [network access](#network-access). |
 | `container` | The workspace container name. Windows requires it; Linux ignores it. |
 
 On Windows the paths are not applied at start: access comes from the
@@ -123,14 +128,14 @@ Linux rules:
 - Each path must be absolute and name an existing directory, regular file, or
   character device. No component may be a symbolic link. At most 64 paths are
   accepted.
-- IP sockets are refused in every mode, including loopback. There is no
-  package-network or development-server networking yet.
+- With `network: Denied`, IP sockets are refused in every Unix-socket mode,
+  including loopback. With `Internet`, see [network access](#network-access).
 - Setup fails closed. A missing path, a link, an unsupported type, a missing
   primitive, or an old kernel starts nothing. A program that the rules do not
   let the kernel execute fails as `Spawn` with `EACCES`.
 - The outcome's `confinement` field records what applied:
-  `Unconfined` for `run`, `Landlock { abi, unix_sockets }` on Linux, or
-  `AppContainer` on Windows.
+  `Unconfined` for `run`, `Landlock { abi, unix_sockets, network }` on Linux,
+  or `AppContainer { network }` on Windows.
 
 ### Unix-domain sockets
 
@@ -154,6 +159,36 @@ On Windows, `HostServices` is refused with `Unsupported`. In `PairsOnly` mode a
 host named pipe or Unix socket is reachable only when its own ACL admits the
 container or every application package; a pipe with the default security
 descriptor is not. The tree can still create pipes and sockets of its own.
+
+### Network access
+
+The user chose the C6 options on 2026-11-13; see
+[ADR-0032](adr/0032-allow-outbound-network-for-trusted-runs-through-task-network.md).
+
+| Platform | `Denied` (default) | `Internet` |
+| --- | --- | --- |
+| Linux | No `AF_INET` or `AF_INET6` socket. | `socket(AF_INET)` and `socket(AF_INET6)` of any type. **Every destination is reachable, including loopback services, the local network, and cloud metadata endpoints.** On Landlock ABI 4 and later, TCP bind is denied. |
+| Windows | The container has no capabilities: no network, including loopback. | The container gets the `internetClient` capability: outbound connections to the internet. Loopback, private networks, and inbound connections stay denied. |
+
+On both platforms a networked tree can send any data it can read, workspace
+files included, to any host it can reach. Every other socket family keeps its
+rule, `socketpair` stays Unix-only, and `io_uring` stays denied.
+
+On Linux, name resolution and certificate checks read host files, which the
+rules would otherwise hide. `process::network_support_paths()` returns the
+existing entries of this fixed list, each resolved to its real path, and a
+trusted run adds them read-only:
+
+- `/etc/resolv.conf`, `/etc/hosts`, `/etc/nsswitch.conf`, `/etc/gai.conf`,
+  `/etc/host.conf`, `/etc/services`, and `/etc/protocols`;
+- `/etc/ssl`, `/etc/pki`, `/etc/ca-certificates`,
+  `/usr/share/ca-certificates`, and `/usr/local/share/ca-certificates`.
+
+A link such as `/etc/resolv.conf` is resolved when the run starts; a later
+change of its target is not followed. Resolvers that need other services, such
+as `nscd` or `systemd-resolved` through a Unix socket, need host services too.
+Windows resolves names and checks certificates through system services, so it
+adds no paths.
 
 ## Container grants
 
@@ -207,7 +242,7 @@ omgcode run <workspace-id> --profile <name> [--cwd <relative dir>]
     [--max-memory-mib <16-1048576, default 8192>]
     [--max-processes <1-65536, default 1024>]
     [--max-cpu-secs <1-604800, default 7200>]
-    [--host-services] -- <program> [arguments...]
+    [--host-services] [--network] -- <program> [arguments...]
 omgcode runs audit [--limit <n>] [--archive <file>]
 omgcode runs acknowledge <run-id>
 omgcode runs archive --archive-dir <existing dir>
@@ -233,6 +268,7 @@ While holding the control journal lock, `run` checks:
    preferences are enabled. A run writes inside the workspace, so it needs all
    three.
 2. For `--host-services`: the host is Linux, and the live `host_services`
+   preference is enabled. For `--network`: the live `task_network`
    preference is enabled.
 3. The profile exists and was declared on this platform. Each root and `PATH`
    entry is still the recorded directory, and no root now overlaps the
@@ -263,8 +299,9 @@ A run's watcher rereads the settings each time the control journal changes,
 and checks the run against them:
 
 - the workspace is still registered and inside the development root;
-- `execute`, `read`, and `write` are still enabled, and `host_services` for a
-  run that selected host services;
+- `execute`, `read`, and `write` are still enabled, `host_services` for a
+  run that selected host services, and `task_network` for a run that
+  selected network access;
 - the run's profile still exists with the same identity;
 - on Windows, the workspace still has its active read-write grant, no grant of
   the workspace is `revoking`, and no revocation of any grant of the workspace
@@ -310,10 +347,11 @@ entries, the runner-owned variables below, and the profile's variables.
 
 | Platform | Runner-owned variables | Read-only | Read-write |
 | --- | --- | --- | --- |
-| Linux | `HOME`, `TMPDIR`, and `XDG_CACHE_HOME`, all set to `<data-dir>/run-scratch/<run id>` (mode 0700, removed after the run) | Profile roots, `/dev/zero`, `/dev/random`, `/dev/urandom` | The workspace, the scratch directory, `/dev/null` |
+| Linux | `HOME`, `TMPDIR`, and `XDG_CACHE_HOME`, all set to `<data-dir>/run-scratch/<run id>` (mode 0700, removed after the run) | Profile roots, `/dev/zero`, `/dev/random`, `/dev/urandom`, and, with `--network`, the [network support paths](#network-access) | The workspace, the scratch directory, `/dev/null` |
 | Windows | `LOCALAPPDATA`, `SystemRoot`, `windir`, and `HOME` and `USERPROFILE` set to the container's `AC` folder. Windows then sets `TEMP` and `TMP` inside it | Profile roots, checked against their live ACLs | The workspace, through its grant |
 
-Linux runs use `PairsOnly` sockets unless host services were selected. Windows
+Linux runs use `PairsOnly` sockets unless host services were selected. Runs
+have no IP networking unless `--network` was passed. Windows
 roots that every application package can read, such as `Program Files`, need
 no grant; others need a read-execute [container grant](#container-grants).
 
@@ -464,7 +502,7 @@ sequence, a UTC timestamp, and a tagged `action`:
 | Action | Meaning |
 | --- | --- |
 | `created` | Header |
-| `run_started` | Synced before the program starts. Records the run ID, workspace, settings revision, profile ID, name, and revision, program path, argument count, `arguments_sha256`, working directory, socket mode, and, since 0.17.0, `limits` (`max_memory_bytes`, `max_processes`, `max_cpu_ms`). |
+| `run_started` | Synced before the program starts. Records the run ID, workspace, settings revision, profile ID, name, and revision, program path, argument count, `arguments_sha256`, working directory, socket mode, since 0.17.0 `limits` (`max_memory_bytes`, `max_processes`, `max_cpu_ms`), and, since 0.18.0 and only for a networked run, `network` with the `support_paths` it could read (at most 32). |
 | `run_finished` | Records the result (`exited`, `signalled`, `deadline_exceeded`, `cancelled`, `revoked`, `limit_exceeded` with its `limit`, `not_started`, `supervision_failed`, or `cleanup_unconfirmed`), the applied confinement, the elapsed time, the output byte counts, and, for a started run, `usage` (`cpu_ms` and, where reported, `peak_memory_bytes`) |
 | `run_acknowledged` | The operator cleared a pending run |
 
@@ -564,8 +602,10 @@ For `run_confined`, the runner checks before anything starts:
    cannot read would still start.
 
 A failed check starts nothing. The runner then passes
-`PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES` with the container SID and no
-capabilities, beside the job and handle lists above. Every descendant stays in
+`PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES` with the container SID, beside
+the job and handle lists above. Without network access it lists no
+capabilities. With `Internet` it lists only the `internetClient` capability
+SID, enabled. Every descendant stays in
 the same container and job.
 
 Grants are applied by `container::grant`:
@@ -609,8 +649,10 @@ For `run_confined`, the parent prepares everything that can fail before
    or below ABI 3, it returns `Unsupported`. ABI 3 is the first that handles
    truncation, so earlier ABIs could not keep a read-only file intact.
 2. It creates a ruleset that handles every filesystem right the ABI knows,
-   TCP bind and connect from ABI 4, and signal and abstract-socket scoping from
-   ABI 6. Rights added after ABI 6 are not handled.
+   TCP bind from ABI 4, TCP connect from ABI 4 unless the run has network
+   access, and signal and abstract-socket scoping from ABI 6. Rights added
+   after ABI 6 are not handled. No network rule is added, so a handled right
+   is denied for every port.
 3. It opens each path with `openat2(O_PATH, RESOLVE_NO_SYMLINKS |
    RESOLVE_NO_MAGICLINKS)`, checks its type, and adds a path-beneath rule.
    Read-only rules grant execute, read, and list. Read-write rules grant every
@@ -623,8 +665,9 @@ The ruleset descriptor is close-on-exec. The child then runs C1's steps and, aft
 `no_new_privs`, calls `landlock_restrict_self` before installing the seccomp
 filter. The confined filter adds these refusals, each with `EPERM`:
 
-- `socket` and `socketpair` for every family other than `AF_UNIX`, and the
-  Unix rule for the selected mode;
+- `socket` for every family other than `AF_UNIX`, except `AF_INET` and
+  `AF_INET6` with network access, and the Unix rule for the selected mode;
+- `socketpair` for every family other than `AF_UNIX`;
 - `io_uring_setup`, `io_uring_enter`, and `io_uring_register`, because
   `io_uring` can create sockets without `socket`.
 
@@ -635,7 +678,7 @@ sockets ignore it.
 
 ## Known limits
 
-These remain true after C5:
+These remain true after C6:
 
 - **`process::run` is unconfined.** A program started by the platform
   function `run` can read and write anything the user can, use the network,
@@ -661,8 +704,9 @@ These remain true after C5:
     GCC 13.3.
 
   The Java case has not run, because neither host had a JDK. Not covered:
-  disk exhaustion; package-network access, because there is no network
-  profile; and Python and Node formatters, because none were installed. On
+  disk exhaustion; package downloads through `--network`, which have not
+  been run as acceptance cases; and Python and Node formatters, because none
+  were installed. On
   Windows, the Rust, Python, and Node toolchains were user-owned copies
   granted read-execute, because the installed directories needed
   administrator rights to grant.
@@ -695,8 +739,16 @@ These remain true after C5:
   state-changing `ioctl` calls. Grant devices only when needed. Before ABI 6, a
   confined program can signal other processes of the same user.
 - **`HostServices` exposure.** See [Unix-domain sockets](#unix-domain-sockets).
-- **No IP networking.** Package downloads, loopback test servers, and
-  development servers fail until a network profile is designed.
+- **Network access is all or nothing.** Without `--network`, package
+  downloads, loopback test servers, and development servers fail. With it,
+  a Linux run reaches every destination, loopback and the local network
+  included, and a Windows run reaches the internet but not loopback. There is
+  no destination allowlist. On Landlock ABI 3 a networked Linux run can also
+  listen on TCP, and UDP bind is never limited. See
+  [network access](#network-access).
+- **Network coverage.** Network access was tested on Windows 11 build 26300
+  and WSL 6.6 (Landlock ABI 3) only, including a TLS fetch with the system
+  `curl` on both. The ABI 4 TCP-bind denial has not run on a live kernel.
 - **Tree limits differ by platform.** Windows limits committed private memory;
   Linux limits cgroup memory, which includes page cache and kernel memory
   charged to the tree. Linux counts threads against the process limit. CPU
@@ -729,10 +781,12 @@ These remain true after C5:
 | C3 (0.15.0) | Windows AppContainer | Done: see [Windows confinement](#windows-confinement), [container grants](#container-grants), and ADR-0029 |
 | C4 (0.16.0) | Trusted CLI `run` and the `execute` preference | Done: see [trusted runs](#trusted-runs) and ADR-0030 |
 | C5 (0.17.0) | Tree-wide memory, process, and CPU-time limits | Done: see [tree limits](#tree-limits) and ADR-0031 |
+| C6 (0.18.0) | Outbound network access behind `task_network` and `--network` | Done: see [network access](#network-access) and ADR-0032 |
 
 Later work needs its own decisions:
 
-- a package-network profile;
+- a network destination allowlist, registry credentials, and
+  development-server networking;
 - a disk limit;
 - a model-callable command tool.
 

@@ -23,6 +23,7 @@ fn start(run_id: Uuid) -> RunStart {
             max_processes: 1024,
             max_cpu_ms: 7_200_000,
         }),
+        network: None,
     }
 }
 
@@ -105,6 +106,54 @@ fn limits_and_usage_are_recorded_and_checked_on_replay() {
     RunJournal::apply(&mut state, &entry(store, 1, entries[0].clone()), 1, store).expect("start");
     assert!(matches!(
         RunJournal::apply(&mut state, &entry(store, 2, entries[1].clone()), 2, store),
+        Err(RunJournalError::Invalid(_))
+    ));
+}
+
+/// A networked start records its support paths. A start recorded before
+/// 0.18.0, with no network field, still replays as a run without network
+/// access, and a start cannot record more support paths than the bound.
+#[test]
+fn network_access_is_recorded_and_bounded_on_replay() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let store = store_id();
+    let (networked, plain) = (Uuid::new_v4(), Uuid::new_v4());
+    let support = NativePath::from_path(&std::env::temp_dir().join("hosts")).expect("native path");
+    let mut journal = RunJournal::open(directory.path(), store).expect("journal");
+    let mut networked_start = start(networked);
+    networked_start.network = Some(NetworkRecord {
+        support_paths: vec![support.clone()],
+    });
+    journal
+        .start(networked_start.clone())
+        .expect("networked start");
+    journal.start(start(plain)).expect("plain start");
+    drop(journal);
+    let text = fs::read_to_string(directory.path().join(FILE_NAME)).expect("journal text");
+    // Only the networked start's line carries the field.
+    assert_eq!(text.matches("\"network\"").count(), 1);
+    assert!(text.contains("\"support_paths\""));
+    let journal = RunJournal::open(directory.path(), store).expect("replay");
+    let replayed = journal.pending_starts();
+    let found = |id| replayed.iter().find(|start| start.run_id == id).copied();
+    assert_eq!(
+        found(networked).and_then(|start| start.network.clone()),
+        networked_start.network
+    );
+    assert_eq!(found(plain).map(|start| start.network.clone()), Some(None));
+    drop(journal);
+
+    let mut excessive = start(Uuid::new_v4());
+    excessive.network = Some(NetworkRecord {
+        support_paths: vec![support; MAX_NETWORK_SUPPORT_PATHS + 1],
+    });
+    assert!(matches!(
+        RunJournal::apply(
+            &mut ReplayState::default(),
+            &entry(store, 1, RunAction::RunStarted { start: excessive }),
+            1,
+            store
+        ),
         Err(RunJournalError::Invalid(_))
     ));
 }

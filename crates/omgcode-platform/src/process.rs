@@ -27,7 +27,11 @@ mod windows;
 #[cfg(test)]
 mod tests;
 
-pub use confinement::{AppliedConfinement, Confinement, MAX_CONFINEMENT_PATHS, UnixSocketAccess};
+#[cfg(target_os = "linux")]
+pub use confinement::network_support_paths;
+pub use confinement::{
+    AppliedConfinement, Confinement, MAX_CONFINEMENT_PATHS, NetworkAccess, UnixSocketAccess,
+};
 
 /// Largest accepted run deadline.
 pub const MAX_DEADLINE: Duration = Duration::from_secs(60 * 60);

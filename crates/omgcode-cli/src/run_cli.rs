@@ -50,6 +50,12 @@ pub(crate) struct RunArgs {
     /// workspace `host_services` preference. Refused on Windows.
     #[arg(long)]
     host_services: bool,
+    /// Allow outbound IP networking. Needs the workspace `task_network`
+    /// preference. On Linux the program can reach any address, including
+    /// loopback services and the local network; on Windows, only the
+    /// internet. See ADR-0032.
+    #[arg(long)]
+    network: bool,
     /// The program, then its arguments. Put `--` before them.
     #[arg(required = true, num_args = 1.., trailing_var_arg = true, allow_hyphen_values = true)]
     command: Vec<OsString>,
@@ -108,6 +114,7 @@ pub(crate) fn run(args: RunArgs, data_root: &Path) -> Result<(), CliError> {
         arguments: command.collect(),
         working_directory: args.cwd,
         host_services: args.host_services,
+        network: args.network,
         limits: ProcessLimits {
             deadline,
             max_stdout_bytes: args.max_output_bytes,

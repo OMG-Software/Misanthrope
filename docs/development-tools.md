@@ -121,8 +121,11 @@ User-requested dependency installation can write into its authorized workspace
 environment or managed scratch. Changing a managed toolchain requires a separate
 approved operation. Host installation remains an explicit user/admin action.
 
-Package downloads use task/package-network permissions, never the model
-connection's permission. Registry credentials require a narrow reviewed
+Package downloads use task-network permission, never the model connection's
+permission. Since 0.18.0 a trusted run gets outbound networking only with the
+workspace `task_network` preference and its `--network` flag; see
+[network access](execution.md#network-access). There is no destination
+allowlist yet. Registry credentials require a narrow reviewed
 credential path. Offline tasks must work with available dependencies or explain
 which download is needed.
 
@@ -172,7 +175,8 @@ They are listed in the [execution guide](execution.md#acceptance). Not covered
 yet:
 
 - disk exhaustion;
-- the package-network allowed case, because no network profile exists;
+- package downloads through `--network`, and rejection of undeclared
+  destinations, because there is no destination allowlist;
 - hostile package scripts beyond the hostile programs.
 
 The Java case has not run on either host. The registry case also remains open.
