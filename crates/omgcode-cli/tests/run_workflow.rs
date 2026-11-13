@@ -684,6 +684,8 @@ fn a_tree_limit_ends_the_run_and_is_recorded() {
         "512",
         "--max-processes",
         "64",
+        "--max-disk-mib",
+        "256",
     ];
     let run = run_json(&scene.run("system", &options, &shell(SPIN)));
     assert_eq!(run["start"]["limits"]["max_cpu_ms"], 1000);
@@ -692,6 +694,10 @@ fn a_tree_limit_ends_the_run_and_is_recorded() {
         512u64 * 1024 * 1024
     );
     assert_eq!(run["start"]["limits"]["max_processes"], 64);
+    assert_eq!(
+        run["start"]["limits"]["max_disk_bytes"],
+        256u64 * 1024 * 1024
+    );
     assert_eq!(run["finish"]["result"]["kind"], "limit_exceeded");
     assert_eq!(run["finish"]["result"]["limit"], "cpu_time");
     assert!(run["finish"]["usage"]["cpu_ms"].as_u64().expect("CPU time") >= 1000);
@@ -702,7 +708,47 @@ fn a_tree_limit_ends_the_run_and_is_recorded() {
     assert_eq!(run["finish"]["result"]["code"], 0);
     assert_eq!(run["start"]["limits"]["max_processes"], 1024);
     assert_eq!(run["start"]["limits"]["max_cpu_ms"], 7_200_000);
+    assert_eq!(
+        run["start"]["limits"]["max_disk_bytes"],
+        8u64 * 1024 * 1024 * 1024
+    );
     assert!(run["finish"]["usage"].is_object());
+    scene.close();
+}
+
+/// Growth in the writable workspace past the disk limit ends the whole run.
+/// The limit is recorded before the program starts, and the outcome reports
+/// the measured peak growth.
+#[test]
+fn a_disk_limit_ends_the_run_and_is_recorded() {
+    let scene = Scene::new();
+    assert_success(&scene.add_profile("system", &[]));
+    // The source exists before the run, so the baseline counts it. Copying it
+    // inside the writable workspace adds bytes the disk limit must see. Both
+    // commands then wait to be stopped.
+    let source = scene.workspace.join("growth-source.bin");
+    fs::write(&source, vec![0u8; 32 * 1024 * 1024]).expect("growth source");
+    #[cfg(target_os = "linux")]
+    let script = "cp growth-source.bin growth.bin; while :; do :; done";
+    #[cfg(windows)]
+    let script = "copy /b growth-source.bin growth.bin >nul & for /l %i in (1,0,2) do @rem";
+    let options = ["--max-disk-mib", "16", "--max-memory-mib", "512"];
+    let run = run_json(&scene.run("system", &options, &shell(script)));
+    assert_eq!(
+        run["start"]["limits"]["max_disk_bytes"],
+        16u64 * 1024 * 1024
+    );
+    assert_eq!(run["finish"]["result"]["kind"], "limit_exceeded");
+    assert_eq!(run["finish"]["result"]["limit"], "disk");
+    assert!(
+        run["finish"]["usage"]["peak_disk_bytes"]
+            .as_u64()
+            .expect("disk usage")
+            >= 16 * 1024 * 1024,
+        "{run}"
+    );
+    assert_eq!(last_result(&scene)["limit"], "disk");
+    assert_eq!(scene.audit()["pending"], Value::Array(Vec::new()));
     scene.close();
 }
 
@@ -718,6 +764,8 @@ fn out_of_range_tree_limits_are_refused_before_recording() {
         ["--max-processes", "65537"],
         ["--max-cpu-secs", "0"],
         ["--max-cpu-secs", "604801"],
+        ["--max-disk-mib", "15"],
+        ["--max-disk-mib", "1048577"],
     ] {
         let output = scene.run("system", &options, &shell("exit 0"));
         assert_error_code(&output, "configuration");

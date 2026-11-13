@@ -84,7 +84,9 @@ The Rust workflow adds formatting, strict Clippy, unit/integration tests, and
 separate documentation tests on Windows and Linux. The development guide owns
 the current commands and limits. There is no frontend yet. The trusted `run`
 command uses native confinement that was tested on one Windows build and one
-Linux kernel only. The limited file broker and the core read/list turn runtime
+Linux kernel only. Every trusted run has memory, process-count, CPU-time, and
+sampled net disk-growth limits; the disk limit is not a filesystem quota. The
+limited file broker and the core read/list turn runtime
 do not provide general model tools. Chat dispatches only the read and
 list tools, and only for a workspace that enables `model_tools`. A read-only CLI preview compares a workspace file with trusted proposed
 content without writing to the workspace or creating a checkpoint.

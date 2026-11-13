@@ -29,9 +29,9 @@ use windows_sys::Win32::System::Pipes::{
 
 use super::super::{
     AppliedConfinement, CancelSignal, Confinement, NetworkAccess, ProcessError, ProcessOutcome,
-    ProcessSpec, Termination, UnixSocketAccess, run, run_confined,
+    ProcessSpec, ResourceLimit, Termination, UnixSocketAccess, run, run_confined,
 };
-use super::{FIXTURE_ENV, HARNESS_ARGS, limits, spec, text};
+use super::{FIXTURE_ENV, HARNESS_ARGS, disk_limits, grow_spec, limits, spec, text};
 use crate::container::windows::tests::{TestContainer, identity, unique_name};
 use crate::container::{ContainerAccess, grant, revoke};
 use crate::private_store::windows::Sid;
@@ -353,6 +353,33 @@ fn assert_results(results: &BTreeMap<String, String>, expected: &[(&str, &str)])
             "probe {name}; all results: {results:?}"
         );
     }
+}
+
+/// Growth in the writable workspace past the disk limit ends the whole
+/// contained tree, and the outcome reports the measured peak.
+#[test]
+fn the_disk_limit_ends_a_confined_run() {
+    let scene = Scene::new();
+    let growth = scene.workspace.join("growth.bin");
+    let spec = grow_spec(scene.spec(), &growth);
+    let outcome = run_confined(
+        &spec,
+        &scene.confinement(),
+        &disk_limits(16 * 1024 * 1024),
+        &CancelSignal::new(),
+    )
+    .expect("confined run");
+    assert_eq!(
+        outcome.termination,
+        Termination::LimitExceeded {
+            limit: ResourceLimit::Disk
+        }
+    );
+    let usage = outcome.usage.expect("a limited run reports usage");
+    assert!(
+        usage.peak_disk_bytes.expect("disk usage") >= 16 * 1024 * 1024,
+        "{usage:?}"
+    );
 }
 
 #[test]

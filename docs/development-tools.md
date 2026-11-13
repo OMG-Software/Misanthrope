@@ -23,7 +23,8 @@ operator-declared [toolchain profile](execution.md#toolchain-profiles).
 Version 0.17.0 limits each run's memory, live processes, and CPU time; raise
 the [tree limits](execution.md#tree-limits) for large builds. On Linux the
 process limit counts threads, so a parallel compiler needs a higher limit
-than its process count. No
+than its process count. Version 0.19.0 adds a sampled limit on net disk growth
+for the writable roots; it is not a filesystem quota. No
 model tool runs project tools. Tool support must be qualified on the actual
 platform; the [execution guide](execution.md#known-limits) lists the
 toolchains and versions that passed acceptance.
@@ -65,9 +66,8 @@ Version 0.16.0 profiles record:
 - extra variables.
 
 The runner owns the scratch and home locations. The run deadline and output
-limits are per-run options. Network destinations, loader search paths,
-recorded versions, and memory, process-count, and disk limits are not
-implemented.
+limits are per-run options. Network destinations, loader search paths, and
+recorded versions are not implemented.
 
 Each selected toolchain profile must eventually define:
 
@@ -174,7 +174,9 @@ The 0.16.0 acceptance tests cover these on both platforms:
 They are listed in the [execution guide](execution.md#acceptance). Not covered
 yet:
 
-- disk exhaustion;
+- disk exhaustion under concurrent writers, and inode, directory-entry, or
+  metadata exhaustion; the sampled disk limit is tested with ordinary file
+  growth;
 - package downloads through `--network`, and rejection of undeclared
   destinations, because there is no destination allowlist;
 - hostile package scripts beyond the hostile programs.

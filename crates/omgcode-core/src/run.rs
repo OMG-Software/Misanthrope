@@ -38,8 +38,8 @@ use crate::workspace::DirectoryRecord;
 pub use omgcode_platform::interrupt::{InterruptWatch, cancel_on_interrupt};
 pub use omgcode_platform::process::{CancelSignal, ProcessLimits, TreeLimits};
 pub use omgcode_platform::process::{
-    MAX_CAPTURE_BYTES, MAX_DEADLINE, MAX_TREE_CPU_TIME, MAX_TREE_MEMORY_BYTES, MAX_TREE_PROCESSES,
-    MIN_TREE_MEMORY_BYTES,
+    MAX_CAPTURE_BYTES, MAX_DEADLINE, MAX_TREE_CPU_TIME, MAX_TREE_DISK_BYTES, MAX_TREE_MEMORY_BYTES,
+    MAX_TREE_PROCESSES, MIN_TREE_DISK_BYTES, MIN_TREE_MEMORY_BYTES,
 };
 
 /// Default tree memory limit for a trusted run: 8 GiB.
@@ -48,6 +48,8 @@ pub const DEFAULT_TREE_MEMORY_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 pub const DEFAULT_TREE_PROCESSES: u32 = 1024;
 /// Default tree CPU-time limit for a trusted run: two CPU-hours.
 pub const DEFAULT_TREE_CPU_TIME: Duration = Duration::from_secs(2 * 60 * 60);
+/// Default tree disk limit for a trusted run: 8 GiB of growth.
+pub const DEFAULT_TREE_DISK_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
 /// How long to wait for another command's hold on the control journal.
 const CONTROL_WAIT: Duration = Duration::from_secs(10);
@@ -711,6 +713,7 @@ fn settle(
                             ResourceLimit::Memory => LimitKind::Memory,
                             ResourceLimit::Processes => LimitKind::Processes,
                             ResourceLimit::CpuTime => LimitKind::CpuTime,
+                            ResourceLimit::Disk => LimitKind::Disk,
                         },
                     },
                 },
@@ -721,6 +724,7 @@ fn settle(
                 usage: outcome.usage.map(|usage| UsageRecord {
                     cpu_ms: millis(usage.cpu_time),
                     peak_memory_bytes: usage.peak_memory_bytes,
+                    peak_disk_bytes: usage.peak_disk_bytes,
                 }),
             };
             (finish, Some(outcome), None)
@@ -791,6 +795,9 @@ fn prepare(
     let limits = request.limits.validate().map_err(RunError::InvalidLimits)?;
     let tree = limits.tree.ok_or(RunError::Refused(
         "a trusted run needs tree limits; none were given",
+    ))?;
+    let disk = tree.max_disk_bytes.ok_or(RunError::Refused(
+        "a trusted run needs a disk limit; none was given",
     ))?;
     let registration = control
         .workspace(request.workspace_id)
@@ -874,6 +881,7 @@ fn prepare(
             max_memory_bytes: tree.max_memory_bytes,
             max_processes: tree.max_processes,
             max_cpu_ms: millis(tree.max_cpu_time),
+            max_disk_bytes: Some(disk),
         }),
         network: if request.network {
             Some(NetworkRecord {
@@ -1345,6 +1353,7 @@ mod tests {
             max_memory_bytes: 1024 * 1024 * 1024,
             max_processes: 64,
             max_cpu_time: Duration::from_secs(60),
+            max_disk_bytes: Some(1024 * 1024 * 1024),
         };
         let cases = [
             process::TreeLimits {
@@ -1357,6 +1366,14 @@ mod tests {
             },
             process::TreeLimits {
                 max_cpu_time: Duration::ZERO,
+                ..roomy
+            },
+            process::TreeLimits {
+                max_disk_bytes: Some(1024),
+                ..roomy
+            },
+            process::TreeLimits {
+                max_disk_bytes: Some(MAX_TREE_DISK_BYTES + 1),
                 ..roomy
             },
         ];

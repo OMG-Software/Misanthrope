@@ -41,6 +41,11 @@ Version 0.18.0 adds [network access](#network-access). A trusted run passes
 `--network` to get outbound IP networking, and the workspace `task_network`
 preference must allow it. Runs without the flag keep no IP networking.
 
+Version 0.19.0 adds a sampled [disk-growth limit](#tree-limits). Every trusted
+run bounds the allocated bytes it may add to its writable roots. No portable
+per-run disk quota exists, so the supervisor measures growth on a separate
+thread rather than the kernel enforcing a quota.
+
 ## Accepted decisions
 
 The user selected these on 2026-11-11; see
@@ -250,6 +255,7 @@ omgcode run <workspace-id> --profile <name> [--cwd <relative dir>]
     [--max-memory-mib <16-1048576, default 8192>]
     [--max-processes <1-65536, default 1024>]
     [--max-cpu-secs <1-604800, default 7200>]
+    [--max-disk-mib <16-1048576, default 8192>]
     [--host-services] [--network] -- <program> [arguments...]
 omgcode runs audit [--limit <n>] [--archive <file>]
 omgcode runs acknowledge <run-id>
@@ -263,6 +269,10 @@ omgcode runs archive --archive-dir <existing dir>
   `truncated`;
 - on Linux, `scratch_removed`;
 - for a `revoked` run, `revoked_because`.
+
+`finish.usage` gives the tree's CPU time and, where the platform reports it,
+peak memory. Since 0.19.0 it also gives `peak_disk_bytes`, the highest net
+growth of the writable roots above the pre-run baseline.
 
 The command succeeds whenever the run was supervised and its outcome recorded,
 whatever the program's exit code. Read `run.finish.result`. A failure prints a
@@ -370,19 +380,22 @@ ends.
 
 ### Tree limits
 
-The user chose the C5 options on 2026-11-12; see
-[ADR-0031](adr/0031-limit-whole-run-trees-with-job-objects-and-delegated-cgroups.md).
-Every trusted run has all three limits. There is no unlimited run.
+The user chose the C5 options on 2026-11-12 and the C7 option on 2026-11-13;
+see [ADR-0031](adr/0031-limit-whole-run-trees-with-job-objects-and-delegated-cgroups.md)
+and [ADR-0033](adr/0033-bound-run-disk-growth-by-sampling-writable-roots.md).
+Every trusted run has all four limits. There is no unlimited run.
 
 | Limit | Flag and default | Windows | Linux |
 | --- | --- | --- | --- |
 | Memory | `--max-memory-mib`, 8192 | `JobMemoryLimit`: committed private memory of the whole job | `memory.max`, with `memory.swap.max` 0 where swap is accounted and `memory.oom.group` 1 |
 | Processes | `--max-processes`, 1024 | `ActiveProcessLimit`: processes alive at once | `pids.max`: tasks alive at once, so threads count |
 | CPU time | `--max-cpu-secs`, 7200 | Job accounting: user plus kernel time of every process the job held | `cpu.stat` `usage_usec` of the run's cgroup |
+| Disk growth | `--max-disk-mib`, 8192 | Sampled allocated bytes under the workspace and the container profile folder | Sampled allocated bytes under the workspace and the per-run scratch directory |
 
-The kernel enforces memory and processes. When the tree reaches a limit, the
-runner terminates the whole tree and records `limit_exceeded` with the limit,
-even if the program then exited by itself:
+The kernel enforces memory and processes. The supervisor enforces CPU time by
+polling and disk growth by sampling. When the tree reaches a limit, the runner
+terminates the whole tree and records `limit_exceeded` with the limit, even if
+the program then exited by itself:
 
 - **Memory:** on Linux the kernel kills the whole cgroup when it runs out of
   memory, and the runner sees `oom_kill` in `memory.events`. On Windows an
@@ -393,14 +406,22 @@ even if the program then exited by itself:
 - **CPU time:** the supervisor compares the tree's accounting with the limit
   at each 10 ms poll. A tree with many busy threads can pass it by up to one
   poll's worth of CPU time per thread before it is stopped.
+- **Disk growth:** the supervisor measures the writable roots before the
+  program starts and once a second while it runs, on a separate thread. Either
+  the allocated-byte total or the file-length total passing its baseline plus
+  the limit ends the tree. A final measurement runs after the tree is empty,
+  so a short run that wrote past the limit and exited is still recorded as
+  `limit_exceeded`. See [disk growth](#disk-growth).
 
 The report and the `run_finished` record give the tree's CPU time and, where
 the platform reports it, its peak memory: the job's peak commit on Windows, or
-`memory.peak` on Linux 5.19 or later.
+`memory.peak` on Linux 5.19 or later. They also give the highest net disk
+growth observed above the pre-run baseline.
 
 Windows does not guarantee delivery of job messages. If one is lost, the job
 still enforces the limit, but the run ends as the program decides and is not
-recorded as `limit_exceeded`. CPU time does not depend on messages.
+recorded as `limit_exceeded`. CPU time and disk growth do not depend on
+messages.
 
 Windows also sends the limit messages of a job nested in the run's job, such
 as a tool's own stricter job, to the run's port. So the runner counts a
@@ -427,6 +448,45 @@ limit was reached. It still stops the tree, then records `supervision_failed`
 rather than a normal exit. On Windows 11 build 26300, a
 nested job's limit messages did not reach the run's port in testing; the
 check follows the documented behaviour.
+
+#### Disk growth
+
+No portable per-run disk quota exists for an unprivileged runner: Job Objects
+have no disk accounting, a cgroup v2 has no disk controller, and filesystem
+quotas need administrative setup. The limit is therefore sampled by the
+supervisor; it is not a kernel quota. See
+[ADR-0033](adr/0033-bound-run-disk-growth-by-sampling-writable-roots.md).
+
+- **Measured roots:** the confinement's read-write directories and regular
+  files, except character devices such as `/dev/null`. On Windows the
+  container profile folder (`%LOCALAPPDATA%\Packages\<name>\AC`) is also
+  measured, because the container writes there without a grant. A root inside
+  another root counts once.
+- **Baseline and growth:** the allocated-byte and file-length totals are
+  measured immediately before the program starts. Each budget is that baseline
+  plus the limit. Deletions reduce the totals, so the recorded
+  `peak_disk_bytes` is net growth.
+- **Allocation and length:** Linux uses `st_blocks * 512` for allocation,
+  Windows uses the allocated (compressed) size, and both use the file length.
+  Each file contributes to both totals, and the limit applies to each. Length
+  catches writes that a filesystem has not written back yet; allocation
+  catches a pre-existing sparse file being filled in. A sparse file is
+  therefore counted conservatively at both its length and its allocation.
+- **Sampling:** a dedicated thread measures every second. The supervisor
+  checks its result at the normal 10 ms poll, and a final measurement runs
+  after the tree is empty. A tree can pass the limit between samples; the
+  overshoot depends on the write rate.
+- **Fail closed:** a baseline that cannot be measured records `not_started`.
+  An unreadable root or more than 4,000,000 entries while the run lives stops
+  it as `supervision_failed` rather than claiming a limit that was not
+  measured. Symlinks and other reparse points are not followed. A run that
+  makes a writable path unreadable to the supervisor is stopped for the same
+  reason.
+- **Not counted:** directory entries, inode or MFT use, and filesystem
+  metadata. A hard-linked file is counted once per name, so several names
+  overcount it. Other writers to the same roots are counted as the run's
+  growth. A tree that deletes and rewrites the same bytes can churn more than
+  the limit without adding total use.
 
 #### Linux delegated cgroup
 
@@ -510,8 +570,8 @@ sequence, a UTC timestamp, and a tagged `action`:
 | Action | Meaning |
 | --- | --- |
 | `created` | Header |
-| `run_started` | Synced before the program starts. Records the run ID, workspace, settings revision, profile ID, name, and revision, program path, argument count, `arguments_sha256`, working directory, socket mode, since 0.17.0 `limits` (`max_memory_bytes`, `max_processes`, `max_cpu_ms`), and, since 0.18.0 and only for a networked run, `network` with the `support_paths` it could read (at most 32). |
-| `run_finished` | Records the result (`exited`, `signalled`, `deadline_exceeded`, `cancelled`, `revoked`, `limit_exceeded` with its `limit`, `not_started`, `supervision_failed`, or `cleanup_unconfirmed`), the applied confinement, the elapsed time, the output byte counts, and, for a started run, `usage` (`cpu_ms` and, where reported, `peak_memory_bytes`) |
+| `run_started` | Synced before the program starts. Records the run ID, workspace, settings revision, profile ID, name, and revision, program path, argument count, `arguments_sha256`, working directory, socket mode, since 0.17.0 `limits` (`max_memory_bytes`, `max_processes`, `max_cpu_ms`, and since 0.19.0 `max_disk_bytes`), and, since 0.18.0 and only for a networked run, `network` with the `support_paths` it could read (at most 32). |
+| `run_finished` | Records the result (`exited`, `signalled`, `deadline_exceeded`, `cancelled`, `revoked`, `limit_exceeded` with its `limit`, `not_started`, `supervision_failed`, or `cleanup_unconfirmed`), the applied confinement, the elapsed time, the output byte counts, and, for a started run, `usage` (`cpu_ms`, where reported `peak_memory_bytes`, and since 0.19.0 `peak_disk_bytes`) |
 | `run_acknowledged` | The operator cleared a pending run |
 
 How it works:
@@ -528,7 +588,7 @@ How it works:
     That process holds `<data-dir>/run-owners/<run id>.lock` from before the
     intent is recorded until the outcome is recorded.
 - **Limits:** at most 16 pending runs; 8 MiB, 4,096 events, and 64 KiB per
-  event.
+  event. A journal that records the 0.19.0 fields cannot be read by 0.18.0.
 - **Reserve:** a new run must leave room for every pending run's remaining
   events, 1 KiB each: two for a run in progress, one for a run that needs
   acknowledgement.
@@ -552,6 +612,7 @@ tools on both platforms:
 - host-service selection;
 - stale profiles;
 - deadlines, concurrency, and abandoned runs;
+- every tree limit, including disk growth;
 - interrupts, on Linux.
 
 `crates/omgcode-cli/tests/toolchain_acceptance.rs` runs real Rust, Python,
@@ -763,7 +824,20 @@ These remain true after C6:
   Linux limits cgroup memory, which includes page cache and kernel memory
   charged to the tree. Linux counts threads against the process limit. CPU
   time is checked by polling and can overshoot; see [tree limits](#tree-limits).
-- **No disk limit.** A run can fill any volume its rules let it write.
+- **Disk growth is sampled, not a quota.** The supervisor measures the
+  writable roots once a second, so a tree can pass the limit between samples.
+  Growth is net and applies to allocated bytes and file lengths separately, so
+  a write is seen before writeback and a sparse file is counted
+  conservatively. Directory entries, inode or MFT use, and filesystem metadata
+  are not counted; a hard-linked file is counted once per name. Other writers
+  are counted as the run's growth. A run that
+  makes a writable path unreadable to the supervisor, or whose roots hold more
+  than 4,000,000 entries, fails as `supervision_failed`. See
+  [disk growth](#disk-growth).
+- **Disk-limit coverage.** The limit was tested on Windows 11 build 26300 and
+  WSL 6.6 only. The tests write 16 MiB or more and observe `limit_exceeded`;
+  they do not establish behaviour under a full volume, concurrent writers, or
+  inode exhaustion.
 - **Linux needs a user service manager.** Every Linux run needs a delegated
   cgroup, normally a `systemd-run --user` scope. Hosts without a user systemd
   instance, or with cgroup v1 or a hybrid hierarchy, cannot run. Tree limits
@@ -792,12 +866,12 @@ These remain true after C6:
 | C4 (0.16.0) | Trusted CLI `run` and the `execute` preference | Done: see [trusted runs](#trusted-runs) and ADR-0030 |
 | C5 (0.17.0) | Tree-wide memory, process, and CPU-time limits | Done: see [tree limits](#tree-limits) and ADR-0031 |
 | C6 (0.18.0) | Outbound network access behind `task_network` and `--network` | Done: see [network access](#network-access) and ADR-0032 |
+| C7 (0.19.0) | Sampled disk-growth limit for every trusted run | Done: see [disk growth](#disk-growth) and ADR-0033 |
 
 Later work needs its own decisions:
 
 - a network destination allowlist, registry credentials, and
   development-server networking;
-- a disk limit;
 - a model-callable command tool.
 
 Live qualification on each supported OS remains a separate gate.

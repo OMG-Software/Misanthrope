@@ -47,3 +47,4 @@ meaningful alternative does not need an ADR.
 | [0030: Run trusted commands through recorded toolchain profiles](0030-run-trusted-commands-through-recorded-toolchain-profiles.md) | Accepted | 2026-11-11 |
 | [0031: Limit whole run trees with job objects and delegated cgroups](0031-limit-whole-run-trees-with-job-objects-and-delegated-cgroups.md) | Accepted | 2026-11-12 |
 | [0032: Allow outbound network for trusted runs through task_network](0032-allow-outbound-network-for-trusted-runs-through-task-network.md) | Accepted | 2026-11-13 |
+| [0033: Bound run disk growth by sampling writable roots](0033-bound-run-disk-growth-by-sampling-writable-roots.md) | Accepted | 2026-11-13 |

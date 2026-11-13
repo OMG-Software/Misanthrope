@@ -26,9 +26,9 @@ use self::cgroup::RunCgroup;
 use self::landlock::Ruleset;
 use self::seccomp::FilterScope;
 use super::{
-    AppliedConfinement, CancelSignal, Capture, Confinement, ProcessError, ProcessLimits,
-    ProcessOutcome, ProcessSpec, ProcessTree, ResourceLimit, Termination, TreeUsage, stop_tree,
-    supervise,
+    AppliedConfinement, CancelSignal, Capture, Confinement, DiskMonitor, ProcessError,
+    ProcessLimits, ProcessOutcome, ProcessSpec, ProcessTree, ResourceLimit, Termination, TreeUsage,
+    stop_tree, supervise,
 };
 
 const SECCOMP_MODE_FILTER: libc::c_ulong = 2;
@@ -39,6 +39,7 @@ pub(super) fn run(
     confinement: Option<&Confinement>,
     limits: ProcessLimits,
     cancel: &CancelSignal,
+    mut disk: Option<DiskMonitor>,
 ) -> Result<ProcessOutcome, ProcessError> {
     let (filter, ruleset, applied) = match confinement {
         None => (
@@ -85,6 +86,11 @@ pub(super) fn run(
     unsafe {
         command.pre_exec(move || prepare_child(parent, &filter, ruleset_fd, cgroup_fd));
     }
+    // Start sampling before the program exists, so a sampler that cannot start
+    // starts nothing.
+    if let Some(disk) = &mut disk {
+        disk.start()?;
+    }
     let spawned = command.spawn();
     drop(ruleset);
     let mut child = spawned.map_err(ProcessError::Spawn)?;
@@ -107,7 +113,7 @@ pub(super) fn run(
             return Err(ProcessError::Supervision(error));
         }
     };
-    let result = supervise(&mut tree, capture, started, limits, cancel, applied);
+    let result = supervise(&mut tree, capture, started, limits, cancel, applied, disk);
     if !matches!(result, Err(ProcessError::CleanupUnconfirmed(_))) {
         tree.confirmed = true;
     }

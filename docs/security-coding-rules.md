@@ -170,6 +170,13 @@ crate.
   never fall back to an unlimited run when they cannot be applied. On Linux a
   run cgroup must be joined by the child before `exec`, and limit files must
   stay outside the confined tree's Landlock rules.
+- Give every trusted run a disk-growth limit. The supervisor measures the
+  confinement's writable roots before the run and while it runs, as allocated
+  bytes and as file lengths; a failed measurement stops the run rather than
+  claiming a limit. The disk limit is sampled and is not a kernel or
+  filesystem quota. Do not describe it as one, and do not count the read-only
+  roots or host data. A run's recorded limit and peak growth are evidence, not
+  authority.
 - Never record argument text, environment values, or output in a journal.
   Record the argument digest and byte counts.
 - Treat profile variables as public. Do not add a way to pass credentials

@@ -39,8 +39,11 @@ system tools. Since 0.17.0, on Linux they start the CLI through
 `systemd-run --user --scope -p Delegate=yes`, and the platform tree-limit
 tests rerun themselves the same way. They need a user service manager and fail
 without one; they must not be skipped. Each limit test must show that the
-limit ends the whole run as `LimitExceeded`. Windows scenes grant the workspace and revoke every grant when
-dropped. The `toolchain_acceptance` tests run real toolchains. They are
+limit ends the whole run as `LimitExceeded`. Since 0.19.0 the disk test writes
+past a 16 MiB limit and expects the `disk` result; the platform tests also
+exercise the sampler directly, including, on Unix, a link that must not be
+followed and a ceiling reached during a measured scan. Windows scenes grant
+the workspace and revoke every grant when dropped. The `toolchain_acceptance` tests run real toolchains. They are
 `#[ignore]` because they need host toolchains named by `OMGCODE_ACCEPT_*`
 variables. Run them explicitly with `--ignored` on both platforms and report
 each language that did not run. A missing variable fails the case rather than
@@ -138,6 +141,7 @@ As the relevant components are implemented, include:
 | Workspace identity | Native paths, stable directory IDs after child writes, ancestor/sibling checks, missing creation-time metadata failure |
 | Files | Bounded read/list/create/mkdir, policy scope, traversal, native paths, symlinks/junctions, hard links, special files, collisions, uncertain creation, audit privacy, path-swap races, and read-only edit-preview bounds/no-mutation |
 | Processes | Descendant escape attempts, limits, cleanup, startup failure |
+| Disk limits | Sampled growth ends the whole run as `disk`, baseline excludes prior content, links and reparse points are not followed, the ceiling stops a scan early, unreadable or oversized roots fail closed |
 | Networking | Disabled egress, host-local access, redirects, provider routing |
 | Providers | Partial/malformed streams, duplicate calls, interruption, retries |
 | Authentication | Callback binding, consent, subscription entitlement, refresh, revocation, account/billing isolation |

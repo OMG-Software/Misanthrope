@@ -15,8 +15,10 @@ trusted CLI `run` command starts one program for a workspace whose `execute`
 preference is enabled. It uses an operator-declared toolchain profile, records
 intent and outcome in a run journal, and applies Landlock and a seccomp socket
 filter on Linux or a per-workspace AppContainer on Windows. It never falls back
-to the unconfined runner. Every run has tree-wide memory, process, and CPU-time
-limits; on Linux the CLI must run in a delegated cgroup v2. Trusted CLI commands record, apply, and revoke
+to the unconfined runner. Every run has tree-wide memory, process-count,
+CPU-time, and sampled net disk-growth limits; on Linux the CLI must run in a
+delegated cgroup v2. The disk limit measures writable roots and is not a
+filesystem quota. Trusted CLI commands record, apply, and revoke
 Windows container ACL grants. Follow the [execution contract](docs/execution.md).
 The bundled web interface and most planned features are not implemented.
 The core validates replacement records and can prepare protected checkpoints on

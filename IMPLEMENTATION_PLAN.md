@@ -1,6 +1,6 @@
 # OMGCode implementation plan
 
-Last verified: 2026-11-11.
+Last verified: 2026-11-13.
 
 This guide is part of `main` after PR #9. Read it before selecting the next
 increment. Checkpoint preparation does not mean native replacement exists.
@@ -52,10 +52,13 @@ This is a resume guide, not a replacement for the owning contracts in
 - **PR #25 and PR #26** merged at `4eeb12f`: **Phase C4**, version
   **0.16.0**, with the trusted CLI `run`, toolchain profiles, the run journal,
   and the `host_services` preference.
-- This branch, `codex/resource-limits`: **Phase C5**, version **0.17.0**, with
-  tree-wide memory, process, and CPU-time limits for every trusted run, and
-  fixes for the unaddressed PR #26 review comments. It started from `main` at
-  `4eeb12f`.
+- **PR #27** merged at `ac01a74`: **Phase C5**, version **0.17.0**, with
+  tree-wide memory, process, and CPU-time limits.
+- **PR #29** merged at `4c2a561`: **Phase C6**, version **0.18.0**, with
+  outbound network access behind `task_network` and `--network`.
+- This branch, `codex/disk-limit`: **Phase C7**, version **0.19.0**, with a
+  sampled net disk-growth limit for every trusted run. It started from `main`
+  at `4c2a561`.
 
 Implemented today:
 
@@ -114,9 +117,15 @@ Implemented today:
     `archive`;
   - a `host_services` preference that a run's `--host-services` flag also
     needs (Linux only);
+  - `--network` behind the live `task_network` preference;
+  - memory, process, CPU-time, and sampled net disk-growth limits, recorded in
+    the run journal;
   - interrupt-to-cancel handling.
 
-  See [ADR-0030](docs/adr/0030-run-trusted-commands-through-recorded-toolchain-profiles.md).
+  See [ADR-0030](docs/adr/0030-run-trusted-commands-through-recorded-toolchain-profiles.md),
+  [ADR-0031](docs/adr/0031-limit-whole-run-trees-with-job-objects-and-delegated-cgroups.md),
+  [ADR-0032](docs/adr/0032-allow-outbound-network-for-trusted-runs-through-task-network.md),
+  and [ADR-0033](docs/adr/0033-bound-run-disk-growth-by-sampling-writable-roots.md).
 - Trusted `file restore` through a new checkpoint and
   `file delete-checkpoint --permanent` for one resolved checkpoint, on the same
   filesystems as apply. Neither is power-loss qualified. See
@@ -128,8 +137,9 @@ Not implemented:
   compaction, and standalone CLI checkpoint preparation.
 - Model write, process, network, Git, or MCP tools; per-call tool approval;
   and live provider tool-call qualification.
-- Model-callable process execution, disk limits, task and package networking, Git, MCP, runtime skills, memories, desktop/UI panels,
-  compaction, or caches. Nothing calls the unconfined process runner.
+- Model-callable process execution, a network destination allowlist, Git,
+  MCP, runtime skills, memories, desktop/UI panels, compaction, or caches.
+  Nothing calls the unconfined process runner.
 - Subscription/API-key provider profiles beyond the local LM Studio route.
 
 ## Resume steps
@@ -447,8 +457,8 @@ on Windows, and trusted CLI commands as the first caller. See
 
   Java has not run, because no JDK was installed. See
   [ADR-0030](docs/adr/0030-run-trusted-commands-through-recorded-toolchain-profiles.md).
-- **C5 (this branch, `codex/resource-limits`):** tree-wide limits for every
-  trusted run. The user chose:
+- **C5 (merged as PR #27):** tree-wide limits for every trusted run. The user
+  chose:
   - a delegated cgroup v2 on Linux, with OMGCode started in its own
     `systemd-run --user --scope -p Delegate=yes` scope;
   - limits always applied, failing closed where they cannot be;
@@ -457,11 +467,19 @@ on Windows, and trusted CLI commands as the first caller. See
 
   See
   [ADR-0031](docs/adr/0031-limit-whole-run-trees-with-job-objects-and-delegated-cgroups.md).
+- **C6 (merged as PR #29):** outbound network access behind `task_network` and
+  `--network`, with resolver and public certificate paths on Linux. See
+  [ADR-0032](docs/adr/0032-allow-outbound-network-for-trusted-runs-through-task-network.md).
+- **C7 (this branch, `codex/disk-limit`):** a sampled net disk-growth limit for
+  every trusted run. The user chose a disk limit as the next increment. The
+  supervisor measures the writable roots before the run and once a second on a
+  separate thread, fails closed when it cannot measure, and records the limit
+  and peak growth. See
+  [ADR-0033](docs/adr/0033-bound-run-disk-growth-by-sampling-writable-roots.md).
 
 Next decisions, not yet scheduled:
 
-- a package-network profile;
-- a disk limit;
+- a network destination allowlist or package-network profile;
 - a model-callable command tool with per-call approval.
 
 ### Phase D: additional providers, streaming, and account lifecycle

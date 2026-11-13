@@ -6,6 +6,26 @@ Changes are recorded here before a release version is assigned.
 
 ### Added
 
+- Version 0.19.0 bounds each trusted run's net disk growth. See ADR-0033.
+  - **Flag:** `--max-disk-mib` (16 to 1048576, default 8192) is required for
+    every trusted run. A run without a disk limit is refused before anything
+    is recorded.
+  - **Enforcement:** the supervisor measures allocated bytes and file lengths
+    under the confinement's writable roots before the program starts and once
+    a second on a separate thread. Each total has its own budget; passing
+    either ends the whole tree and records `limit_exceeded` with `disk`. A
+    final measurement runs after the tree is empty. The limit is sampled; it
+    is not a filesystem quota.
+  - **Fail closed:** a baseline that cannot be measured records `not_started`.
+    An unreadable root, or more than 4,000,000 entries, while the run lives
+    ends it as `supervision_failed`. Links and reparse points are not
+    followed. Other writers to the roots count as the run's growth.
+  - **Records:** `run_started` records `max_disk_bytes`, and the `usage` field
+    of `run_finished` records `peak_disk_bytes`. A run journal written by
+    0.19.0 cannot be read by 0.18.0; 0.19.0 reads 0.18.0 journals.
+  - **Not counted:** directory entries, inode or MFT use, and filesystem
+    metadata. A hard-linked file is counted once per name. Tested on Windows
+    11 build 26300 and WSL 6.6 only.
 - Version 0.18.0 adds outbound network access for trusted runs. See ADR-0032.
   - **Gating:** `omgcode run ... --network` needs the workspace
     `task_network` preference. Without both, a run has no IP networking, as

@@ -183,9 +183,11 @@ On Linux a typical profile is `--root /usr --path /usr/bin` plus the
 toolchain's own root. The run receives only the profile's `PATH` and
 variables, plus runner-owned home and temporary locations. Output is printed,
 never stored. `--host-services` also needs `--host-services true` on the
-workspace and works only on Linux. `--max-memory-mib`, `--max-processes`, and
-`--max-cpu-secs` set the [tree limits](execution.md#tree-limits); the defaults
-are 8192 MiB, 1024, and 7200 seconds. The [execution guide](execution.md#trusted-runs)
+workspace and works only on Linux. `--max-memory-mib`, `--max-processes`,
+`--max-cpu-secs`, and `--max-disk-mib` set the
+[tree limits](execution.md#tree-limits); the defaults are 8192 MiB, 1024, 7200
+seconds, and 8192 MiB of net disk growth. The disk limit is sampled, not a
+filesystem quota. The [execution guide](execution.md#trusted-runs)
 owns the checks, the journal, and the known limits, including those for Node
 on Windows.
 

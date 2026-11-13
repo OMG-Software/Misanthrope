@@ -114,6 +114,7 @@ pub(super) fn run(
     confinement: Option<&Confinement>,
     limits: ProcessLimits,
     cancel: &CancelSignal,
+    mut disk: Option<super::DiskMonitor>,
 ) -> Result<ProcessOutcome, ProcessError> {
     let container = confinement
         .map(|confinement| prepare_container(spec, confinement))
@@ -135,6 +136,11 @@ pub(super) fn run(
         .map_err(ProcessError::Spawn)?;
     let (stdout_read, stdout_write) = pipe().map_err(ProcessError::Spawn)?;
     let (stderr_read, stderr_write) = pipe().map_err(ProcessError::Spawn)?;
+    // Start sampling before the program exists, so a sampler that cannot start
+    // starts nothing.
+    if let Some(disk) = &mut disk {
+        disk.start()?;
+    }
 
     let created = {
         // The lock guards no data, so a poisoned lock carries no broken invariant.
@@ -188,7 +194,7 @@ pub(super) fn run(
             return Err(ProcessError::Supervision(error));
         }
     };
-    supervise(&mut tree, capture, started, limits, cancel, applied)
+    supervise(&mut tree, capture, started, limits, cancel, applied, disk)
 }
 
 /// Check a confinement and derive its container SID before anything starts.
@@ -375,6 +381,9 @@ fn job_confirms(job: &OwnedHandle, limits: &JobLimits, limit: ResourceLimit) -> 
             job_peak_memory(job)? >= threshold
         }
         ResourceLimit::CpuTime => job_cpu_units(job)? >= limits.max_cpu_units,
+        // The job has no disk limit; the supervisor samples the writable
+        // roots instead. A disk result never comes from a job message.
+        ResourceLimit::Disk => false,
     })
 }
 
@@ -523,6 +532,7 @@ impl ProcessTree for WindowsTree {
         Ok(Some(TreeUsage {
             cpu_time: Duration::from_nanos(units.saturating_mul(100)),
             peak_memory_bytes: Some(job_peak_memory(&self.job)?),
+            peak_disk_bytes: None,
         }))
     }
 }
@@ -1008,6 +1018,7 @@ mod limit_tests {
             max_memory_bytes: 64 * 1024 * 1024,
             max_processes: 4,
             max_cpu_time: Duration::from_secs(60),
+            max_disk_bytes: None,
         }))
         .expect("job");
         (job, limits.expect("job limits"))
@@ -1087,6 +1098,7 @@ mod limit_tests {
             max_memory_bytes: 64 * 1024 * 1024,
             max_processes: 1,
             max_cpu_time: Duration::from_secs(60),
+            max_disk_bytes: None,
         }))
         .expect("job");
         let limits = limits.expect("job limits");
@@ -1120,6 +1132,7 @@ mod limit_tests {
             std::time::Instant::now(),
             Duration::from_secs(60),
             &super::super::CancelSignal::new(),
+            None,
         );
         drop(tree);
         // The job's kill-on-close has ended the sleeper.

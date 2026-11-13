@@ -36,7 +36,8 @@ directory grants.
 > network. On Linux, a run that both the `host_services` preference and its
 > `--host-services` flag allow can reach the host's Unix-domain sockets, such
 > as service and credential-agent sockets. Runs have memory, process-count,
-> and CPU-time limits but no disk limit.
+> CPU-time, and sampled disk-growth limits; the disk limit is not a filesystem
+> quota. See [command execution](docs/execution.md#tree-limits).
 
 ## Goals
 
