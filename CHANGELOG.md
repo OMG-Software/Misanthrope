@@ -188,6 +188,21 @@ Changes are recorded here before a release version is assigned.
 
 ### Fixed
 
+- Tree limits, after the PR #27 review:
+  - **Range checks before recording:** the core checks every run limit before
+    it records a run, so a direct caller with an out-of-range tree limit gets
+    `InvalidLimits` and nothing is recorded.
+  - **Nested Windows jobs:** a job nested in the run's job, such as a tool's
+    own stricter job, can send its limit messages to the run's port. The
+    runner now counts a message only when the run's own job confirms it. Each
+    poll takes at most 256 messages.
+  - **Linux termination:** a failed `cgroup.kill` no longer skips the process
+    group kill; both are tried and the first failure is reported.
+  - **Cleanup:** the run's cgroup or job limit state is released even when its
+    usage cannot be read.
+  - **Grant revocation:** an unreadable run journal no longer blocks
+    `container-revoke`. The grant is revoked, then the command fails and says
+    so.
 - Settings changes now confirm that withdrawn runs stopped, as the PR #26
   review asked:
   - **Unconfirmed cleanup:** a pending run whose cleanup was unconfirmed may

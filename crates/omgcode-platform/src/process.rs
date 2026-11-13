@@ -158,7 +158,14 @@ pub struct TreeUsage {
 }
 
 impl ProcessLimits {
-    fn validate(self) -> Result<Self, ProcessError> {
+    /// Check every bound against the runner's ranges, including the tree
+    /// limits when present. [`run`] and [`run_confined`] check this as well;
+    /// callers that record a run first check it before recording.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProcessError::InvalidLimits`] for a value out of range.
+    pub fn validate(self) -> Result<Self, ProcessError> {
         if self.deadline.is_zero() || self.deadline > MAX_DEADLINE {
             return Err(ProcessError::InvalidLimits("deadline is out of range"));
         }
@@ -612,8 +619,11 @@ fn supervise(
         (Err(error), Ok(())) => return Err(ProcessError::Supervision(error)),
     };
     let elapsed = started.elapsed();
-    let usage = tree.usage().map_err(ProcessError::Supervision)?;
+    // Release the native limit state even when usage cannot be read; a
+    // failed release is unconfirmed cleanup and is reported first.
+    let usage = tree.usage();
     tree.release()?;
+    let usage = usage.map_err(ProcessError::Supervision)?;
     let (stdout, stderr) = capture.finish(Instant::now() + limits.cleanup_timeout)?;
     Ok(ProcessOutcome {
         termination,

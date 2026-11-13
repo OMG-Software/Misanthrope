@@ -516,6 +516,36 @@ fn removing_the_profile_stops_a_live_run() {
     scene.close();
 }
 
+/// An interrupted append can leave the run journal unreadable. Revoking a
+/// container grant still removes the grant, then reports the failure.
+#[cfg(windows)]
+#[test]
+fn an_unreadable_run_journal_does_not_keep_a_container_grant() {
+    let mut scene = Scene::new();
+    let tools = scene.path("tools");
+    fs::create_dir(&tools).expect("tools directory");
+    scene.grant(&tools, "read-execute");
+    let grant = scene.grants.last().expect("read grant").clone();
+    let journal = scene.data.join("runs-v1.jsonl");
+    fs::write(&journal, b"{\"sequence\":").expect("partial record");
+    let revoke = scene.settings_cli(&["workspace", "container-revoke", &grant]);
+    assert!(!revoke.status.success(), "revocation reported success");
+    assert!(
+        String::from_utf8_lossy(&revoke.stderr).contains("was revoked"),
+        "{}",
+        String::from_utf8_lossy(&revoke.stderr)
+    );
+    // Remove the partial record so the scene can revoke its other grants.
+    fs::remove_file(&journal).expect("remove partial record");
+    let status = scene.cli(&["workspace", "status"]);
+    assert_success(&status);
+    assert!(
+        !String::from_utf8_lossy(&status.stdout).contains(&grant),
+        "the revoked grant is still listed"
+    );
+    scene.grants.retain(|tracked| tracked != &grant);
+}
+
 /// Revoking any container grant of the workspace, not only its read-write
 /// grant, stops a live run before the command reports. The run never needed
 /// this read-execute grant, but its container held it while it ran.
@@ -527,13 +557,16 @@ fn revoking_a_read_grant_stops_a_live_run() {
     let tools = scene.path("tools");
     fs::create_dir(&tools).expect("tools directory");
     scene.grant(&tools, "read-execute");
-    let grant = scene.grants.pop().expect("read grant");
+    // The scene keeps the grant until the revocation succeeds, so a failure
+    // before then still revokes it when the scene is dropped.
+    let grant = scene.grants.last().expect("read grant").clone();
     let child = scene
         .command(&[], &shell(LONG_RUN))
         .spawn()
         .expect("spawn run");
     wait_for_start(&scene);
     assert_success(&scene.settings_cli(&["workspace", "container-revoke", &grant]));
+    scene.grants.retain(|tracked| tracked != &grant);
     // The command returned only after the outcome was recorded.
     assert_eq!(scene.audit()["pending"], Value::Array(Vec::new()));
     let run = run_json(&wait(child, Duration::from_secs(30)));

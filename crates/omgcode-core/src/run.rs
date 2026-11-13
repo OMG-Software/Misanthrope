@@ -184,6 +184,9 @@ pub enum RunError {
     /// A path could not be checked or encoded.
     #[error("run preparation failed: {0}")]
     Io(#[from] io::Error),
+    /// A limit is out of range. Nothing was recorded.
+    #[error("run limits are out of range: {0}")]
+    InvalidLimits(#[source] ProcessError),
     /// Tree limits cannot be applied on this host, for example because a
     /// Linux runner is not in a delegated cgroup. Nothing was recorded.
     #[error("tree limits cannot be applied: {0}")]
@@ -771,7 +774,10 @@ fn prepare(
     platform: ProfilePlatform,
     data_root: &Path,
 ) -> Result<Prepared, RunError> {
-    let tree = request.limits.tree.ok_or(RunError::Refused(
+    // The platform runner checks these again, but only after the intent is
+    // recorded; check them here so an out-of-range value records nothing.
+    let limits = request.limits.validate().map_err(RunError::InvalidLimits)?;
+    let tree = limits.tree.ok_or(RunError::Refused(
         "a trusted run needs tree limits; none were given",
     ))?;
     let registration = control
@@ -1285,6 +1291,53 @@ mod tests {
 
     /// A withdrawn run whose cleanup was unconfirmed may still have
     /// processes, so a settings change never reports it stopped.
+    /// Direct callers get the same range checks as the CLI flags, before
+    /// anything is recorded.
+    #[test]
+    fn out_of_range_limits_are_refused_before_recording() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (data, workspace_id, journal_root, _store_id) = store(directory.path());
+        let roomy = process::TreeLimits {
+            max_memory_bytes: 1024 * 1024 * 1024,
+            max_processes: 64,
+            max_cpu_time: Duration::from_secs(60),
+        };
+        let cases = [
+            process::TreeLimits {
+                max_memory_bytes: 1024 * 1024,
+                ..roomy
+            },
+            process::TreeLimits {
+                max_processes: 0,
+                ..roomy
+            },
+            process::TreeLimits {
+                max_cpu_time: Duration::ZERO,
+                ..roomy
+            },
+        ];
+        for tree in cases {
+            let request = RunRequest {
+                workspace_id,
+                profile: "system".into(),
+                program: PathBuf::from("true"),
+                arguments: Vec::new(),
+                working_directory: None,
+                host_services: false,
+                limits: ProcessLimits {
+                    tree: Some(tree),
+                    ..ProcessLimits::default()
+                },
+            };
+            let result = run(&data, &request, &CancelSignal::new());
+            assert!(
+                matches!(result, Err(RunError::InvalidLimits(_))),
+                "{tree:?}: {result:?}"
+            );
+        }
+        assert!(!journal_root.join("runs-v1.jsonl").exists());
+    }
+
     #[test]
     fn withdrawn_runs_with_unconfirmed_cleanup_stay_unconfirmed() {
         let directory = tempfile::tempdir().expect("temporary directory");
