@@ -33,6 +33,18 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Check lints and compilation
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Start a user service manager for delegated cgroups
+        if: runner.os == 'Linux'
+        run: |
+          sudo loginctl enable-linger "$USER"
+          runtime_dir="/run/user/$(id -u)"
+          for _ in $(seq 1 50); do
+            [ -S "$runtime_dir/bus" ] && break
+            sleep 0.2
+          done
+          echo "XDG_RUNTIME_DIR=$runtime_dir" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=$runtime_dir/bus" >> "$GITHUB_ENV"
+          XDG_RUNTIME_DIR="$runtime_dir" systemd-run --user --scope --quiet -p Delegate=yes -- cat /proc/self/cgroup
       - name: Run tests
         run: cargo test --workspace --all-targets --locked
       - name: Run documentation tests

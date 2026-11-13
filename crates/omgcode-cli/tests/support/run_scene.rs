@@ -14,6 +14,10 @@ use super::{
 
 /// CLI deadline for a container grant or revocation.
 const GRANT_DEADLINE: Duration = Duration::from_secs(300);
+/// CLI deadline for a settings command that can withdraw a run: the
+/// command's own 60-second wait for affected runs, plus room for startup,
+/// its lock waits, and recording the change.
+pub(crate) const SETTINGS_DEADLINE: Duration = Duration::from_secs(90);
 
 /// A development root with one registered workspace whose `execute`
 /// preference is on, and, on Windows, a read-write grant on the workspace.
@@ -132,23 +136,27 @@ impl Scene {
 
     /// Revoke each tracked grant once, returning the failures. Revoking the
     /// last grant also deletes the container profile, so test runs leave no
-    /// per-user AppContainer state behind.
+    /// per-user AppContainer state behind. A grant whose revocation failed
+    /// stays tracked, so `Drop` retries it after `close` fails.
     fn revoke_grants(&mut self) -> Vec<String> {
         let mut failures = Vec::new();
+        let mut unresolved = Vec::new();
         for grant in std::mem::take(&mut self.grants) {
             let command = cli_command(&self.data, &["workspace", "container-revoke", &grant]);
-            match run_with_deadline(command, GRANT_DEADLINE) {
-                Ok(result) if result.timed_out => {
-                    failures.push(format!("{grant}: timed out"));
+            let failure = match run_with_deadline(command, GRANT_DEADLINE) {
+                Ok(result) if result.timed_out => Some("timed out".to_owned()),
+                Ok(result) if !result.output.status.success() => {
+                    Some(String::from_utf8_lossy(&result.output.stderr).into_owned())
                 }
-                Ok(result) if !result.output.status.success() => failures.push(format!(
-                    "{grant}: {}",
-                    String::from_utf8_lossy(&result.output.stderr)
-                )),
-                Ok(_) => {}
-                Err(error) => failures.push(format!("{grant}: {error}")),
+                Ok(_) => None,
+                Err(error) => Some(error.to_string()),
+            };
+            if let Some(failure) = failure {
+                failures.push(format!("{grant}: {failure}"));
+                unresolved.push(grant);
             }
         }
+        self.grants = unresolved;
         failures
     }
 
@@ -158,16 +166,24 @@ impl Scene {
         json_output(&output)["revision"].as_u64().expect("revision")
     }
 
+    /// Change one preference. The deadline covers the command's wait for
+    /// the runs that the change withdraws.
     pub(crate) fn set_permission(&self, flag: &str, value: &str) {
-        assert_success(&self.cli(&[
+        let revision = self.revision().to_string();
+        assert_success(&self.settings_cli(&[
             "workspace",
             "permissions",
             &self.id,
             flag,
             value,
             "--revision",
-            &self.revision().to_string(),
+            &revision,
         ]));
+    }
+
+    /// Run a settings command that can withdraw runs.
+    pub(crate) fn settings_cli(&self, args: &[&str]) -> Output {
+        run_cli_for(&self.data, args, SETTINGS_DEADLINE)
     }
 
     /// Record the system profile, plus any extra roots.
@@ -235,7 +251,14 @@ impl Scene {
         args.extend(options);
         args.push("--");
         args.extend(command);
-        run_cli_for(&self.data, &args, deadline)
+        let result =
+            run_with_deadline(run_command(&self.data, &args), deadline).expect("run OMGCode CLI");
+        assert!(
+            !result.timed_out,
+            "run exceeded its {deadline:?} deadline: stderr={}",
+            String::from_utf8_lossy(&result.output.stderr)
+        );
+        result.output
     }
 
     pub(crate) fn audit(&self) -> Value {
@@ -249,19 +272,42 @@ impl Scene {
     }
 
     pub(crate) fn command(&self, options: &[&str], command: &[&str]) -> Command {
-        let mut process = Command::new(env!("CARGO_BIN_EXE_omgcode"));
+        let mut args = vec!["run", self.id.as_str(), "--profile", "system"];
+        args.extend(options);
+        args.push("--");
+        args.extend(command);
+        let mut process = run_command(&self.data, &args);
         process
-            .env_remove("OMGCODE_LM_TOKEN")
-            .arg("--data-dir")
-            .arg(&self.data)
-            .args(["run", &self.id, "--profile", "system"])
-            .args(options)
-            .arg("--")
-            .args(command)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         process
+    }
+}
+
+/// A CLI `run` command as an operator starts it. On Linux, tree limits need
+/// a delegated cgroup, so the CLI starts in a scope of its own through
+/// `systemd-run --user --scope -p Delegate=yes`. In scope mode `systemd-run`
+/// replaces itself with the CLI, so the child's process ID, signals, standard
+/// streams, and exit status are the CLI's own.
+pub(crate) fn run_command(data_root: &Path, args: &[&str]) -> Command {
+    #[cfg(target_os = "linux")]
+    {
+        let mut command = Command::new("systemd-run");
+        command
+            .args(["--user", "--scope", "--quiet", "-p", "Delegate=yes", "--"])
+            .arg(env!("CARGO_BIN_EXE_omgcode"))
+            .env_remove("OMGCODE_LM_TOKEN")
+            .env_remove(super::HANG_FIXTURE_ENV)
+            .env(super::HOST_ENV_SENTINEL, super::HOST_ENV_SENTINEL_VALUE)
+            .arg("--data-dir")
+            .arg(data_root)
+            .args(args);
+        command
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        cli_command(data_root, args)
     }
 }
 

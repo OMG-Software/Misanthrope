@@ -32,6 +32,11 @@ calls the unconfined `run`. Settings diagnostics keep
 not describe either confinement as qualified beyond the tested kernel and
 Windows build.
 
+Version 0.17.0 adds [tree limits](#tree-limits): every trusted run is bounded
+in memory, live processes, and CPU time for its whole tree. Windows applies
+them to the run's Job Object. Linux applies them to a child of the runner's
+delegated cgroup v2, and refuses a run when the runner is not in one.
+
 ## Accepted decisions
 
 The user selected these on 2026-11-11; see
@@ -199,6 +204,9 @@ The user chose the C4 options on 2026-11-11; see
 omgcode run <workspace-id> --profile <name> [--cwd <relative dir>]
     [--timeout-secs <1-3600, default 600>]
     [--max-output-bytes <at most 16 MiB, default 1 MiB>]
+    [--max-memory-mib <16-1048576, default 8192>]
+    [--max-processes <1-65536, default 1024>]
+    [--max-cpu-secs <1-604800, default 7200>]
     [--host-services] -- <program> [arguments...]
 omgcode runs audit [--limit <n>] [--archive <file>]
 omgcode runs acknowledge <run-id>
@@ -242,6 +250,8 @@ While holding the control journal lock, `run` checks:
    the workspace. The path that runs is the one found, before links resolve.
 6. On Windows, the workspace has an active read-write container grant, and no
    grant of the workspace is `pending` or `revoking`.
+7. The [tree limits](#tree-limits) are in range and can be applied. On Linux
+   the CLI must run in a delegated cgroup.
 
 A refused run records nothing. Then the run takes its owner lock, the intent
 is synced to the run journal, the control and journal locks are released, and
@@ -256,9 +266,13 @@ and checks the run against them:
 - `execute`, `read`, and `write` are still enabled, and `host_services` for a
   run that selected host services;
 - the run's profile still exists with the same identity;
-- on Windows, the workspace still has its active read-write grant, and no
-  grant of the workspace is `revoking`. A `pending` grant only adds access, so
-  it does not stop a run.
+- on Windows, the workspace still has its active read-write grant, no grant of
+  the workspace is `revoking`, and no revocation of any grant of the workspace
+  was requested since the run started. Every grant applies to the container,
+  so revoking any of them withdraws the run, including a grant added after it
+  started. The watcher compares a per-workspace count of revocation requests,
+  which it cannot miss between two polls. A `pending` grant only adds access,
+  so it does not stop a run.
 
 When a check fails, or the settings cannot be read, the watcher stops the whole
 tree. The outcome is recorded as `revoked`, and the report gives the reason in
@@ -266,11 +280,23 @@ tree. The outcome is recorded as `revoked`, and the report gives the reason in
 
 `workspace permissions`, `profile-remove`, `container-revoke`, and `set-root`
 record their change first. Then they release the control lock and wait up to
-60 seconds for every in-progress run that the new settings no longer allow.
-A run counts as stopped only when its owner lock is free and its outcome is
-recorded. If any run is still pending after the wait, the command fails with
-code `run` and lists those runs; the change itself stays recorded. Inspect them
-with `runs audit`. A change that withdraws nothing returns at once.
+60 seconds for every pending run that the new settings no longer allow.
+`container-revoke` also waits for every pending run of the grant's workspace
+that started before the revocation; it lists them while it holds the control
+lock, under which every run starts.
+
+A run counts as stopped only when its owner lock is free and an outcome other
+than `cleanup_unconfirmed` is recorded. These runs are reported as not stopped,
+and the command fails with code `run` and lists them:
+
+- a run still live after the wait;
+- a run whose cleanup was unconfirmed, because processes may remain, until it
+  is acknowledged;
+- a run whose supervisor ended without an outcome, even if it was acknowledged
+  while the command waited.
+
+The change itself stays recorded. Inspect the runs with `runs audit`. A change
+that withdraws nothing returns at once.
 
 Settings commands wait up to 10 seconds for another command's control lock,
 because run watchers hold it briefly while they reread the settings.
@@ -293,6 +319,76 @@ no grant; others need a read-execute [container grant](#container-grants).
 the run. The tree is terminated and the outcome is recorded as `cancelled`.
 The interrupt watcher belongs to the run and is stopped and joined when it
 ends.
+
+### Tree limits
+
+The user chose the C5 options on 2026-11-12; see
+[ADR-0031](adr/0031-limit-whole-run-trees-with-job-objects-and-delegated-cgroups.md).
+Every trusted run has all three limits. There is no unlimited run.
+
+| Limit | Flag and default | Windows | Linux |
+| --- | --- | --- | --- |
+| Memory | `--max-memory-mib`, 8192 | `JobMemoryLimit`: committed private memory of the whole job | `memory.max`, with `memory.swap.max` 0 where swap is accounted and `memory.oom.group` 1 |
+| Processes | `--max-processes`, 1024 | `ActiveProcessLimit`: processes alive at once | `pids.max`: tasks alive at once, so threads count |
+| CPU time | `--max-cpu-secs`, 7200 | Job accounting: user plus kernel time of every process the job held | `cpu.stat` `usage_usec` of the run's cgroup |
+
+The kernel enforces memory and processes. When the tree reaches a limit, the
+runner terminates the whole tree and records `limit_exceeded` with the limit,
+even if the program then exited by itself:
+
+- **Memory:** on Linux the kernel kills the whole cgroup when it runs out of
+  memory, and the runner sees `oom_kill` in `memory.events`. On Windows an
+  allocation that would pass the limit fails, and the job posts a memory-limit
+  message.
+- **Processes:** a start that would pass the limit fails. Linux counts it in
+  `pids.events`; Windows posts an active-process-limit message.
+- **CPU time:** the supervisor compares the tree's accounting with the limit
+  at each 10 ms poll. A tree with many busy threads can pass it by up to one
+  poll's worth of CPU time per thread before it is stopped.
+
+The report and the `run_finished` record give the tree's CPU time and, where
+the platform reports it, its peak memory: the job's peak commit on Windows, or
+`memory.peak` on Linux 5.19 or later.
+
+Windows does not guarantee delivery of job messages. If one is lost, the job
+still enforces the limit, but the run ends as the program decides and is not
+recorded as `limit_exceeded`. CPU time does not depend on messages.
+
+#### Linux delegated cgroup
+
+Linux needs the runner itself in a cgroup v2 that is delegated to its user.
+Start the CLI in a scope of its own:
+
+```text
+systemd-run --user --scope -p Delegate=yes -- omgcode run <workspace-id> ...
+```
+
+In scope mode `systemd-run` replaces itself with `omgcode`, so the standard
+streams, exit status, and signals are the CLI's own. Before recording a run,
+the CLI checks:
+
+- `/proc/self/cgroup` names one unified v2 cgroup, and `/sys/fs/cgroup` is the
+  v2 hierarchy;
+- that cgroup, its `cgroup.procs`, and its `cgroup.subtree_control` belong to
+  the current user, and it is not the root;
+- it offers the `memory` and `pids` controllers and has `cgroup.kill`
+  (Linux 5.14 or later).
+
+Then the CLI moves itself into a leaf, `omgcode-supervisor`, and enables
+`memory` and `pids` for the delegated cgroup's children. cgroup v2 allows that
+only while the delegated cgroup holds no process, so a scope shared with a
+shell or with `cargo` is refused. Each run gets `omgcode-run-<pid>-<n>` beside
+the supervisor leaf. The program joins it before `exec`, before any other
+setup, so every descendant is counted. The runner kills the tree with both the
+process group and `cgroup.kill`, and counts it empty only when the group is
+gone and `cgroup.events` reports `populated 0`. It removes the run cgroup
+afterwards; a cgroup that cannot be removed makes cleanup unconfirmed.
+
+The confined tree's Landlock rules let it write only to the workspace, its
+scratch directory, and `/dev/null`, so it cannot change its limits or leave
+its cgroup. Do not place a development root under `/sys/fs/cgroup`. Other
+programs of the same user, outside the run, can still change the delegated
+cgroup.
 
 ### Toolchain profiles
 
@@ -340,8 +436,8 @@ sequence, a UTC timestamp, and a tagged `action`:
 | Action | Meaning |
 | --- | --- |
 | `created` | Header |
-| `run_started` | Synced before the program starts. Records the run ID, workspace, settings revision, profile ID, name, and revision, program path, argument count, `arguments_sha256`, working directory, and socket mode. |
-| `run_finished` | Records the result (`exited`, `signalled`, `deadline_exceeded`, `cancelled`, `revoked`, `not_started`, `supervision_failed`, or `cleanup_unconfirmed`), the applied confinement, the elapsed time, and the output byte counts |
+| `run_started` | Synced before the program starts. Records the run ID, workspace, settings revision, profile ID, name, and revision, program path, argument count, `arguments_sha256`, working directory, socket mode, and, since 0.17.0, `limits` (`max_memory_bytes`, `max_processes`, `max_cpu_ms`). |
+| `run_finished` | Records the result (`exited`, `signalled`, `deadline_exceeded`, `cancelled`, `revoked`, `limit_exceeded` with its `limit`, `not_started`, `supervision_failed`, or `cleanup_unconfirmed`), the applied confinement, the elapsed time, the output byte counts, and, for a started run, `usage` (`cpu_ms` and, where reported, `peak_memory_bytes`) |
 | `run_acknowledged` | The operator cleared a pending run |
 
 How it works:
@@ -511,7 +607,7 @@ sockets ignore it.
 
 ## Known limits
 
-These remain true after C4:
+These remain true after C5:
 
 - **`process::run` is unconfined.** A program started by the platform
   function `run` can read and write anything the user can, use the network,
@@ -571,9 +667,15 @@ These remain true after C4:
 - **`HostServices` exposure.** See [Unix-domain sockets](#unix-domain-sockets).
 - **No IP networking.** Package downloads, loopback test servers, and
   development servers fail until a network profile is designed.
-- **No tree-wide resource limits.** There is no memory, process-count, or disk
-  limit. Windows can add job limits; Linux needs a delegated cgroup or another
-  reviewed mechanism.
+- **Tree limits differ by platform.** Windows limits committed private memory;
+  Linux limits cgroup memory, which includes page cache and kernel memory
+  charged to the tree. Linux counts threads against the process limit. CPU
+  time is checked by polling and can overshoot; see [tree limits](#tree-limits).
+- **No disk limit.** A run can fill any volume its rules let it write.
+- **Linux needs a user service manager.** Every Linux run needs a delegated
+  cgroup, normally a `systemd-run --user` scope. Hosts without a user systemd
+  instance, or with cgroup v1 or a hybrid hierarchy, cannot run. Tree limits
+  were tested on WSL 6.6 only.
 - **Linux runner crash.** `PR_SET_PDEATHSIG` reaches only the direct child.
   If the runner process dies, descendants keep running until something else
   stops them. Windows kills the job when the runner's handle closes.
@@ -596,11 +698,12 @@ These remain true after C4:
 | C2 (0.14.0) | Linux Landlock filesystem rules and seccomp network denial | Done: see [confined runs](#confined-runs) and ADR-0028 |
 | C3 (0.15.0) | Windows AppContainer | Done: see [Windows confinement](#windows-confinement), [container grants](#container-grants), and ADR-0029 |
 | C4 (0.16.0) | Trusted CLI `run` and the `execute` preference | Done: see [trusted runs](#trusted-runs) and ADR-0030 |
+| C5 (0.17.0) | Tree-wide memory, process, and CPU-time limits | Done: see [tree limits](#tree-limits) and ADR-0031 |
 
 Later work needs its own decisions:
 
 - a package-network profile;
-- tree-wide resource limits;
+- a disk limit;
 - a model-callable command tool.
 
 Live qualification on each supported OS remains a separate gate.

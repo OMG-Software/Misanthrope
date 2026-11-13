@@ -41,6 +41,14 @@ pub const MAX_ARGUMENTS: usize = 4096;
 pub const MAX_ENVIRONMENT_ENTRIES: usize = 512;
 /// Largest total size of arguments plus environment, in bytes of OS text.
 pub const MAX_COMMAND_BYTES: usize = 128 * 1024;
+/// Smallest accepted tree memory limit.
+pub const MIN_TREE_MEMORY_BYTES: u64 = 16 * 1024 * 1024;
+/// Largest accepted tree memory limit.
+pub const MAX_TREE_MEMORY_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
+/// Largest accepted tree process limit.
+pub const MAX_TREE_PROCESSES: u32 = 65_536;
+/// Largest accepted tree CPU-time limit.
+pub const MAX_TREE_CPU_TIME: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// Poll interval for exit, deadline, and cancellation checks.
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -71,6 +79,9 @@ pub struct ProcessLimits {
     pub max_stderr_bytes: usize,
     /// Time allowed to observe an empty tree and closed output after termination.
     pub cleanup_timeout: Duration,
+    /// Limits for the whole tree. `None` applies none. When set, a limit that
+    /// cannot be applied starts nothing.
+    pub tree: Option<TreeLimits>,
 }
 
 impl Default for ProcessLimits {
@@ -80,8 +91,70 @@ impl Default for ProcessLimits {
             max_stdout_bytes: 1024 * 1024,
             max_stderr_bytes: 1024 * 1024,
             cleanup_timeout: Duration::from_secs(5),
+            tree: None,
         }
     }
+}
+
+/// Resource limits for a whole process tree. See `docs/execution.md`.
+///
+/// The kernel enforces memory and process counts: on Windows through Job
+/// Object limits, on Linux through a child of the runner's delegated cgroup
+/// v2. The supervisor enforces CPU time by polling the tree's accounting. When
+/// any limit is reached, the runner terminates the whole tree and reports
+/// [`Termination::LimitExceeded`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TreeLimits {
+    /// Memory for the whole tree. Windows counts committed private memory;
+    /// Linux counts the cgroup's memory, including page cache, with no swap.
+    pub max_memory_bytes: u64,
+    /// Processes alive at once. Linux counts threads as well, because the
+    /// cgroup `pids` controller counts tasks.
+    pub max_processes: u32,
+    /// User and kernel CPU time summed over every process the tree started.
+    pub max_cpu_time: Duration,
+}
+
+impl TreeLimits {
+    fn validate(self) -> Result<Self, ProcessError> {
+        if !(MIN_TREE_MEMORY_BYTES..=MAX_TREE_MEMORY_BYTES).contains(&self.max_memory_bytes) {
+            return Err(ProcessError::InvalidLimits(
+                "tree memory limit is out of range",
+            ));
+        }
+        if self.max_processes == 0 || self.max_processes > MAX_TREE_PROCESSES {
+            return Err(ProcessError::InvalidLimits(
+                "tree process limit is out of range",
+            ));
+        }
+        if self.max_cpu_time < Duration::from_secs(1) || self.max_cpu_time > MAX_TREE_CPU_TIME {
+            return Err(ProcessError::InvalidLimits(
+                "tree CPU-time limit is out of range",
+            ));
+        }
+        Ok(self)
+    }
+}
+
+/// The tree limit that ended a run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResourceLimit {
+    /// The tree reached its memory limit.
+    Memory,
+    /// The tree tried to exceed its process limit.
+    Processes,
+    /// The tree used its CPU time.
+    CpuTime,
+}
+
+/// Resources a limited tree used, read after it was observed empty.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TreeUsage {
+    /// User and kernel CPU time summed over the tree.
+    pub cpu_time: Duration,
+    /// Peak memory, when the platform reports it: the Windows job's peak
+    /// commit, or Linux `memory.peak` (Linux 5.19 or later).
+    pub peak_memory_bytes: Option<u64>,
 }
 
 impl ProcessLimits {
@@ -98,6 +171,9 @@ impl ProcessLimits {
             return Err(ProcessError::InvalidLimits(
                 "output capture limit is too large",
             ));
+        }
+        if let Some(tree) = self.tree {
+            tree.validate()?;
         }
         Ok(self)
     }
@@ -135,6 +211,9 @@ pub enum Termination {
     DeadlineExceeded,
     /// Cancellation was requested and the runner terminated the tree.
     Cancelled,
+    /// The tree reached a [`TreeLimits`] limit and the runner terminated it.
+    /// This takes precedence over the program's own exit.
+    LimitExceeded { limit: ResourceLimit },
 }
 
 /// Bytes captured from one output stream.
@@ -163,6 +242,8 @@ pub struct ProcessOutcome {
     pub stdout: CapturedOutput,
     pub stderr: CapturedOutput,
     pub elapsed: Duration,
+    /// What a limited tree used; `None` when no tree limits applied.
+    pub usage: Option<TreeUsage>,
 }
 
 /// A controlled runner failure. No variant reports a successful run.
@@ -262,6 +343,30 @@ pub fn run_confined(
     validate_spec(spec)?;
     confinement.validate()?;
     run_native(spec, Some(confinement), limits, cancel)
+}
+
+/// Check that [`TreeLimits`] can be applied here, so a caller can refuse a
+/// run before recording it.
+///
+/// On Linux this needs a delegated cgroup v2 and, on first use, moves the
+/// calling process into its `omgcode-supervisor` leaf and enables the
+/// `memory` and `pids` controllers for the delegated cgroup's children. On
+/// Windows, Job Object limits are always available.
+pub fn check_tree_limits() -> Result<(), ProcessError> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::cgroup::ensure_available()
+    }
+    #[cfg(windows)]
+    {
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
+    {
+        Err(ProcessError::Unsupported(
+            "tree limits are implemented only on Linux and Windows",
+        ))
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -392,6 +497,18 @@ trait ProcessTree {
     fn terminate(&mut self) -> io::Result<()>;
     /// Whether no process of the tree remains.
     fn is_empty(&mut self) -> io::Result<bool>;
+    /// The tree limit reached so far, if any. Trees without limits have none.
+    fn limit_reached(&mut self) -> io::Result<Option<ResourceLimit>> {
+        Ok(None)
+    }
+    /// What a limited tree used. Called once, after the tree is empty.
+    fn usage(&mut self) -> io::Result<Option<TreeUsage>> {
+        Ok(None)
+    }
+    /// Release native limit state after the tree is observed empty.
+    fn release(&mut self) -> Result<(), ProcessError> {
+        Ok(())
+    }
 }
 
 /// Capture threads for standard output and standard error.
@@ -495,6 +612,8 @@ fn supervise(
         (Err(error), Ok(())) => return Err(ProcessError::Supervision(error)),
     };
     let elapsed = started.elapsed();
+    let usage = tree.usage().map_err(ProcessError::Supervision)?;
+    tree.release()?;
     let (stdout, stderr) = capture.finish(Instant::now() + limits.cleanup_timeout)?;
     Ok(ProcessOutcome {
         termination,
@@ -502,6 +621,7 @@ fn supervise(
         stdout,
         stderr,
         elapsed,
+        usage,
     })
 }
 
@@ -512,7 +632,13 @@ fn watch(
     cancel: &CancelSignal,
 ) -> io::Result<Termination> {
     loop {
-        if let Some(termination) = tree.try_exit()? {
+        let exited = tree.try_exit()?;
+        // A limit reached before or as the program exited ends the run as
+        // limit exceeded: the exit may be the program's reaction to it.
+        if let Some(limit) = tree.limit_reached()? {
+            return Ok(Termination::LimitExceeded { limit });
+        }
+        if let Some(termination) = exited {
             return Ok(termination);
         }
         if cancel.is_cancelled() {

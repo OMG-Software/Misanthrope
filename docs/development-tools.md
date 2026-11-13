@@ -19,7 +19,11 @@ These are required tool categories and profile candidates, not a claim that
 every listed executable or version already works. Version 0.16.0 adds the
 trusted operator command `omgcode run`. It runs one program under Linux
 Landlock and seccomp rules or a Windows AppContainer, with an
-operator-declared [toolchain profile](execution.md#toolchain-profiles). No
+operator-declared [toolchain profile](execution.md#toolchain-profiles).
+Version 0.17.0 limits each run's memory, live processes, and CPU time; raise
+the [tree limits](execution.md#tree-limits) for large builds. On Linux the
+process limit counts threads, so a parallel compiler needs a higher limit
+than its process count. No
 model tool runs project tools. Tool support must be qualified on the actual
 platform; the [execution guide](execution.md#known-limits) lists the
 toolchains and versions that passed acceptance.

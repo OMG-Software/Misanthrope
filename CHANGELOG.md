@@ -6,6 +6,20 @@ Changes are recorded here before a release version is assigned.
 
 ### Added
 
+- Version 0.17.0 limits every trusted run as a whole tree. See ADR-0031.
+  - **Limits:** `--max-memory-mib` (default 8192), `--max-processes`
+    (default 1024), and `--max-cpu-secs` (default 7200). Values out of range
+    are refused before anything is recorded.
+  - **Windows:** the run's job object gets a job memory limit and an active
+    process limit; CPU time comes from the job's accounting.
+  - **Linux:** OMGCode must run in a delegated cgroup v2, for example under
+    `systemd-run --user --scope -p Delegate=yes`. Each run gets its own child
+    cgroup with `memory.max`, no swap, group OOM kill, and `pids.max`. A run
+    outside a delegated cgroup is refused before it is recorded.
+  - **Result:** reaching a limit ends the whole tree and records
+    `limit_exceeded` with the limit. `run_started` records the limits;
+    `run_finished` records CPU time and, where available, peak memory.
+    Records written by 0.16.0 still replay.
 - Version 0.16.0 adds the trusted CLI command `omgcode run <workspace-id>
   --profile <name> -- <program> [arguments]`. It runs one program in a
   workspace whose `execute` preference is enabled.
@@ -174,6 +188,22 @@ Changes are recorded here before a release version is assigned.
 
 ### Fixed
 
+- Settings changes now confirm that withdrawn runs stopped, as the PR #26
+  review asked:
+  - **Unconfirmed cleanup:** a pending run whose cleanup was unconfirmed may
+    still have processes. A settings change that withdraws it now fails and
+    lists it, instead of reporting success.
+  - **Acknowledged runs:** a run counts as stopped only when an outcome other
+    than `cleanup_unconfirmed` is recorded. A run acknowledged without an
+    outcome while the command waited no longer counts.
+  - **Windows grants:** revoking any container grant of a workspace now stops
+    that workspace's runs, not only revoking its read-write grant. The run's
+    watcher compares a per-workspace revocation count, so it cannot miss a
+    revocation between two polls. `container-revoke` waits for each run of the
+    workspace that started before the revocation.
+- Run workflow tests now allow settings commands their full 60-second wait,
+  keep grants whose revocation failed so the fallback can retry them, and on
+  Linux end the process group of the abandoned run before the test finishes.
 - The Windows runner test for escaping descendants now allows up to five
   seconds for a killed grandchild's process object to become signaled. Windows
   can report the job empty before that object is signaled; the instant check

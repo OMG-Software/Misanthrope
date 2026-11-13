@@ -35,7 +35,11 @@ test container deletes its profile when dropped, so runs leave no per-user
 AppContainer profiles. These tests ran on Windows 11 build 26300.
 
 The 0.16.0 `run_workflow` tests drive `omgcode run` through the real CLI with
-system tools. Windows scenes grant the workspace and revoke every grant when
+system tools. Since 0.17.0, on Linux they start the CLI through
+`systemd-run --user --scope -p Delegate=yes`, and the platform tree-limit
+tests rerun themselves the same way. They need a user service manager and fail
+without one; they must not be skipped. Each limit test must show that the
+limit ends the whole run as `LimitExceeded`. Windows scenes grant the workspace and revoke every grant when
 dropped. The `toolchain_acceptance` tests run real toolchains. They are
 `#[ignore]` because they need host toolchains named by `OMGCODE_ACCEPT_*`
 variables. Run them explicitly with `--ignored` on both platforms and report

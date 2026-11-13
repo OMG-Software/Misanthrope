@@ -18,20 +18,29 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::{Component, Path};
 use std::ptr::{null, null_mut};
 use std::sync::{Mutex, PoisonError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{
-    HANDLE, HANDLE_FLAG_INHERIT, SetHandleInformation, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation, WAIT_OBJECT_0,
+    WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::SECURITY_CAPABILITIES;
+use windows_sys::Win32::System::IO::{
+    CreateIoCompletionPort, GetQueuedCompletionStatus, OVERLAPPED,
+};
 use windows_sys::Win32::System::JobObjects::{
-    CreateJobObjectW, IsProcessInJob, JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION,
-    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicAccountingInformation,
+    CreateJobObjectW, IsProcessInJob, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
+    JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION, JOB_OBJECT_LIMIT_JOB_MEMORY,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_ASSOCIATE_COMPLETION_PORT,
+    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JobObjectAssociateCompletionPortInformation, JobObjectBasicAccountingInformation,
     JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
     TerminateJobObject,
 };
 use windows_sys::Win32::System::Pipes::CreatePipe;
+use windows_sys::Win32::System::SystemServices::{
+    JOB_OBJECT_MSG_ACTIVE_PROCESS_LIMIT, JOB_OBJECT_MSG_JOB_MEMORY_LIMIT,
+};
 use windows_sys::Win32::System::Threading::{
     CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
     DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess,
@@ -44,8 +53,8 @@ use windows_sys::Win32::System::Threading::{
 
 use super::{
     AppliedConfinement, CancelSignal, Capture, Confinement, ProcessError, ProcessLimits,
-    ProcessOutcome, ProcessSpec, ProcessTree, Termination, UnixSocketAccess, is_batch_script,
-    stop_tree, supervise,
+    ProcessOutcome, ProcessSpec, ProcessTree, ResourceLimit, Termination, TreeLimits, TreeUsage,
+    UnixSocketAccess, is_batch_script, stop_tree, supervise,
 };
 use crate::container::ContainerAccess;
 use crate::container::windows::{derive_sid, granted_access, profile_exists};
@@ -116,7 +125,7 @@ pub(super) fn run(
     let mut command_line = command_line(spec)?;
     let environment = environment_block(spec);
     let directory = wide_nul(spec.working_directory.as_os_str());
-    let job = create_job().map_err(ProcessError::Spawn)?;
+    let (job, limits_state) = create_job(limits.tree).map_err(ProcessError::Spawn)?;
     let null_input = OpenOptions::new()
         .read(true)
         .open("NUL")
@@ -157,6 +166,7 @@ pub(super) fn run(
     let mut tree = WindowsTree {
         job,
         process: created.process,
+        limits: limits_state,
     };
     if let Err(error) = verify_member(&tree).and_then(|()| resume(&created.thread)) {
         // Nothing has run yet; closing the job kills the suspended process.
@@ -249,6 +259,85 @@ const fn covers(granted: Option<ContainerAccess>, needed: ContainerAccess) -> bo
 struct WindowsTree {
     job: OwnedHandle,
     process: OwnedHandle,
+    limits: Option<JobLimits>,
+}
+
+/// Limit state for a job with [`TreeLimits`]. The job itself enforces memory
+/// and active processes and posts a message to `port` when either is hit.
+struct JobLimits {
+    port: OwnedHandle,
+    /// CPU-time limit in 100-nanosecond units, as the job accounts it.
+    max_cpu_units: u64,
+    reached: Option<ResourceLimit>,
+}
+
+impl WindowsTree {
+    #[allow(unsafe_code)]
+    fn accounting(&self) -> io::Result<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION> {
+        let mut info = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+        let length = u32::try_from(size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>())
+            .map_err(|_| io::Error::other("job accounting structure is too large"))?;
+        // SAFETY: the job handle is live; `info` is writable storage of exactly
+        // `length` bytes for the matching information class.
+        let result = unsafe {
+            QueryInformationJobObject(
+                self.job.as_raw_handle() as HANDLE,
+                JobObjectBasicAccountingInformation,
+                (&raw mut info).cast(),
+                length,
+                null_mut(),
+            )
+        };
+        if result == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(info)
+    }
+
+    /// User plus kernel time of every process the job has held, in
+    /// 100-nanosecond units.
+    fn cpu_units(&self) -> io::Result<u64> {
+        let info = self.accounting()?;
+        let user = u64::try_from(info.TotalUserTime).unwrap_or(0);
+        let kernel = u64::try_from(info.TotalKernelTime).unwrap_or(0);
+        Ok(user.saturating_add(kernel))
+    }
+}
+
+/// Take every queued job message without waiting, and return the first
+/// limit it reports. Windows does not guarantee delivery of these messages;
+/// the job enforces the limit either way.
+#[allow(unsafe_code)]
+fn drain_limit_messages(port: &OwnedHandle) -> Option<ResourceLimit> {
+    let mut reached = None;
+    loop {
+        let mut message = 0u32;
+        let mut key = 0usize;
+        let mut overlapped: *mut OVERLAPPED = null_mut();
+        // SAFETY: the port handle is owned and live; the three outputs are
+        // writable locals. A zero timeout never blocks. Job messages carry a
+        // process ID in `overlapped`, which is never dereferenced.
+        let result = unsafe {
+            GetQueuedCompletionStatus(
+                port.as_raw_handle() as HANDLE,
+                &raw mut message,
+                &raw mut key,
+                &raw mut overlapped,
+                0,
+            )
+        };
+        if result == 0 {
+            // No packet: the queue is empty (or the port failed, which a
+            // later poll or the job's own enforcement still covers).
+            return reached;
+        }
+        let limit = match message {
+            JOB_OBJECT_MSG_JOB_MEMORY_LIMIT => Some(ResourceLimit::Memory),
+            JOB_OBJECT_MSG_ACTIVE_PROCESS_LIMIT => Some(ResourceLimit::Processes),
+            _ => None,
+        };
+        reached = reached.or(limit);
+    }
 }
 
 impl ProcessTree for WindowsTree {
@@ -284,17 +373,43 @@ impl ProcessTree for WindowsTree {
         Ok(())
     }
 
-    #[allow(unsafe_code)]
     fn is_empty(&mut self) -> io::Result<bool> {
-        let mut info = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
-        let length = u32::try_from(size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>())
-            .map_err(|_| io::Error::other("job accounting structure is too large"))?;
+        Ok(self.accounting()?.ActiveProcesses == 0)
+    }
+
+    fn limit_reached(&mut self) -> io::Result<Option<ResourceLimit>> {
+        let Some(limits) = &self.limits else {
+            return Ok(None);
+        };
+        if limits.reached.is_some() {
+            return Ok(limits.reached);
+        }
+        let mut reached = drain_limit_messages(&limits.port);
+        let max_cpu_units = limits.max_cpu_units;
+        if reached.is_none() && self.cpu_units()? >= max_cpu_units {
+            reached = Some(ResourceLimit::CpuTime);
+        }
+        if let Some(limits) = &mut self.limits {
+            limits.reached = reached;
+        }
+        Ok(reached)
+    }
+
+    #[allow(unsafe_code)]
+    fn usage(&mut self) -> io::Result<Option<TreeUsage>> {
+        if self.limits.is_none() {
+            return Ok(None);
+        }
+        let units = self.cpu_units()?;
+        let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        let length = u32::try_from(size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>())
+            .map_err(|_| io::Error::other("job limit structure is too large"))?;
         // SAFETY: the job handle is live; `info` is writable storage of exactly
         // `length` bytes for the matching information class.
         let result = unsafe {
             QueryInformationJobObject(
                 self.job.as_raw_handle() as HANDLE,
-                JobObjectBasicAccountingInformation,
+                JobObjectExtendedLimitInformation,
                 (&raw mut info).cast(),
                 length,
                 null_mut(),
@@ -303,7 +418,10 @@ impl ProcessTree for WindowsTree {
         if result == 0 {
             return Err(io::Error::last_os_error());
         }
-        Ok(info.ActiveProcesses == 0)
+        Ok(Some(TreeUsage {
+            cpu_time: Duration::from_nanos(units.saturating_mul(100)),
+            peak_memory_bytes: u64::try_from(info.PeakJobMemoryUsed).ok(),
+        }))
     }
 }
 
@@ -312,8 +430,11 @@ struct Created {
     thread: OwnedHandle,
 }
 
+/// Create the run's job. With tree limits, the job also caps its committed
+/// memory and active processes, and reports either limit to a new completion
+/// port. The port is associated before any process joins the job.
 #[allow(unsafe_code)]
-fn create_job() -> io::Result<OwnedHandle> {
+fn create_job(tree: Option<TreeLimits>) -> io::Result<(OwnedHandle, Option<JobLimits>)> {
     // SAFETY: null attributes and a null name create an unnamed job with the
     // caller's default security; the call has no other pointer inputs.
     let handle = unsafe { CreateJobObjectW(null(), null()) };
@@ -326,6 +447,25 @@ fn create_job() -> io::Result<OwnedHandle> {
     // No breakaway flag is set, so members cannot leave the job.
     limits.BasicLimitInformation.LimitFlags =
         JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION;
+    let state = match tree {
+        Some(tree) => {
+            limits.BasicLimitInformation.LimitFlags |=
+                JOB_OBJECT_LIMIT_JOB_MEMORY | JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+            limits.JobMemoryLimit = usize::try_from(tree.max_memory_bytes)
+                .map_err(|_| io::Error::other("the memory limit does not fit this platform"))?;
+            limits.BasicLimitInformation.ActiveProcessLimit = tree.max_processes;
+            let port = associate_port(&job)?;
+            // The job accounts CPU time in 100-nanosecond units.
+            let max_cpu_units = u64::try_from(tree.max_cpu_time.as_nanos() / 100)
+                .map_err(|_| io::Error::other("the CPU-time limit is too large"))?;
+            Some(JobLimits {
+                port,
+                max_cpu_units,
+                reached: None,
+            })
+        }
+        None => None,
+    };
     let length = u32::try_from(size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>())
         .map_err(|_| io::Error::other("job limit structure is too large"))?;
     // SAFETY: the job handle is live and `limits` is a readable structure of
@@ -341,7 +481,44 @@ fn create_job() -> io::Result<OwnedHandle> {
     if result == 0 {
         return Err(io::Error::last_os_error());
     }
-    Ok(job)
+    Ok((job, state))
+}
+
+/// Create a completion port and associate it with `job`, so the job posts
+/// its limit messages there.
+#[allow(unsafe_code)]
+fn associate_port(job: &OwnedHandle) -> io::Result<OwnedHandle> {
+    // SAFETY: an invalid file handle with a null existing port creates a new
+    // port with one concurrent thread; no pointer is passed.
+    let handle = unsafe { CreateIoCompletionPort(INVALID_HANDLE_VALUE, null_mut(), 0, 1) };
+    if handle.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the handle was just returned by `CreateIoCompletionPort` and is
+    // owned here.
+    let port = unsafe { OwnedHandle::from_raw_handle(handle) };
+    let association = JOBOBJECT_ASSOCIATE_COMPLETION_PORT {
+        // The key is never read; the port serves this job only.
+        CompletionKey: null_mut(),
+        CompletionPort: port.as_raw_handle() as HANDLE,
+    };
+    let length = u32::try_from(size_of::<JOBOBJECT_ASSOCIATE_COMPLETION_PORT>())
+        .map_err(|_| io::Error::other("job port structure is too large"))?;
+    // SAFETY: both handles are live; `association` is a readable structure of
+    // exactly `length` bytes for the matching information class. The tree
+    // keeps the port open for as long as it keeps the job.
+    let result = unsafe {
+        SetInformationJobObject(
+            job.as_raw_handle() as HANDLE,
+            JobObjectAssociateCompletionPortInformation,
+            (&raw const association).cast(),
+            length,
+        )
+    };
+    if result == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(port)
 }
 
 /// Create a pipe whose handles are not inheritable.
