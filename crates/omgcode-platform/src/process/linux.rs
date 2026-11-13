@@ -240,13 +240,14 @@ impl ProcessTree for LinuxTree {
     }
 
     fn terminate(&mut self) -> io::Result<()> {
-        if let Some(cgroup) = &self.cgroup {
-            cgroup.kill()?;
-        }
-        match rustix::process::kill_process_group(self.group, Signal::KILL) {
+        // Try both, so a failed cgroup kill still kills the process group;
+        // then report the first failure.
+        let cgroup = self.cgroup.as_ref().map_or(Ok(()), RunCgroup::kill);
+        let group = match rustix::process::kill_process_group(self.group, Signal::KILL) {
             Ok(()) | Err(Errno::SRCH) => Ok(()),
             Err(error) => Err(error.into()),
-        }
+        };
+        cgroup.and(group)
     }
 
     fn limit_reached(&mut self) -> io::Result<Option<ResourceLimit>> {

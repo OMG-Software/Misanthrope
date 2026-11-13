@@ -94,6 +94,8 @@ fn fixture() {
         "hog-memory" => tree_limits::hog_memory(),
         "spawn-many" => tree_limits::spawn_many(),
         "spin" => tree_limits::spin(),
+        #[cfg(windows)]
+        "nested-job" => tree_limits::nested_job(),
         #[cfg(target_os = "linux")]
         "signal" => {
             rustix::process::kill_process(rustix::process::getpid(), rustix::process::Signal::TERM)

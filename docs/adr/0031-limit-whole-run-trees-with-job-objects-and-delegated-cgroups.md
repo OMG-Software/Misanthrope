@@ -74,8 +74,10 @@ owns the details.
 
 ## Consequences
 
-- One run can no longer exhaust host memory or the process table, or run CPU
-  without bound.
+- Each run is capped at its configured memory, process, and CPU-time limits.
+  The limits reserve nothing: a run can still exhaust a host with less free
+  memory or process capacity than they allow, and concurrent runs each get
+  their own limits.
 - Linux runs need a user service manager or another delegated cgroup, and the
   scope must not hold other processes. Hosts without cgroup v2, or older than
   Linux 5.14, cannot run. CI must provide a user systemd instance.
@@ -83,7 +85,12 @@ owns the details.
   Windows, cgroup memory including page cache on Linux; Linux counts threads.
 - CPU time can overshoot by one poll's worth of time per busy thread.
 - A lost Windows limit message leaves the limit enforced but the result
-  unattributed.
+  unattributed. Windows routes a nested job's limit messages to its
+  ancestors, so the runner counts a memory or process message only when the
+  run's own job confirms it. A large allocation refused well below the memory
+  limit is then not attributed either. No documented API identifies the job
+  that sent a message, so a nested job's memory message still ends a run that
+  is already within a sixteenth of its own memory limit.
 - There is still no disk limit.
 
 ## References

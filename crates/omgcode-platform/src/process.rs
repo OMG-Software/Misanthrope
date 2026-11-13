@@ -158,7 +158,14 @@ pub struct TreeUsage {
 }
 
 impl ProcessLimits {
-    fn validate(self) -> Result<Self, ProcessError> {
+    /// Check every bound against the runner's ranges, including the tree
+    /// limits when present. [`run`] and [`run_confined`] check this as well;
+    /// callers that record a run first check it before recording.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProcessError::InvalidLimits`] for a value out of range.
+    pub fn validate(self) -> Result<Self, ProcessError> {
         if self.deadline.is_zero() || self.deadline > MAX_DEADLINE {
             return Err(ProcessError::InvalidLimits("deadline is out of range"));
         }
@@ -501,6 +508,11 @@ trait ProcessTree {
     fn limit_reached(&mut self) -> io::Result<Option<ResourceLimit>> {
         Ok(None)
     }
+    /// The tree limit reached by the time the program exited, taking any
+    /// reports still queued. Called before the tree is stopped.
+    fn limit_reached_at_exit(&mut self) -> io::Result<Option<ResourceLimit>> {
+        self.limit_reached()
+    }
     /// What a limited tree used. Called once, after the tree is empty.
     fn usage(&mut self) -> io::Result<Option<TreeUsage>> {
         Ok(None)
@@ -612,8 +624,11 @@ fn supervise(
         (Err(error), Ok(())) => return Err(ProcessError::Supervision(error)),
     };
     let elapsed = started.elapsed();
-    let usage = tree.usage().map_err(ProcessError::Supervision)?;
+    // Release the native limit state even when usage cannot be read; a
+    // failed release is unconfirmed cleanup and is reported first.
+    let usage = tree.usage();
     tree.release()?;
+    let usage = usage.map_err(ProcessError::Supervision)?;
     let (stdout, stderr) = capture.finish(Instant::now() + limits.cleanup_timeout)?;
     Ok(ProcessOutcome {
         termination,
@@ -635,7 +650,12 @@ fn watch(
         let exited = tree.try_exit()?;
         // A limit reached before or as the program exited ends the run as
         // limit exceeded: the exit may be the program's reaction to it.
-        if let Some(limit) = tree.limit_reached()? {
+        let reached = if exited.is_some() {
+            tree.limit_reached_at_exit()?
+        } else {
+            tree.limit_reached()?
+        };
+        if let Some(limit) = reached {
             return Ok(Termination::LimitExceeded { limit });
         }
         if let Some(termination) = exited {

@@ -221,11 +221,12 @@ pub(crate) fn run(action: WorkspaceCommand, data_root: &Path) -> Result<(), CliE
             let mut store = open_existing(data_root)?
                 .ok_or_else(|| CliError::new("control", "Workspace control is not initialized"))?;
             // Every run of the workspace that started before this revocation
-            // is withdrawn. Runs start only under the lock held here.
+            // is withdrawn. Runs start only under the lock held here. An
+            // unreadable run journal must not keep the grant in place, so the
+            // lookup's failure is reported only after the revocation.
             let affected = match store.container_grant_workspace(grant) {
-                Some(workspace_id) => run::workspace_runs(&store, workspace_id)
-                    .map_err(|error| CliError::new("run", error.to_string()))?,
-                None => Vec::new(),
+                Some(workspace_id) => run::workspace_runs(&store, workspace_id),
+                None => Ok(Vec::new()),
             };
             let revocation = store.revoke_container_grant(grant).map_err(control_error)?;
             let output = json!({
@@ -233,7 +234,23 @@ pub(crate) fn run(action: WorkspaceCommand, data_root: &Path) -> Result<(), CliE
                 "snapshot": store.snapshot(),
             });
             drop(store);
-            stop_withdrawn_runs(data_root, &affected)?;
+            match affected {
+                Ok(affected) => stop_withdrawn_runs(data_root, &affected)?,
+                Err(error) => {
+                    // Still stop what the settings now withdraw, then report
+                    // that the affected runs could not be confirmed.
+                    let stopped = match stop_withdrawn_runs(data_root, &[]) {
+                        Ok(()) => String::new(),
+                        Err(stop) => format!(" {}", stop.message),
+                    };
+                    return Err(CliError::new(
+                        "run",
+                        format!(
+                            "The grant was revoked, but the runs it affects could not be found: {error}.{stopped}"
+                        ),
+                    ));
+                }
+            }
             print_json(&output)
         }
     }

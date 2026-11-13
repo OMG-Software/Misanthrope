@@ -283,7 +283,9 @@ record their change first. Then they release the control lock and wait up to
 60 seconds for every pending run that the new settings no longer allow.
 `container-revoke` also waits for every pending run of the grant's workspace
 that started before the revocation; it lists them while it holds the control
-lock, under which every run starts.
+lock, under which every run starts. If the run journal cannot be read, for
+example after an interrupted append, it still revokes the grant, then fails
+with code `run` and says that the grant was revoked.
 
 A run counts as stopped only when its owner lock is free and an outcome other
 than `cleanup_unconfirmed` is recorded. These runs are reported as not stopped,
@@ -353,6 +355,32 @@ the platform reports it, its peak memory: the job's peak commit on Windows, or
 Windows does not guarantee delivery of job messages. If one is lost, the job
 still enforces the limit, but the run ends as the program decides and is not
 recorded as `limit_exceeded`. CPU time does not depend on messages.
+
+Windows also sends the limit messages of a job nested in the run's job, such
+as a tool's own stricter job, to the run's port. So the runner counts a
+message only when the run's own job confirms it:
+
+- **Processes:** the job holds as many processes as its limit.
+- **Memory:** the job's peak commit came within a sixteenth of its limit. An
+  allocation refused further below the limit, because it was large, is still
+  refused but is not recorded as `limit_exceeded`.
+
+These checks narrow attribution but do not identify the sending job. A job
+message carries the receiving port's own completion key and, for memory, only
+the process ID. If the run is already within a sixteenth of its memory limit
+when a nested job reaches its own memory limit, the runner still ends the run
+as `limit_exceeded` for memory.
+
+Each 10 ms poll takes at most 256 job messages, so a tree that keeps starting
+processes cannot hold the supervisor away from its other checks. Once the
+program has exited, the runner takes up to 64 such batches before it stops the
+tree, until the queue is empty or a limit is confirmed. So a limit reported
+behind other messages still decides the result. If messages remain after those
+batches and CPU time is within its limit, the runner cannot tell whether a
+limit was reached. It still stops the tree, then records `supervision_failed`
+rather than a normal exit. On Windows 11 build 26300, a
+nested job's limit messages did not reach the run's port in testing; the
+check follows the documented behaviour.
 
 #### Linux delegated cgroup
 
@@ -624,7 +652,9 @@ These remain true after C5:
     timeout; only the run deadline ends them. Inherited streams work. This
     includes the isolated `node --test`; use `--test-isolation=none` (Node
     22.8 or later).
-- **Acceptance coverage.** The toolchain cases passed with:
+- **Acceptance coverage.** These results are from 0.16.0, before tree
+  limits. The toolchain cases have not been rerun under the 0.17.0 limits.
+  They passed with:
   - Windows: Rust 1.99.1 (MSVC 14.50 and SDK 10.0.26100), Python 3.14.4,
     Node 24.15.0, Go 1.27.4, and MSVC C/C++;
   - Linux: Rust 1.99.1, Python 3.12.3, Node 18.19.1, Go 1.26.10, and
