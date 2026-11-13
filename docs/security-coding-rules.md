@@ -225,6 +225,11 @@ crate.
   when a destination or redirect changes. Enabling a destination also permits
   some data to reach it; do not describe a destination allowlist as content
   confidentiality.
+- Do not enforce a package or task destination list with proxy environment
+  variables or an advisory loopback proxy: a confined tree can ignore them and
+  connect directly. A package-network profile is configuration only until a
+  mechanism constrains every egress path, including direct IP, IPv6, UDP, DNS,
+  loopback, and alternate socket families. See ADR-0034.
 - Assemble and validate a complete structured tool call before dispatch.
   Validate names, arguments, limits, session scope, and provider call identity.
   A provider adapter must parse provider JSON strictly; the core runtime then

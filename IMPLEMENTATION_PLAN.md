@@ -56,9 +56,12 @@ This is a resume guide, not a replacement for the owning contracts in
   tree-wide memory, process, and CPU-time limits.
 - **PR #29** merged at `4c2a561`: **Phase C6**, version **0.18.0**, with
   outbound network access behind `task_network` and `--network`.
-- This branch, `codex/disk-limit`: **Phase C7**, version **0.19.0**, with a
-  sampled net disk-growth limit for every trusted run. It started from `main`
-  at `4c2a561`.
+- `codex/disk-limit` (local commit `0426e42`): **Phase C7**, version
+  **0.19.0**, with a sampled net disk-growth limit for every trusted run.
+- This branch, `codex/package-network-profile`: **Phase C8**, a contract-only
+  package-network profile and implementation gate (ADR-0034). It adds no
+  runtime flag, no destination enforcement, and no version bump. It is stacked
+  on C7 at `0426e42`.
 
 Implemented today:
 
@@ -126,6 +129,10 @@ Implemented today:
   [ADR-0031](docs/adr/0031-limit-whole-run-trees-with-job-objects-and-delegated-cgroups.md),
   [ADR-0032](docs/adr/0032-allow-outbound-network-for-trusted-runs-through-task-network.md),
   and [ADR-0033](docs/adr/0033-bound-run-disk-growth-by-sampling-writable-roots.md).
+- A [package-network profile](docs/execution.md#package-network-profile-contract-only)
+  contract and implementation gate (ADR-0034). No run accepts a profile, no
+  destination filter exists, and `--network` remains all-or-nothing. This is
+  configuration/contract work, not an implemented network control.
 - Trusted `file restore` through a new checkpoint and
   `file delete-checkpoint --permanent` for one resolved checkpoint, on the same
   filesystems as apply. Neither is power-loss qualified. See
@@ -470,16 +477,22 @@ on Windows, and trusted CLI commands as the first caller. See
 - **C6 (merged as PR #29):** outbound network access behind `task_network` and
   `--network`, with resolver and public certificate paths on Linux. See
   [ADR-0032](docs/adr/0032-allow-outbound-network-for-trusted-runs-through-task-network.md).
-- **C7 (this branch, `codex/disk-limit`):** a sampled net disk-growth limit for
-  every trusted run. The user chose a disk limit as the next increment. The
-  supervisor measures the writable roots before the run and once a second on a
-  separate thread, fails closed when it cannot measure, and records the limit
-  and peak growth. See
+- **C7 (local commit `0426e42` on `codex/disk-limit`):** a sampled net
+  disk-growth limit for every trusted run. The user chose a disk limit as the
+  next increment. The supervisor measures the writable roots before the run
+  and once a second on a separate thread, fails closed when it cannot measure,
+  and records the limit and peak growth. See
   [ADR-0033](docs/adr/0033-bound-run-disk-growth-by-sampling-writable-roots.md).
+- **C8 (this branch, `codex/package-network-profile`):** the package-network
+  profile contract and implementation gate. The user chose a package-network
+  profile, then chose contract-only after the primitive review. No run accepts
+  a profile; an advisory proxy is rejected because the tree can bypass it.
+  See [ADR-0034](docs/adr/0034-gate-package-networking-behind-enforceable-destination-control.md).
 
 Next decisions, not yet scheduled:
 
-- a network destination allowlist or package-network profile;
+- an enforceable package-network mechanism, registry credentials, and
+  development-server networking (see ADR-0034);
 - a model-callable command tool with per-call approval.
 
 ### Phase D: additional providers, streaming, and account lifecycle

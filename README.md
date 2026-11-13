@@ -35,9 +35,10 @@ directory grants.
 > Linux run can then reach any address, including loopback and the local
 > network. On Linux, a run that both the `host_services` preference and its
 > `--host-services` flag allow can reach the host's Unix-domain sockets, such
-> as service and credential-agent sockets. Runs have memory, process-count,
-> CPU-time, and sampled disk-growth limits; the disk limit is not a filesystem
-> quota. See [command execution](docs/execution.md#tree-limits).
+> as service and credential-agent sockets. A package-network profile is
+> contract only (ADR-0034) and does not narrow this. Runs have memory,
+> process-count, CPU-time, and sampled disk-growth limits; the disk limit is
+> not a filesystem quota. See [command execution](docs/execution.md#tree-limits).
 
 ## Goals
 

@@ -48,3 +48,4 @@ meaningful alternative does not need an ADR.
 | [0031: Limit whole run trees with job objects and delegated cgroups](0031-limit-whole-run-trees-with-job-objects-and-delegated-cgroups.md) | Accepted | 2026-11-12 |
 | [0032: Allow outbound network for trusted runs through task_network](0032-allow-outbound-network-for-trusted-runs-through-task-network.md) | Accepted | 2026-11-13 |
 | [0033: Bound run disk growth by sampling writable roots](0033-bound-run-disk-growth-by-sampling-writable-roots.md) | Accepted | 2026-11-13 |
+| [0034: Gate package networking behind enforceable destination control](0034-gate-package-networking-behind-enforceable-destination-control.md) | Accepted | 2026-11-13 |

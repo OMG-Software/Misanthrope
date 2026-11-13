@@ -205,6 +205,11 @@ Changes are recorded here before a release version is assigned.
 
 ### Changed
 
+- Package-network destination enforcement is defined as a contract only in
+  ADR-0034. No run accepts a package-network profile, and `--network` remains
+  all-or-nothing. An advisory proxy or proxy environment variables are
+  explicitly rejected because a confined tree can bypass them. This is a
+  documentation change; no application version is bumped.
 - The SonarQube Cloud project key is now `OMG-Software_OMGCode`, matching the
   key a Sonar administrator set on the server. `sonar-project.properties` and
   the repository-checks guide use the new key.

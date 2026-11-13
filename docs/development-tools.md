@@ -125,9 +125,12 @@ Package downloads use task-network permission, never the model connection's
 permission. Since 0.18.0 a trusted run gets outbound networking only with the
 workspace `task_network` preference and its `--network` flag; see
 [network access](execution.md#network-access). There is no destination
-allowlist yet. Registry credentials require a narrow reviewed
-credential path. Offline tasks must work with available dependencies or explain
-which download is needed.
+allowlist. The
+[package-network profile](execution.md#package-network-profile-contract-only)
+is contract only (ADR-0034): no run accepts one, and a proxy or proxy
+environment variables are not a boundary. Registry credentials require a
+narrow reviewed credential path. Offline tasks must work with available
+dependencies or explain which download is needed.
 
 Development servers, debuggers, license servers, hardware access, and other
 services can need extra resources. Treat each as an explicit capability rather
@@ -154,9 +157,12 @@ cancellation, denied host-data access, and disabled networking. Include missing
 dependencies, spaces and native path forms, stale tool profiles, concurrent
 builds, disk exhaustion, and hostile build/package scripts.
 
-Also prove the allowed case: an approved package-network profile can reach its
-declared registry destinations and rejects other destinations. Model-provider
-connectivity alone must not enable that package or general task traffic.
+The package-network acceptance case cannot run yet. The profile is contract
+only (ADR-0034), and no runtime mechanism narrows destinations. A future
+implementation must prove that an approved profile reaches its declared
+registry destinations and rejects every other destination, including direct
+IP, IPv6, UDP, DNS, and proxy-bypass paths. Model-provider connectivity alone
+must not enable package or general task traffic.
 
 Record the selected profile with task results so failures are reproducible.
 Do not claim general support from locating an executable or printing its version.
@@ -178,7 +184,8 @@ yet:
   metadata exhaustion; the sampled disk limit is tested with ordinary file
   growth;
 - package downloads through `--network`, and rejection of undeclared
-  destinations, because there is no destination allowlist;
+  destinations, because there is no destination allowlist and the
+  package-network profile is contract only (ADR-0034);
 - hostile package scripts beyond the hostile programs.
 
 The Java case has not run on either host. The registry case also remains open.

@@ -46,6 +46,10 @@ run bounds the allocated bytes it may add to its writable roots. No portable
 per-run disk quota exists, so the supervisor measures growth on a separate
 thread rather than the kernel enforcing a quota.
 
+The [package-network profile](#package-network-profile-contract-only) is a
+contract only (ADR-0034). No run accepts one, and `--network` remains
+all-or-nothing.
+
 ## Accepted decisions
 
 The user selected these on 2026-11-11; see
@@ -202,6 +206,44 @@ change of its target is not followed. Resolvers that need other services, such
 as `nscd` or `systemd-resolved` through a Unix socket, need host services too.
 Windows resolves names and checks certificates through system services, so it
 adds no paths.
+
+### Package-network profile (contract only)
+
+The user selected a package-network profile as the next increment. This phase
+defines only its contract; see
+[ADR-0034](adr/0034-gate-package-networking-behind-enforceable-destination-control.md).
+No run accepts a profile, the runtime has no destination allowlist, and
+`--network` remains all-or-nothing.
+
+A profile, when implemented, is an operator-declared, revisioned list of
+registry origins: scheme, host, optional port, and an optional path prefix.
+Normal use is `https`; `http` is allowed only for a loopback test fixture. A
+profile has no credentials, wildcards, user information, or redirects to
+another origin. It is configuration only and never authorizes a run.
+
+Any implementation must pass these gates before it can be described as
+implemented:
+
+- the confined tree cannot reach any destination other than the declared
+  origins or a trusted proxy, including direct IP, IPv6, UDP, DNS, loopback,
+  alternate socket families, and paths that bypass the proxy;
+- the mechanism fails closed, and a platform that cannot enforce it refuses
+  the profile rather than falling back to general network access;
+- its exact limits and bypass analysis are documented and qualified on both
+  supported hosts;
+- registry credentials remain a separate reviewed design and never enter a
+  profile, run environment, journal, or model context;
+- acceptance tests prove allowed-origin success, undeclared-origin refusal,
+  redirect refusal, credential refusal, offline fallback, and platform refusal.
+
+The current primitives cannot meet that gate. Landlock ABI 4 and later filters
+TCP bind and connect by port, not address. Classic seccomp cannot read the
+`sockaddr` contents. Windows AppContainer capabilities cannot name
+destinations, and granting none blocks loopback too. Proxy environment
+variables and an advisory loopback proxy can be bypassed by a hostile tree.
+Candidate mechanisms for a later decision are a trusted host-side fetch into a
+private cache with an offline run, an OS destination filter, or a Linux-only
+network-namespace relay.
 
 ## Container grants
 
@@ -817,6 +859,11 @@ These remain true after C6:
   `listen` on an unbound socket, which takes a port the kernel chooses. UDP
   bind is never limited. See
   [network access](#network-access).
+- **No package-network enforcement.** A package-network profile is contract
+  only (ADR-0034). No run accepts one, and it does not narrow `--network`.
+  A proxy or proxy environment variables are not a boundary: a hostile tree
+  can connect directly. See
+  [package-network profile](#package-network-profile-contract-only).
 - **Network coverage.** Network access was tested on Windows 11 build 26300
   and WSL 6.6 (Landlock ABI 3) only, including a TLS fetch with the system
   `curl` on both. The ABI 4 TCP-bind denial has not run on a live kernel.
@@ -867,11 +914,12 @@ These remain true after C6:
 | C5 (0.17.0) | Tree-wide memory, process, and CPU-time limits | Done: see [tree limits](#tree-limits) and ADR-0031 |
 | C6 (0.18.0) | Outbound network access behind `task_network` and `--network` | Done: see [network access](#network-access) and ADR-0032 |
 | C7 (0.19.0) | Sampled disk-growth limit for every trusted run | Done: see [disk growth](#disk-growth) and ADR-0033 |
+| C8 (contract only, 0.19.0) | Package-network profile contract and implementation gate | Done as a contract: see [package-network profile](#package-network-profile-contract-only) and ADR-0034. No runtime flag and no destination enforcement. |
 
 Later work needs its own decisions:
 
-- a network destination allowlist, registry credentials, and
-  development-server networking;
+- an enforceable package-network destination mechanism, registry credentials,
+  and development-server networking;
 - a model-callable command tool.
 
 Live qualification on each supported OS remains a separate gate.
