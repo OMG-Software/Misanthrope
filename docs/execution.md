@@ -375,7 +375,10 @@ Each 10 ms poll takes at most 256 job messages, so a tree that keeps starting
 processes cannot hold the supervisor away from its other checks. Once the
 program has exited, the runner takes up to 64 such batches before it stops the
 tree, until the queue is empty or a limit is confirmed. So a limit reported
-behind other messages still decides the result. On Windows 11 build 26300, a
+behind other messages still decides the result. If messages remain after those
+batches and CPU time is within its limit, the runner cannot tell whether a
+limit was reached. It still stops the tree, then records `supervision_failed`
+rather than a normal exit. On Windows 11 build 26300, a
 nested job's limit messages did not reach the run's port in testing; the
 check follows the documented behaviour.
 

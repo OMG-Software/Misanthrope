@@ -376,7 +376,9 @@ fn job_confirms(job: &OwnedHandle, limits: &JobLimits, limit: ResourceLimit) -> 
 ///
 /// A poll takes one batch of messages. Once the program has exited, it takes
 /// up to [`MAX_EXIT_BATCHES`], until the queue is empty or a limit is
-/// confirmed, while the tree still holds the processes that confirm it.
+/// confirmed, while the tree still holds the processes that confirm it. If
+/// messages remain after those batches and CPU time is within its limit, the
+/// check is incomplete: it fails rather than let the run end as a normal exit.
 fn job_limit_reached(
     job: &OwnedHandle,
     limits: &mut JobLimits,
@@ -386,6 +388,7 @@ fn job_limit_reached(
         return Ok(limits.reached);
     }
     let batches = if exited { MAX_EXIT_BATCHES } else { 1 };
+    let mut queued = false;
     for _ in 0..batches {
         let drained = drain_limit_messages(&limits.port);
         for (reported, limit) in [
@@ -397,12 +400,18 @@ fn job_limit_reached(
                 return Ok(limits.reached);
             }
         }
-        if !drained.full {
+        queued = drained.full;
+        if !queued {
             break;
         }
     }
     if job_confirms(job, limits, ResourceLimit::CpuTime)? {
         limits.reached = Some(ResourceLimit::CpuTime);
+    } else if exited && queued {
+        return Err(io::Error::other(
+            "job messages were still queued when the program exited, so its tree limits \
+             could not be checked",
+        ));
     }
     Ok(limits.reached)
 }
@@ -1031,12 +1040,11 @@ mod limit_tests {
             .expect("start a sleeper")
     }
 
-    /// A limit reported behind more than one poll's worth of other messages
-    /// still decides the run once the program has exited, and is confirmed
-    /// before the tree is stopped.
-    #[test]
+    /// Watch a program that has already exited, in a job that holds its one
+    /// allowed process, with `ahead` other messages queued before the job's
+    /// process-limit report.
     #[allow(unsafe_code)]
-    fn an_exit_takes_every_queued_limit_report() {
+    fn watch_exited_program(ahead: usize) -> io::Result<Termination> {
         use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
 
         let (job, limits) = create_job(Some(TreeLimits {
@@ -1057,7 +1065,7 @@ mod limit_tests {
             )
         };
         assert_ne!(joined, 0, "put the sleeper in the job");
-        for _ in 0..MAX_DRAINED_MESSAGES + 44 {
+        for _ in 0..ahead {
             post(&limits.port, JOB_OBJECT_MSG_NEW_PROCESS);
         }
         post(&limits.port, JOB_OBJECT_MSG_ACTIVE_PROCESS_LIMIT);
@@ -1071,21 +1079,38 @@ mod limit_tests {
             process: OwnedHandle::from(program),
             limits: Some(limits),
         };
-        let termination = super::super::watch(
+        let watched = super::super::watch(
             &mut tree,
             std::time::Instant::now(),
             Duration::from_secs(60),
             &super::super::CancelSignal::new(),
-        )
-        .expect("watch");
+        );
+        drop(tree);
+        // The job's kill-on-close has ended the sleeper.
+        held.wait().expect("the sleeper ends");
+        watched
+    }
+
+    /// A limit reported behind more than one poll's worth of other messages
+    /// still decides the run once the program has exited, and is confirmed
+    /// before the tree is stopped.
+    #[test]
+    fn an_exit_takes_every_queued_limit_report() {
+        let termination = watch_exited_program(MAX_DRAINED_MESSAGES + 44).expect("watch");
         assert_eq!(
             termination,
             Termination::LimitExceeded {
                 limit: ResourceLimit::Processes
             }
         );
-        drop(tree);
-        // The job's kill-on-close has ended the sleeper.
-        held.wait().expect("the sleeper ends");
+    }
+
+    /// When more messages are queued at exit than the bounded check takes,
+    /// the run is not reported as a normal exit.
+    #[test]
+    fn an_exit_beyond_the_message_budget_is_not_a_normal_exit() {
+        let watched = watch_exited_program(MAX_DRAINED_MESSAGES * MAX_EXIT_BATCHES + 1);
+        let error = watched.expect_err("the check could not finish");
+        assert!(error.to_string().contains("still queued"), "{error}");
     }
 }
