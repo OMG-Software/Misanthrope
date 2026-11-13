@@ -84,6 +84,43 @@ pub enum RunResult {
     /// The tree or its output was not observed closed. Processes may remain.
     /// The run stays pending until it is acknowledged.
     CleanupUnconfirmed,
+    /// The tree reached one of its limits and was terminated.
+    LimitExceeded { limit: LimitKind },
+}
+
+/// A tree limit, as recorded.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LimitKind {
+    /// Memory for the whole tree.
+    Memory,
+    /// Processes alive at once (tasks on Linux).
+    Processes,
+    /// CPU time summed over the tree.
+    CpuTime,
+}
+
+/// The tree limits a run started with.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LimitsRecord {
+    /// Memory for the whole tree, in bytes.
+    pub max_memory_bytes: u64,
+    /// Processes alive at once.
+    pub max_processes: u32,
+    /// CPU time for the whole tree, in milliseconds.
+    pub max_cpu_ms: u64,
+}
+
+/// What a limited tree used.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct UsageRecord {
+    /// CPU time summed over the tree, in milliseconds.
+    pub cpu_ms: u64,
+    /// Peak memory, when the platform reported it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_memory_bytes: Option<u64>,
 }
 
 /// The intent recorded before a program starts.
@@ -113,6 +150,10 @@ pub struct RunStart {
     pub working_directory: NativePath,
     /// The Unix-domain socket mode.
     pub unix_sockets: SocketMode,
+    /// The tree limits. Every run since 0.17.0 records them; earlier runs
+    /// had none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<LimitsRecord>,
 }
 
 /// The outcome recorded after a run.
@@ -129,6 +170,9 @@ pub struct RunFinish {
     pub stdout_bytes: u64,
     /// Every byte the tree wrote to standard error.
     pub stderr_bytes: u64,
+    /// What a limited tree used, when its outcome was observed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<UsageRecord>,
 }
 
 /// One strict JSONL event.
@@ -637,6 +681,11 @@ impl RunJournal {
                     || !valid_digest(&start.arguments_sha256)
                     || start.profile_name.is_empty()
                     || start.profile_name.len() > crate::control::MAX_PROFILE_NAME_CHARS
+                    || start.limits.is_some_and(|limits| {
+                        limits.max_memory_bytes == 0
+                            || limits.max_processes == 0
+                            || limits.max_cpu_ms == 0
+                    })
                 {
                     return Err(RunJournalError::Invalid("invalid or duplicate run start"));
                 }
@@ -658,6 +707,11 @@ impl RunJournal {
                 if started != finish.confinement.is_some() {
                     return Err(RunJournalError::Invalid(
                         "an outcome must name its confinement exactly when the program started",
+                    ));
+                }
+                if !started && finish.usage.is_some() {
+                    return Err(RunJournalError::Invalid(
+                        "a run that did not start has no usage",
                     ));
                 }
                 if finish.result == RunResult::CleanupUnconfirmed {

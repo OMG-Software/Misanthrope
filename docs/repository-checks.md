@@ -68,6 +68,10 @@ Its no-build scan is separate from the locked Cargo checks in
 application security. There is no frontend source to scan yet. Add other source
 languages deliberately when the implementation needs them.
 
+On Ubuntu, the Rust workflow enables lingering for the runner user and waits
+for its user service manager before the tests. The run and tree-limit tests
+start delegated `systemd-run --user` scopes and fail without one.
+
 ## SonarQube Cloud
 
 Project: [OMGCode](https://sonarcloud.io/project/overview?id=OMG-Software_OMGCode)

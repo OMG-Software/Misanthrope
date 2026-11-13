@@ -45,3 +45,4 @@ meaningful alternative does not need an ADR.
 | [0028: Confine Linux runs with Landlock and a socket filter](0028-confine-linux-runs-with-landlock-and-a-socket-filter.md) | Accepted | 2026-11-11 |
 | [0029: Confine Windows runs in a workspace AppContainer with recorded grants](0029-confine-windows-runs-in-a-workspace-appcontainer-with-recorded-grants.md) | Accepted | 2026-11-11 |
 | [0030: Run trusted commands through recorded toolchain profiles](0030-run-trusted-commands-through-recorded-toolchain-profiles.md) | Accepted | 2026-11-11 |
+| [0031: Limit whole run trees with job objects and delegated cgroups](0031-limit-whole-run-trees-with-job-objects-and-delegated-cgroups.md) | Accepted | 2026-11-12 |

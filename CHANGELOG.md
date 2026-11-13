@@ -6,6 +6,20 @@ Changes are recorded here before a release version is assigned.
 
 ### Added
 
+- Version 0.17.0 limits every trusted run as a whole tree. See ADR-0031.
+  - **Limits:** `--max-memory-mib` (default 8192), `--max-processes`
+    (default 1024), and `--max-cpu-secs` (default 7200). Values out of range
+    are refused before anything is recorded.
+  - **Windows:** the run's job object gets a job memory limit and an active
+    process limit; CPU time comes from the job's accounting.
+  - **Linux:** OMGCode must run in a delegated cgroup v2, for example under
+    `systemd-run --user --scope -p Delegate=yes`. Each run gets its own child
+    cgroup with `memory.max`, no swap, group OOM kill, and `pids.max`. A run
+    outside a delegated cgroup is refused before it is recorded.
+  - **Result:** reaching a limit ends the whole tree and records
+    `limit_exceeded` with the limit. `run_started` records the limits;
+    `run_finished` records CPU time and, where available, peak memory.
+    Records written by 0.16.0 still replay.
 - Version 0.16.0 adds the trusted CLI command `omgcode run <workspace-id>
   --profile <name> -- <program> [arguments]`. It runs one program in a
   workspace whose `execute` preference is enabled.

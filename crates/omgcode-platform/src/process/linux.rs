@@ -6,8 +6,10 @@
 //! ruleset for a confined run, and installs a seccomp filter. The filter makes
 //! `setsid` and `setpgid` fail with `EPERM`, so `kill(-pgid)` reaches the whole
 //! tree; for a confined run it also refuses sockets and `io_uring`. Descendants
-//! inherit both the ruleset and the filter.
+//! inherit both the ruleset and the filter. A run with tree limits first joins
+//! its own cgroup, which also kills and observes the tree.
 
+pub(super) mod cgroup;
 mod landlock;
 mod seccomp;
 
@@ -20,11 +22,13 @@ use std::time::Instant;
 use rustix::io::Errno;
 use rustix::process::{Pid, Signal};
 
+use self::cgroup::RunCgroup;
 use self::landlock::Ruleset;
 use self::seccomp::FilterScope;
 use super::{
     AppliedConfinement, CancelSignal, Capture, Confinement, ProcessError, ProcessLimits,
-    ProcessOutcome, ProcessSpec, ProcessTree, Termination, stop_tree, supervise,
+    ProcessOutcome, ProcessSpec, ProcessTree, ResourceLimit, Termination, TreeUsage, stop_tree,
+    supervise,
 };
 
 const SECCOMP_MODE_FILTER: libc::c_ulong = 2;
@@ -52,9 +56,11 @@ pub(super) fn run(
             (filter, Some(ruleset), applied)
         }
     };
-    // The parent keeps `ruleset` open until `spawn` returns; the child uses
-    // its inherited copy of the descriptor, which closes at `exec`.
+    let cgroup = limits.tree.map(RunCgroup::create).transpose()?;
+    // The parent keeps `ruleset` and the cgroup open until `spawn` returns;
+    // the child uses its inherited copies, which close at `exec`.
     let ruleset_fd = ruleset.as_ref().map(Ruleset::raw_fd);
+    let cgroup_fd = cgroup.as_ref().map(RunCgroup::procs_fd);
     let parent = rustix::process::getpid();
     let mut command = Command::new(&spec.program);
     command
@@ -73,7 +79,7 @@ pub(super) fn run(
     // closure.
     #[allow(unsafe_code)]
     unsafe {
-        command.pre_exec(move || prepare_child(parent, &filter, ruleset_fd));
+        command.pre_exec(move || prepare_child(parent, &filter, ruleset_fd, cgroup_fd));
     }
     let spawned = command.spawn();
     drop(ruleset);
@@ -81,14 +87,14 @@ pub(super) fn run(
     let started = Instant::now();
     let group = Pid::from_child(&child);
     let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
-        let mut tree = LinuxTree::new(child, group);
+        let mut tree = LinuxTree::new(child, group, cgroup);
         stop_tree(&mut tree, limits.cleanup_timeout)?;
         tree.confirmed = true;
         return Err(ProcessError::Supervision(io::Error::other(
             "the child's output pipes were not created",
         )));
     };
-    let mut tree = LinuxTree::new(child, group);
+    let mut tree = LinuxTree::new(child, group, cgroup);
     let capture = match Capture::start(stdout, stderr, limits) {
         Ok(capture) => capture,
         Err(error) => {
@@ -104,13 +110,18 @@ pub(super) fn run(
     result
 }
 
-/// Steps run in the child between `fork` and `exec`. Landlock follows
+/// Steps run in the child between `fork` and `exec`. The cgroup comes first,
+/// so every later step and every descendant is counted. Landlock follows
 /// `no_new_privs`, which it requires, and precedes the seccomp filter.
 fn prepare_child(
     parent: Pid,
     filter: &[libc::sock_filter],
     ruleset: Option<RawFd>,
+    cgroup: Option<RawFd>,
 ) -> io::Result<()> {
+    if let Some(procs) = cgroup {
+        cgroup::join(procs)?;
+    }
     rustix::process::set_parent_process_death_signal(Some(Signal::KILL))?;
     // The death signal is armed only for the current parent; if it already
     // exited, the child must not run unsupervised.
@@ -190,16 +201,19 @@ fn install_filter(filter: &[libc::sock_filter]) -> io::Result<()> {
 struct LinuxTree {
     child: Child,
     group: Pid,
+    /// The run's cgroup when tree limits apply.
+    cgroup: Option<RunCgroup>,
     reaped: bool,
     /// Set once the tree was observed empty; `Drop` then has nothing to do.
     confirmed: bool,
 }
 
 impl LinuxTree {
-    fn new(child: Child, group: Pid) -> Self {
+    fn new(child: Child, group: Pid, cgroup: Option<RunCgroup>) -> Self {
         Self {
             child,
             group,
+            cgroup,
             reaped: false,
             confirmed: false,
         }
@@ -226,9 +240,32 @@ impl ProcessTree for LinuxTree {
     }
 
     fn terminate(&mut self) -> io::Result<()> {
+        if let Some(cgroup) = &self.cgroup {
+            cgroup.kill()?;
+        }
         match rustix::process::kill_process_group(self.group, Signal::KILL) {
             Ok(()) | Err(Errno::SRCH) => Ok(()),
             Err(error) => Err(error.into()),
+        }
+    }
+
+    fn limit_reached(&mut self) -> io::Result<Option<ResourceLimit>> {
+        match &mut self.cgroup {
+            Some(cgroup) => cgroup.limit_reached(),
+            None => Ok(None),
+        }
+    }
+
+    fn usage(&mut self) -> io::Result<Option<TreeUsage>> {
+        self.cgroup.as_ref().map(RunCgroup::usage).transpose()
+    }
+
+    fn release(&mut self) -> Result<(), ProcessError> {
+        match &mut self.cgroup {
+            Some(cgroup) => cgroup.remove().map_err(|_| {
+                ProcessError::CleanupUnconfirmed("the run's cgroup could not be removed")
+            }),
+            None => Ok(()),
         }
     }
 
@@ -239,6 +276,11 @@ impl ProcessTree for LinuxTree {
                 return Ok(false);
             }
             self.reaped = true;
+        }
+        if let Some(cgroup) = &self.cgroup
+            && !cgroup.is_empty()?
+        {
+            return Ok(false);
         }
         match rustix::process::test_kill_process_group(self.group) {
             Err(Errno::SRCH) => Ok(true),

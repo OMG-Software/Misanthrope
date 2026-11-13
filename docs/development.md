@@ -1,6 +1,6 @@
 # Build and run the core prototype
 
-OMGCode 0.16.0 is a developer CLI prototype with workspace permission
+OMGCode 0.17.0 is a developer CLI prototype with workspace permission
 settings and bounded native file operations through trusted operator commands.
 It can send a text conversation to an explicitly selected local LM Studio model
 and save that conversation. It can read/list files, exclusively create new
@@ -14,7 +14,8 @@ deletion removes one resolved private entry. The trusted `run` command starts
 one program in a workspace whose `execute` preference is enabled, under
 Landlock and a seccomp socket filter on Linux or a per-workspace AppContainer
 on Windows. It uses an operator-declared toolchain profile and records each
-run in a run journal. A program started by `run` can create, change, and
+run in a run journal. Every run is limited in memory, live processes, and CPU
+time. A program started by `run` can create, change, and
 delete workspace files without a checkpoint. The CLI's `file` commands cannot
 delete workspace files, and the CLI cannot use Git or connect to MCP servers.
 When a workspace enables `model_tools`, chat lets the local model read and list
@@ -182,9 +183,20 @@ On Linux a typical profile is `--root /usr --path /usr/bin` plus the
 toolchain's own root. The run receives only the profile's `PATH` and
 variables, plus runner-owned home and temporary locations. Output is printed,
 never stored. `--host-services` also needs `--host-services true` on the
-workspace and works only on Linux. The [execution guide](execution.md#trusted-runs)
+workspace and works only on Linux. `--max-memory-mib`, `--max-processes`, and
+`--max-cpu-secs` set the [tree limits](execution.md#tree-limits); the defaults
+are 8192 MiB, 1024, and 7200 seconds. The [execution guide](execution.md#trusted-runs)
 owns the checks, the journal, and the known limits, including those for Node
 on Windows.
+
+On Linux, start `run` in a delegated cgroup of its own, or it is refused:
+
+```text
+systemd-run --user --scope -p Delegate=yes -- omgcode --data-dir ~/omgcode-data run <workspace-id> --profile system -- cargo test
+```
+
+The scope must hold only that command, so do not start a shell inside it and
+run several commands there.
 
 When a root is configured, new sessions use stable IDs from the persisted
 workspace registration. Invalid settings or outside-root selections fail.
@@ -524,7 +536,9 @@ permissions, not with future OMGCode task restrictions.
 
 Run the [Cargo verification baseline](testing-standards.md#cargo-verification-baseline)
 on both Windows and Linux. The Rust workflow runs formatting, strict Clippy,
-unit/integration tests, and separate documentation tests. Tests use private data
+unit/integration tests, and separate documentation tests. On Linux the run and
+tree-limit tests start themselves in `systemd-run --user` scopes, so they need
+a running user service manager; without one they fail. Tests use private data
 and loopback fixtures. They do not call a live model. Live compatibility checks
 are explicit, bounded checks of a particular server/model/auth profile.
 

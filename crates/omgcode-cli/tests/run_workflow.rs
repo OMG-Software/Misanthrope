@@ -546,3 +546,87 @@ fn revoking_a_read_grant_stops_a_live_run() {
     );
     scene.close();
 }
+
+/// A busy loop that runs until it is stopped.
+#[cfg(target_os = "linux")]
+const SPIN: &str = "while :; do :; done";
+#[cfg(windows)]
+const SPIN: &str = "for /l %i in (1,0,2) do @rem";
+
+/// Every run records its tree limits. Reaching one ends the whole run, which
+/// records the limit and what the tree used.
+#[test]
+fn a_tree_limit_ends_the_run_and_is_recorded() {
+    let scene = Scene::new();
+    assert_success(&scene.add_profile("system", &[]));
+    let options = [
+        "--max-cpu-secs",
+        "1",
+        "--max-memory-mib",
+        "512",
+        "--max-processes",
+        "64",
+    ];
+    let run = run_json(&scene.run("system", &options, &shell(SPIN)));
+    assert_eq!(run["start"]["limits"]["max_cpu_ms"], 1000);
+    assert_eq!(
+        run["start"]["limits"]["max_memory_bytes"],
+        512u64 * 1024 * 1024
+    );
+    assert_eq!(run["start"]["limits"]["max_processes"], 64);
+    assert_eq!(run["finish"]["result"]["kind"], "limit_exceeded");
+    assert_eq!(run["finish"]["result"]["limit"], "cpu_time");
+    assert!(run["finish"]["usage"]["cpu_ms"].as_u64().expect("CPU time") >= 1000);
+    assert_eq!(last_result(&scene)["limit"], "cpu_time");
+    assert_eq!(scene.audit()["pending"], Value::Array(Vec::new()));
+    // Without flags, the default limits apply and are recorded.
+    let run = run_json(&scene.run("system", &[], &shell("exit 0")));
+    assert_eq!(run["finish"]["result"]["code"], 0);
+    assert_eq!(run["start"]["limits"]["max_processes"], 1024);
+    assert_eq!(run["start"]["limits"]["max_cpu_ms"], 7_200_000);
+    assert!(run["finish"]["usage"].is_object());
+    scene.close();
+}
+
+/// Out-of-range tree limits are refused before anything is recorded.
+#[test]
+fn out_of_range_tree_limits_are_refused_before_recording() {
+    let scene = Scene::new();
+    assert_success(&scene.add_profile("system", &[]));
+    for options in [
+        ["--max-memory-mib", "1"],
+        ["--max-memory-mib", "1048577"],
+        ["--max-processes", "0"],
+        ["--max-processes", "65537"],
+        ["--max-cpu-secs", "0"],
+        ["--max-cpu-secs", "604801"],
+    ] {
+        let output = scene.run("system", &options, &shell("exit 0"));
+        assert_error_code(&output, "configuration");
+    }
+    assert_no_runs(&scene);
+    scene.close();
+}
+
+/// On Linux, a run needs a delegated cgroup for its limits. A CLI started
+/// outside one is refused before anything is recorded.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_run_outside_a_delegated_cgroup_is_refused_before_recording() {
+    let scene = Scene::new();
+    assert_success(&scene.add_profile("system", &[]));
+    let output = scene.cli(&[
+        "run",
+        &scene.id,
+        "--profile",
+        "system",
+        "--",
+        "sh",
+        "-c",
+        "exit 0",
+    ]);
+    assert_error_code(&output, "run");
+    assert!(error_message(&output).contains("tree limits"));
+    assert_no_runs(&scene);
+    scene.close();
+}

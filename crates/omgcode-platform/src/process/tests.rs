@@ -19,6 +19,7 @@ use super::{
 
 #[cfg(target_os = "linux")]
 mod confinement;
+mod tree_limits;
 #[cfg(windows)]
 mod windows_confinement;
 
@@ -90,6 +91,9 @@ fn fixture() {
         "probe" => windows_confinement::probes(),
         #[cfg(windows)]
         "probe-grandchild" => windows_confinement::grandchild_probes(),
+        "hog-memory" => tree_limits::hog_memory(),
+        "spawn-many" => tree_limits::spawn_many(),
+        "spin" => tree_limits::spin(),
         #[cfg(target_os = "linux")]
         "signal" => {
             rustix::process::kill_process(rustix::process::getpid(), rustix::process::Signal::TERM)

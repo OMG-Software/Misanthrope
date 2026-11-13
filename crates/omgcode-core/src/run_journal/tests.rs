@@ -18,6 +18,11 @@ fn start(run_id: Uuid) -> RunStart {
         arguments_sha256: arguments_digest(&[OsString::from("a"), OsString::from("b")]),
         working_directory: NativePath::from_path(&std::env::temp_dir()).expect("native path"),
         unix_sockets: SocketMode::PairsOnly,
+        limits: Some(LimitsRecord {
+            max_memory_bytes: 8 << 30,
+            max_processes: 1024,
+            max_cpu_ms: 7_200_000,
+        }),
     }
 }
 
@@ -28,7 +33,80 @@ fn finished(result: RunResult) -> RunFinish {
         elapsed_ms: 12,
         stdout_bytes: 3,
         stderr_bytes: 0,
+        usage: None,
     }
+}
+
+/// Tree limits, a limit outcome, and usage replay. A start recorded before
+/// 0.17.0, with no limits, still replays. A run that did not start cannot
+/// report usage, and recorded limits cannot be zero.
+#[test]
+fn limits_and_usage_are_recorded_and_checked_on_replay() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let store = store_id();
+    let (limited, earlier) = (Uuid::new_v4(), Uuid::new_v4());
+    let mut journal = RunJournal::open(directory.path(), store).expect("journal");
+    journal.start(start(limited)).expect("start");
+    let mut old_start = start(earlier);
+    old_start.limits = None;
+    journal.start(old_start).expect("start without limits");
+    let mut outcome = finished(RunResult::LimitExceeded {
+        limit: LimitKind::Memory,
+    });
+    outcome.usage = Some(UsageRecord {
+        cpu_ms: 40,
+        peak_memory_bytes: Some(1 << 27),
+    });
+    journal.finish(limited, outcome).expect("finish");
+    drop(journal);
+    let text = fs::read_to_string(directory.path().join(FILE_NAME)).expect("journal text");
+    assert!(text.contains(r#""kind":"limit_exceeded","limit":"memory""#));
+    assert!(text.contains(r#""max_cpu_ms":7200000"#));
+    // The earlier start's line carries no limits field at all.
+    assert_eq!(text.matches("\"limits\"").count(), 1);
+    let journal = RunJournal::open(directory.path(), store).expect("replay");
+    assert_eq!(
+        journal.outcome(limited),
+        Some(RunResult::LimitExceeded {
+            limit: LimitKind::Memory
+        })
+    );
+    drop(journal);
+
+    let mut state = ReplayState::default();
+    let mut not_started = finished(RunResult::NotStarted);
+    not_started.usage = Some(UsageRecord {
+        cpu_ms: 0,
+        peak_memory_bytes: None,
+    });
+    let run = Uuid::new_v4();
+    let entries = [
+        RunAction::RunStarted { start: start(run) },
+        RunAction::RunFinished {
+            run_id: run,
+            finish: not_started,
+        },
+    ];
+    let mut zero = start(Uuid::new_v4());
+    zero.limits = Some(LimitsRecord {
+        max_memory_bytes: 0,
+        max_processes: 1,
+        max_cpu_ms: 1,
+    });
+    assert!(matches!(
+        RunJournal::apply(
+            &mut state.clone(),
+            &entry(store, 1, RunAction::RunStarted { start: zero }),
+            1,
+            store
+        ),
+        Err(RunJournalError::Invalid(_))
+    ));
+    RunJournal::apply(&mut state, &entry(store, 1, entries[0].clone()), 1, store).expect("start");
+    assert!(matches!(
+        RunJournal::apply(&mut state, &entry(store, 2, entries[1].clone()), 2, store),
+        Err(RunJournalError::Invalid(_))
+    ));
 }
 
 /// Intent and outcome pairs replay; several runs can be in flight at once.
@@ -171,6 +249,18 @@ fn starts_keep_room_for_pending_outcomes() {
     ));
 }
 
+/// One envelope for replay checks.
+fn entry(store: Uuid, sequence: u64, action: RunAction) -> RunEntry {
+    RunEntry {
+        schema_version: SCHEMA_VERSION,
+        store_id: store,
+        event_id: Uuid::new_v4(),
+        sequence,
+        timestamp: "2026-11-12T00:00:00Z".into(),
+        action,
+    }
+}
+
 /// The largest outcome and acknowledgement fit the reserved budget.
 #[test]
 fn outcome_events_fit_their_reserve() {
@@ -180,6 +270,10 @@ fn outcome_events_fit_their_reserve() {
         elapsed_ms: u64::MAX,
         stdout_bytes: u64::MAX,
         stderr_bytes: u64::MAX,
+        usage: Some(UsageRecord {
+            cpu_ms: u64::MAX,
+            peak_memory_bytes: Some(u64::MAX),
+        }),
     };
     for action in [
         RunAction::RunFinished {

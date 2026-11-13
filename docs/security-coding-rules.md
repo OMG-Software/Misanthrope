@@ -166,6 +166,10 @@ crate.
   `execute` preference, records the intent before the start and the outcome
   after it, and builds the environment from the profile only. Never inherit
   the caller's environment, and never search the caller's `PATH`.
+- Give every trusted run tree limits. Never start a run without them, and
+  never fall back to an unlimited run when they cannot be applied. On Linux a
+  run cgroup must be joined by the child before `exec`, and limit files must
+  stay outside the confined tree's Landlock rules.
 - Never record argument text, environment values, or output in a journal.
   Record the argument digest and byte counts.
 - Treat profile variables as public. Do not add a way to pass credentials

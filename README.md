@@ -253,7 +253,9 @@ processes, and host services.
 
 Linux confinement uses Landlock and seccomp
 ([ADR-0028](docs/adr/0028-confine-linux-runs-with-landlock-and-a-socket-filter.md));
-resource limits remain open.
+every trusted run is limited in memory, processes, and CPU time, through a
+job object on Windows and a delegated cgroup v2 on Linux
+([ADR-0031](docs/adr/0031-limit-whole-run-trees-with-job-objects-and-delegated-cgroups.md)).
 Windows confinement uses a per-workspace AppContainer with recorded ACL grants
 inside a Job Object
 ([ADR-0029](docs/adr/0029-confine-windows-runs-in-a-workspace-appcontainer-with-recorded-grants.md)).

@@ -19,7 +19,7 @@ use std::time::{Duration, Instant, SystemTime};
 use omgcode_platform::broker::RelativePath;
 use omgcode_platform::process::{
     self, AppliedConfinement, CapturedOutput, Confinement, ProcessError, ProcessOutcome,
-    ProcessSpec, Termination, UnixSocketAccess,
+    ProcessSpec, ResourceLimit, Termination, UnixSocketAccess,
 };
 use serde::Serialize;
 use thiserror::Error;
@@ -28,16 +28,26 @@ use uuid::Uuid;
 use crate::control::{ControlError, ControlStore, ProfilePlatform, ToolchainProfile};
 use crate::policy::{PermissionSet, WorkspaceId};
 use crate::run_journal::{
-    ConfinementRecord, PendingRun, RunFinish, RunJournal, RunJournalError, RunResult, RunStart,
-    SocketMode, arguments_digest, describe,
+    ConfinementRecord, LimitKind, LimitsRecord, PendingRun, RunFinish, RunJournal, RunJournalError,
+    RunResult, RunStart, SocketMode, UsageRecord, arguments_digest, describe,
 };
 use crate::session::{NativePath, SessionError};
 use crate::storage::{self, StorageError};
 use crate::workspace::DirectoryRecord;
 
 pub use omgcode_platform::interrupt::{InterruptWatch, cancel_on_interrupt};
-pub use omgcode_platform::process::{CancelSignal, ProcessLimits};
-pub use omgcode_platform::process::{MAX_CAPTURE_BYTES, MAX_DEADLINE};
+pub use omgcode_platform::process::{CancelSignal, ProcessLimits, TreeLimits};
+pub use omgcode_platform::process::{
+    MAX_CAPTURE_BYTES, MAX_DEADLINE, MAX_TREE_CPU_TIME, MAX_TREE_MEMORY_BYTES, MAX_TREE_PROCESSES,
+    MIN_TREE_MEMORY_BYTES,
+};
+
+/// Default tree memory limit for a trusted run: 8 GiB.
+pub const DEFAULT_TREE_MEMORY_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+/// Default tree process limit for a trusted run. Linux counts threads too.
+pub const DEFAULT_TREE_PROCESSES: u32 = 1024;
+/// Default tree CPU-time limit for a trusted run: two CPU-hours.
+pub const DEFAULT_TREE_CPU_TIME: Duration = Duration::from_secs(2 * 60 * 60);
 
 /// How long to wait for another command's hold on the control journal.
 const CONTROL_WAIT: Duration = Duration::from_secs(10);
@@ -69,7 +79,8 @@ pub struct RunRequest {
     /// Ask for host-service Unix-socket access. Needs the workspace
     /// `host_services` preference; refused on Windows.
     pub host_services: bool,
-    /// Deadline, output, and cleanup bounds.
+    /// Deadline, output, cleanup, and tree bounds. Tree limits are required;
+    /// a request without them is refused before anything is recorded.
     pub limits: ProcessLimits,
 }
 
@@ -173,6 +184,10 @@ pub enum RunError {
     /// A path could not be checked or encoded.
     #[error("run preparation failed: {0}")]
     Io(#[from] io::Error),
+    /// Tree limits cannot be applied on this host, for example because a
+    /// Linux runner is not in a delegated cgroup. Nothing was recorded.
+    #[error("tree limits cannot be applied: {0}")]
+    Limits(#[source] ProcessError),
     /// The intent was recorded, but nothing started. The outcome is recorded.
     #[error("run {run_id} did not start: {source}")]
     NotStarted {
@@ -676,11 +691,22 @@ fn settle(
                     Termination::DeadlineExceeded => RunResult::DeadlineExceeded,
                     Termination::Cancelled if revoked => RunResult::Revoked,
                     Termination::Cancelled => RunResult::Cancelled,
+                    Termination::LimitExceeded { limit } => RunResult::LimitExceeded {
+                        limit: match limit {
+                            ResourceLimit::Memory => LimitKind::Memory,
+                            ResourceLimit::Processes => LimitKind::Processes,
+                            ResourceLimit::CpuTime => LimitKind::CpuTime,
+                        },
+                    },
                 },
                 confinement: Some(record_confinement(outcome.confinement)),
                 elapsed_ms: millis(outcome.elapsed),
                 stdout_bytes: outcome.stdout.total_bytes,
                 stderr_bytes: outcome.stderr.total_bytes,
+                usage: outcome.usage.map(|usage| UsageRecord {
+                    cpu_ms: millis(usage.cpu_time),
+                    peak_memory_bytes: usage.peak_memory_bytes,
+                }),
             };
             (finish, Some(outcome), None)
         }
@@ -705,6 +731,7 @@ fn settle(
                 elapsed_ms: 0,
                 stdout_bytes: 0,
                 stderr_bytes: 0,
+                usage: None,
             };
             (finish, None, Some(error))
         }
@@ -744,6 +771,9 @@ fn prepare(
     platform: ProfilePlatform,
     data_root: &Path,
 ) -> Result<Prepared, RunError> {
+    let tree = request.limits.tree.ok_or(RunError::Refused(
+        "a trusted run needs tree limits; none were given",
+    ))?;
     let registration = control
         .workspace(request.workspace_id)
         .ok_or(ControlError::UnknownWorkspace)?;
@@ -765,6 +795,8 @@ fn prepare(
         ));
     }
     let roots = current_roots(control, profile)?;
+    // On Linux this needs a delegated cgroup; without one nothing is recorded.
+    process::check_tree_limits().map_err(RunError::Limits)?;
     let workspace = native_form(scope.workspace.live_path()?)?;
     let working_directory = working_directory(&scope.workspace, &workspace, request)?;
     let path_entries = profile
@@ -820,6 +852,11 @@ fn prepare(
         } else {
             SocketMode::PairsOnly
         },
+        limits: Some(LimitsRecord {
+            max_memory_bytes: tree.max_memory_bytes,
+            max_processes: tree.max_processes,
+            max_cpu_ms: millis(tree.max_cpu_time),
+        }),
     };
     Ok(Prepared {
         start,
@@ -1208,6 +1245,7 @@ mod tests {
             arguments_sha256: arguments_digest(&[]),
             working_directory: NativePath::from_path(&std::env::temp_dir()).expect("native path"),
             unix_sockets: SocketMode::PairsOnly,
+            limits: None,
         }
     }
 
@@ -1218,6 +1256,7 @@ mod tests {
             elapsed_ms: 1,
             stdout_bytes: 0,
             stderr_bytes: 0,
+            usage: None,
         }
     }
 
@@ -1379,6 +1418,7 @@ mod tests {
                     elapsed_ms: 1,
                     stdout_bytes: 0,
                     stderr_bytes: 0,
+                    usage: None,
                 },
             )
             .expect("finish");

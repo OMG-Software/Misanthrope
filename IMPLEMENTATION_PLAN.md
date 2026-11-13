@@ -49,9 +49,13 @@ This is a resume guide, not a replacement for the owning contracts in
   Unix-socket mode.
 - **PR #24** merged at `aa31976`: **Phase C3**, version **0.15.0**, with
   Windows AppContainer confinement and recorded, revocable container grants.
-- This branch, `codex/cli-run`: **Phase C4**, version **0.16.0**, with the
-  trusted CLI `run`, toolchain profiles, the run journal, and the
-  `host_services` preference. It started from `main` at `aa31976`.
+- **PR #25 and PR #26** merged at `4eeb12f`: **Phase C4**, version
+  **0.16.0**, with the trusted CLI `run`, toolchain profiles, the run journal,
+  and the `host_services` preference.
+- This branch, `codex/resource-limits`: **Phase C5**, version **0.17.0**, with
+  tree-wide memory, process, and CPU-time limits for every trusted run, and
+  fixes for the unaddressed PR #26 review comments. It started from `main` at
+  `4eeb12f`.
 
 Implemented today:
 
@@ -124,8 +128,7 @@ Not implemented:
   compaction, and standalone CLI checkpoint preparation.
 - Model write, process, network, Git, or MCP tools; per-call tool approval;
   and live provider tool-call qualification.
-- Model-callable process execution, tree-wide resource limits, task and
-  package networking, Git, MCP, runtime skills, memories, desktop/UI panels,
+- Model-callable process execution, disk limits, task and package networking, Git, MCP, runtime skills, memories, desktop/UI panels,
   compaction, or caches. Nothing calls the unconfined process runner.
 - Subscription/API-key provider profiles beyond the local LM Studio route.
 
@@ -434,7 +437,7 @@ on Windows, and trusted CLI commands as the first caller. See
   for toolchain roots, refusing `HostServices` on Windows for now, and journal
   records with trusted CLI commands. See
   [ADR-0029](docs/adr/0029-confine-windows-runs-in-a-workspace-appcontainer-with-recorded-grants.md).
-- **C4 (this branch, `codex/cli-run`):** trusted CLI `run` behind the `execute`
+- **C4 (PR #25 and PR #26):** trusted CLI `run` behind the `execute`
   preference. The user chose:
   - operator-declared toolchain profiles recorded with a revision;
   - a separate bounded run journal that stores no output;
@@ -444,11 +447,21 @@ on Windows, and trusted CLI commands as the first caller. See
 
   Java has not run, because no JDK was installed. See
   [ADR-0030](docs/adr/0030-run-trusted-commands-through-recorded-toolchain-profiles.md).
+- **C5 (this branch, `codex/resource-limits`):** tree-wide limits for every
+  trusted run. The user chose:
+  - a delegated cgroup v2 on Linux, with OMGCode started in its own
+    `systemd-run --user --scope -p Delegate=yes` scope;
+  - limits always applied, failing closed where they cannot be;
+  - memory, process-count, and CPU-time limits;
+  - `run` flags with defaults, recorded in the run journal.
+
+  See
+  [ADR-0031](docs/adr/0031-limit-whole-run-trees-with-job-objects-and-delegated-cgroups.md).
 
 Next decisions, not yet scheduled:
 
 - a package-network profile;
-- tree-wide resource limits;
+- a disk limit;
 - a model-callable command tool with per-call approval.
 
 ### Phase D: additional providers, streaming, and account lifecycle

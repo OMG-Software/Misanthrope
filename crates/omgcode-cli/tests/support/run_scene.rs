@@ -251,7 +251,14 @@ impl Scene {
         args.extend(options);
         args.push("--");
         args.extend(command);
-        run_cli_for(&self.data, &args, deadline)
+        let result =
+            run_with_deadline(run_command(&self.data, &args), deadline).expect("run OMGCode CLI");
+        assert!(
+            !result.timed_out,
+            "run exceeded its {deadline:?} deadline: stderr={}",
+            String::from_utf8_lossy(&result.output.stderr)
+        );
+        result.output
     }
 
     pub(crate) fn audit(&self) -> Value {
@@ -265,19 +272,42 @@ impl Scene {
     }
 
     pub(crate) fn command(&self, options: &[&str], command: &[&str]) -> Command {
-        let mut process = Command::new(env!("CARGO_BIN_EXE_omgcode"));
+        let mut args = vec!["run", self.id.as_str(), "--profile", "system"];
+        args.extend(options);
+        args.push("--");
+        args.extend(command);
+        let mut process = run_command(&self.data, &args);
         process
-            .env_remove("OMGCODE_LM_TOKEN")
-            .arg("--data-dir")
-            .arg(&self.data)
-            .args(["run", &self.id, "--profile", "system"])
-            .args(options)
-            .arg("--")
-            .args(command)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         process
+    }
+}
+
+/// A CLI `run` command as an operator starts it. On Linux, tree limits need
+/// a delegated cgroup, so the CLI starts in a scope of its own through
+/// `systemd-run --user --scope -p Delegate=yes`. In scope mode `systemd-run`
+/// replaces itself with the CLI, so the child's process ID, signals, standard
+/// streams, and exit status are the CLI's own.
+pub(crate) fn run_command(data_root: &Path, args: &[&str]) -> Command {
+    #[cfg(target_os = "linux")]
+    {
+        let mut command = Command::new("systemd-run");
+        command
+            .args(["--user", "--scope", "--quiet", "-p", "Delegate=yes", "--"])
+            .arg(env!("CARGO_BIN_EXE_omgcode"))
+            .env_remove("OMGCODE_LM_TOKEN")
+            .env_remove(super::HANG_FIXTURE_ENV)
+            .env(super::HOST_ENV_SENTINEL, super::HOST_ENV_SENTINEL_VALUE)
+            .arg("--data-dir")
+            .arg(data_root)
+            .args(args);
+        command
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        cli_command(data_root, args)
     }
 }
 
