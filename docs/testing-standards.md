@@ -143,7 +143,7 @@ As the relevant components are implemented, include:
 | Processes | Descendant escape attempts, limits, cleanup, startup failure |
 | Disk limits | Sampled growth ends the whole run as `disk`, baseline excludes prior content, links and reparse points are not followed, the ceiling stops a scan early, unreadable or oversized roots fail closed |
 | Networking | Disabled egress, host-local access, redirects, provider routing |
-| Package network | Contract only, not implemented: no run accepts a profile. A future mechanism must cover allowed-origin success, undeclared-origin refusal, redirect and credential refusal, offline fallback, and platform refusal ([ADR-0034](adr/0034-gate-package-networking-behind-enforceable-destination-control.md)) |
+| Package network | Profile storage is implemented: recording, replay, revision, origin normalization, duplicate and invalid-origin refusal, and removal. No run accepts a profile and no destination filter exists. A future mechanism must cover allowed-origin success, undeclared-origin refusal, redirect and credential refusal, offline fallback, and platform refusal ([ADR-0034](adr/0034-gate-package-networking-behind-enforceable-destination-control.md)) |
 | Providers | Partial/malformed streams, duplicate calls, interruption, retries |
 | Authentication | Callback binding, consent, subscription entitlement, refresh, revocation, account/billing isolation |
 | Toolchains | Native compiler/SDK dependencies, interpreters, formatter/build/test flows, caches, helper processes, denied host access |

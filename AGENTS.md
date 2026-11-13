@@ -18,7 +18,8 @@ filter on Linux or a per-workspace AppContainer on Windows. It never falls back
 to the unconfined runner. Every run has tree-wide memory, process-count,
 CPU-time, and sampled net disk-growth limits; on Linux the CLI must run in a
 delegated cgroup v2. The disk limit measures writable roots and is not a
-filesystem quota. Trusted CLI commands record, apply, and revoke
+filesystem quota. Package-network profiles are recorded as configuration only;
+no run uses them. Trusted CLI commands record, apply, and revoke
 Windows container ACL grants. Follow the [execution contract](docs/execution.md).
 The bundled web interface and most planned features are not implemented.
 The core validates replacement records and can prepare protected checkpoints on

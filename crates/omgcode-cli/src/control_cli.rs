@@ -3,7 +3,9 @@
 #![forbid(unsafe_code)]
 
 use clap::{Args, Subcommand, ValueEnum};
-use omgcode_core::control::{ContainerGrantAccess, ControlError, ControlStore, ProfileDeclaration};
+use omgcode_core::control::{
+    ContainerGrantAccess, ControlError, ControlStore, PackageProfileDeclaration, ProfileDeclaration,
+};
 use omgcode_core::policy::{Operation, PermissionSet, PolicyRequest, WorkspaceId};
 use omgcode_core::run;
 use serde_json::json;
@@ -61,6 +63,28 @@ pub(crate) enum WorkspaceCommand {
         #[arg(long)]
         revision: u64,
     },
+    /// Record a package-network profile. Configuration only: no run accepts it.
+    PackageProfileAdd(PackageProfileAddArgs),
+    /// Show one recorded package-network profile.
+    PackageProfileShow { name: String },
+    /// Remove a package-network profile.
+    PackageProfileRemove {
+        name: String,
+        #[arg(long)]
+        revision: u64,
+    },
+}
+
+#[derive(Args)]
+pub(crate) struct PackageProfileAddArgs {
+    /// The profile name: ASCII letters, digits, '.', '-', or '_'.
+    name: String,
+    /// A registry origin, such as https://registry.example.com/api/.
+    /// Repeat for each origin. http is accepted only for a loopback fixture.
+    #[arg(long = "registry", required = true)]
+    registries: Vec<String>,
+    #[arg(long)]
+    revision: u64,
 }
 
 #[derive(Args)]
@@ -217,6 +241,29 @@ pub(crate) fn run(action: WorkspaceCommand, data_root: &Path) -> Result<(), CliE
             stop_withdrawn_runs(data_root, &[])?;
             print_json(&output)
         }
+        WorkspaceCommand::PackageProfileAdd(args) => package_profile_add(args, data_root),
+        WorkspaceCommand::PackageProfileShow { name } => {
+            let store = open_existing(data_root)?
+                .ok_or_else(|| CliError::new("control", "Workspace control is not initialized"))?;
+            let profile = store
+                .package_profile(&name)
+                .ok_or_else(|| control_error(ControlError::UnknownPackageProfile))?;
+            print_json(&json!({ "package_profile": profile }))
+        }
+        WorkspaceCommand::PackageProfileRemove { name, revision } => {
+            let mut store = open_existing(data_root)?
+                .ok_or_else(|| CliError::new("control", "Workspace control is not initialized"))?;
+            let profile_id = store
+                .remove_package_profile(&name, revision)
+                .map_err(control_error)?;
+            let output = json!({
+                "removed_package_profile_id": profile_id,
+                "snapshot": store.snapshot(),
+            });
+            drop(store);
+            stop_withdrawn_runs(data_root, &[])?;
+            print_json(&output)
+        }
         WorkspaceCommand::ContainerRevoke { grant } => {
             let mut store = open_existing(data_root)?
                 .ok_or_else(|| CliError::new("control", "Workspace control is not initialized"))?;
@@ -294,6 +341,24 @@ fn profile_add(args: ProfileAddArgs, data_root: &Path) -> Result<(), CliError> {
         .map_err(control_error)?;
     print_json(&json!({
         "profile_id": profile.id(),
+        "snapshot": store.snapshot(),
+    }))
+}
+
+fn package_profile_add(args: PackageProfileAddArgs, data_root: &Path) -> Result<(), CliError> {
+    let mut store = open_existing(data_root)?
+        .ok_or_else(|| CliError::new("control", "Workspace control is not initialized"))?;
+    let profile = store
+        .add_package_profile(
+            &PackageProfileDeclaration {
+                name: args.name,
+                origins: args.registries,
+            },
+            args.revision,
+        )
+        .map_err(control_error)?;
+    print_json(&json!({
+        "package_profile_id": profile.id(),
         "snapshot": store.snapshot(),
     }))
 }

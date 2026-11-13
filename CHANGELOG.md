@@ -6,6 +6,21 @@ Changes are recorded here before a release version is assigned.
 
 ### Added
 
+- Version 0.20.0 records operator-declared package-network profiles as
+  configuration only. See ADR-0034.
+  - **Commands:** `workspace package-profile-add`, `package-profile-show`, and
+    `package-profile-remove` use the expected settings revision. `status`
+    lists recorded profiles.
+  - **Contents:** a name and 1 to 8 registry origins. An origin is `https`
+    with a host, optional port, and optional path prefix; `http` is accepted
+    only for `localhost`, `127.0.0.1`, or `::1`. Credentials, queries,
+    fragments, wildcards, and path traversal are refused.
+  - **Not enforcement:** no run accepts a profile, `--network` remains
+    all-or-nothing, and no destination filter exists. A profile never
+    authorizes network access or a run.
+  - **Records:** `package_profile_added` and `package_profile_removed` events
+    in the control journal. A control journal written by 0.20.0 cannot be read
+    by 0.19.0; 0.20.0 reads earlier journals.
 - Version 0.19.0 bounds each trusted run's net disk growth. See ADR-0033.
   - **Flag:** `--max-disk-mib` (16 to 1048576, default 8192) is required for
     every trusted run. A run without a disk limit is refused before anything

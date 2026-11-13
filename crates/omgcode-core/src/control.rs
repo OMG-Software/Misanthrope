@@ -23,6 +23,7 @@ use crate::storage::{self, StorageError};
 use crate::workspace::DirectoryRecord;
 
 mod container;
+mod package;
 mod profile;
 
 pub use container::{
@@ -31,6 +32,10 @@ pub use container::{
 };
 /// Whether this platform can record and apply container grants.
 pub use omgcode_platform::container::CONTAINER_GRANTS_SUPPORTED;
+pub use package::{
+    MAX_PACKAGE_ORIGIN_BYTES, MAX_PACKAGE_ORIGINS, MAX_PACKAGE_PROFILES, PackageOrigin,
+    PackageProfile, PackageProfileDeclaration, PackageProfileStatus, PackageScheme, parse_origin,
+};
 pub use profile::{
     MAX_PROFILE_NAME_CHARS, MAX_PROFILE_PATH_ENTRIES, MAX_PROFILE_ROOTS, MAX_PROFILE_VARIABLES,
     MAX_PROFILES, MAX_VARIABLE_NAME_BYTES, MAX_VARIABLE_VALUE_BYTES, ProfileDeclaration,
@@ -103,6 +108,12 @@ pub enum ControlError {
     /// The requested toolchain profile is invalid or outside the allowed scope.
     #[error("toolchain profile refused: {0}")]
     ProfileRefused(&'static str),
+    /// No recorded package-network profile has this name.
+    #[error("package-network profile is not recorded")]
+    UnknownPackageProfile,
+    /// The requested package-network profile is invalid.
+    #[error("package-network profile refused: {0}")]
+    PackageProfileRefused(&'static str),
 }
 
 impl From<StorageError> for ControlError {
@@ -158,6 +169,8 @@ pub struct ControlSnapshot {
     container_grants: Vec<ContainerGrantStatus>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     profiles: Vec<ProfileStatus>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    package_profiles: Vec<PackageProfileStatus>,
     /// Container revocations requested per workspace since the journal was
     /// created. Derived on replay and never serialized; run watchers compare
     /// it with the count when their run started.
@@ -256,6 +269,12 @@ enum Action {
         profile: ToolchainProfile,
     },
     ProfileRemoved {
+        profile_id: Uuid,
+    },
+    PackageProfileAdded {
+        profile: PackageProfile,
+    },
+    PackageProfileRemoved {
         profile_id: Uuid,
     },
 }
@@ -423,6 +442,7 @@ impl ControlStore {
                 configuration_only: true,
                 container_grants: Vec::new(),
                 profiles: Vec::new(),
+                package_profiles: Vec::new(),
                 grant_revocations: BTreeMap::new(),
             },
             entries: Vec::new(),
@@ -912,6 +932,9 @@ impl ControlStore {
             | Action::ContainerGrantRevoked { .. } => container::apply(state, &entry.action)?,
             Action::ProfileAdded { .. } | Action::ProfileRemoved { .. } => {
                 profile::apply(state, &entry.action, revision)?;
+            }
+            Action::PackageProfileAdded { .. } | Action::PackageProfileRemoved { .. } => {
+                package::apply(state, &entry.action, revision)?;
             }
         }
         state.revision = revision;

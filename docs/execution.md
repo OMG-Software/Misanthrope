@@ -46,9 +46,9 @@ run bounds the allocated bytes it may add to its writable roots. No portable
 per-run disk quota exists, so the supervisor measures growth on a separate
 thread rather than the kernel enforcing a quota.
 
-The [package-network profile](#package-network-profile-contract-only) is a
-contract only (ADR-0034). No run accepts one, and `--network` remains
-all-or-nothing.
+The [package-network profile](#package-network-profile-contract-only) is
+recorded as configuration only (ADR-0034) since version 0.20.0. No run accepts
+one, and `--network` remains all-or-nothing.
 
 ## Accepted decisions
 
@@ -209,17 +209,23 @@ adds no paths.
 
 ### Package-network profile (contract only)
 
-The user selected a package-network profile as the next increment. This phase
-defines only its contract; see
-[ADR-0034](adr/0034-gate-package-networking-behind-enforceable-destination-control.md).
-No run accepts a profile, the runtime has no destination allowlist, and
-`--network` remains all-or-nothing.
+The user selected a package-network profile as the next increment.
+[ADR-0034](adr/0034-gate-package-networking-behind-enforceable-destination-control.md)
+defines its contract, and version 0.20.0 records operator-declared profiles as
+configuration. No run accepts a profile, the runtime has no destination
+allowlist, and `--network` remains all-or-nothing.
 
-A profile, when implemented, is an operator-declared, revisioned list of
-registry origins: scheme, host, optional port, and an optional path prefix.
-Normal use is `https`; `http` is allowed only for a loopback test fixture. A
-profile has no credentials, wildcards, user information, or redirects to
-another origin. It is configuration only and never authorizes a run.
+A profile is an operator-declared, revisioned list of registry origins:
+scheme, host, optional port, and an optional path prefix. Normal use is
+`https`; `http` is allowed only for a loopback test fixture. A profile has no
+credentials, wildcards, user information, or redirects to another origin. It
+is configuration only and never authorizes a run. At most 32 profiles are
+recorded, each with 1 to 8 origins.
+
+`workspace package-profile-add <name> --registry <origin>... --revision <n>`,
+`package-profile-show <name>`, and
+`package-profile-remove <name> --revision <n>` manage the records. Each
+mutation needs the expected settings revision and increments it.
 
 Any implementation must pass these gates before it can be described as
 implemented:
@@ -859,10 +865,10 @@ These remain true after C6:
   `listen` on an unbound socket, which takes a port the kernel chooses. UDP
   bind is never limited. See
   [network access](#network-access).
-- **No package-network enforcement.** A package-network profile is contract
-  only (ADR-0034). No run accepts one, and it does not narrow `--network`.
-  A proxy or proxy environment variables are not a boundary: a hostile tree
-  can connect directly. See
+- **No package-network enforcement.** Package-network profiles are recorded as
+  configuration only (ADR-0034). No run accepts one, and it does not narrow
+  `--network`. A proxy or proxy environment variables are not a boundary: a
+  hostile tree can connect directly. See
   [package-network profile](#package-network-profile-contract-only).
 - **Network coverage.** Network access was tested on Windows 11 build 26300
   and WSL 6.6 (Landlock ABI 3) only, including a TLS fetch with the system
@@ -914,7 +920,8 @@ These remain true after C6:
 | C5 (0.17.0) | Tree-wide memory, process, and CPU-time limits | Done: see [tree limits](#tree-limits) and ADR-0031 |
 | C6 (0.18.0) | Outbound network access behind `task_network` and `--network` | Done: see [network access](#network-access) and ADR-0032 |
 | C7 (0.19.0) | Sampled disk-growth limit for every trusted run | Done: see [disk growth](#disk-growth) and ADR-0033 |
-| C8 (contract only, 0.19.0) | Package-network profile contract and implementation gate | Done as a contract: see [package-network profile](#package-network-profile-contract-only) and ADR-0034. No runtime flag and no destination enforcement. |
+| C8 (contract only, 0.19.0) | Package-network profile contract and implementation gate | Done as a contract: see [package-network profile](#package-network-profile-contract-only) and ADR-0034. No destination enforcement. |
+| C9 (0.20.0) | Package-network profile records | Done as configuration: `workspace package-profile-add/show/remove` and the control journal events. No run accepts a profile. |
 
 Later work needs its own decisions:
 

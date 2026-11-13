@@ -90,6 +90,8 @@ implementation:
 
 - No runtime capability is added, and the product status must not describe
   package networking or destination filtering as implemented.
+- Version 0.20.0 records operator-declared profiles as configuration. That does
+  not change this gate, and no run accepts one.
 - Package downloads still require the all-or-nothing `task_network` and
   `--network` path, or an offline cache the operator prepares.
 - The profile contract and the implementation gate are available for a future

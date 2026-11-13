@@ -228,6 +228,8 @@ fn run(cli: Cli) -> Result<(), CliError> {
             "workspace_container_grants": omgcode_core::control::CONTAINER_GRANTS_SUPPORTED,
             "workspace_file_tools": false,
             "toolchain_profiles": RUN_SUPPORTED,
+            "package_network_profiles": true,
+            "package_network_enforcement": false,
             "process_execution": if RUN_SUPPORTED {
                 serde_json::Value::from("trusted_cli_only")
             } else {

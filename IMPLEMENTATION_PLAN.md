@@ -58,10 +58,11 @@ This is a resume guide, not a replacement for the owning contracts in
   outbound network access behind `task_network` and `--network`.
 - `codex/disk-limit` (local commit `0426e42`): **Phase C7**, version
   **0.19.0**, with a sampled net disk-growth limit for every trusted run.
-- This branch, `codex/package-network-profile`: **Phase C8**, a contract-only
-  package-network profile and implementation gate (ADR-0034). It adds no
-  runtime flag, no destination enforcement, and no version bump. It is stacked
-  on C7 at `0426e42`.
+- This branch, `codex/package-network-profile`: **Phase C8** at `16d8945`,
+  the contract-only package-network profile and implementation gate
+  (ADR-0034), plus **Phase C9**, version **0.20.0**, with operator-declared
+  package-network profile records. It is stacked on C7 at `0426e42`. No run
+  accepts a profile and no destination filter exists.
 
 Implemented today:
 
@@ -130,9 +131,9 @@ Implemented today:
   [ADR-0032](docs/adr/0032-allow-outbound-network-for-trusted-runs-through-task-network.md),
   and [ADR-0033](docs/adr/0033-bound-run-disk-growth-by-sampling-writable-roots.md).
 - A [package-network profile](docs/execution.md#package-network-profile-contract-only)
-  contract and implementation gate (ADR-0034). No run accepts a profile, no
-  destination filter exists, and `--network` remains all-or-nothing. This is
-  configuration/contract work, not an implemented network control.
+  contract and implementation gate (ADR-0034). Version 0.20.0 records
+  operator-declared profiles as configuration only. No run accepts a profile,
+  no destination filter exists, and `--network` remains all-or-nothing.
 - Trusted `file restore` through a new checkpoint and
   `file delete-checkpoint --permanent` for one resolved checkpoint, on the same
   filesystems as apply. Neither is power-loss qualified. See
@@ -488,6 +489,10 @@ on Windows, and trusted CLI commands as the first caller. See
   profile, then chose contract-only after the primitive review. No run accepts
   a profile; an advisory proxy is rejected because the tree can bypass it.
   See [ADR-0034](docs/adr/0034-gate-package-networking-behind-enforceable-destination-control.md).
+- **C9 (this branch, version 0.20.0):** operator-declared package-network
+  profile records. Profiles are stored through the control journal, with
+  revisions and strict origin validation. They are configuration only; no run
+  accepts one and no destination filter exists.
 
 Next decisions, not yet scheduled:
 

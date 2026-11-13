@@ -127,10 +127,11 @@ workspace `task_network` preference and its `--network` flag; see
 [network access](execution.md#network-access). There is no destination
 allowlist. The
 [package-network profile](execution.md#package-network-profile-contract-only)
-is contract only (ADR-0034): no run accepts one, and a proxy or proxy
-environment variables are not a boundary. Registry credentials require a
-narrow reviewed credential path. Offline tasks must work with available
-dependencies or explain which download is needed.
+is recorded as configuration only (ADR-0034): `workspace
+package-profile-add/show/remove` store registry origins, but no run accepts a
+profile, and a proxy or proxy environment variables are not a boundary.
+Registry credentials require a narrow reviewed credential path. Offline tasks
+must work with available dependencies or explain which download is needed.
 
 Development servers, debuggers, license servers, hardware access, and other
 services can need extra resources. Treat each as an explicit capability rather
@@ -157,12 +158,12 @@ cancellation, denied host-data access, and disabled networking. Include missing
 dependencies, spaces and native path forms, stale tool profiles, concurrent
 builds, disk exhaustion, and hostile build/package scripts.
 
-The package-network acceptance case cannot run yet. The profile is contract
-only (ADR-0034), and no runtime mechanism narrows destinations. A future
-implementation must prove that an approved profile reaches its declared
-registry destinations and rejects every other destination, including direct
-IP, IPv6, UDP, DNS, and proxy-bypass paths. Model-provider connectivity alone
-must not enable package or general task traffic.
+The package-network acceptance case cannot run yet. Profiles are recorded as
+configuration only (ADR-0034), and no runtime mechanism narrows destinations.
+A future implementation must prove that an approved profile reaches its
+declared registry destinations and rejects every other destination, including
+direct IP, IPv6, UDP, DNS, and proxy-bypass paths. Model-provider connectivity
+alone must not enable package or general task traffic.
 
 Record the selected profile with task results so failures are reproducible.
 Do not claim general support from locating an executable or printing its version.

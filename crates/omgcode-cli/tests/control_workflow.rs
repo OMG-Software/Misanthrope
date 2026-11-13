@@ -448,6 +448,8 @@ fn capabilities_report_configuration_only_policy_and_trusted_runs_only() {
     assert_eq!(capabilities["workspace_container_grants"], cfg!(windows));
     let runs = cfg!(any(target_os = "linux", windows));
     assert_eq!(capabilities["toolchain_profiles"], runs);
+    assert_eq!(capabilities["package_network_profiles"], true);
+    assert_eq!(capabilities["package_network_enforcement"], false);
     if runs {
         assert_eq!(capabilities["process_execution"], "trusted_cli_only");
     } else {
@@ -462,6 +464,126 @@ fn capabilities_report_configuration_only_policy_and_trusted_runs_only() {
     };
     assert_eq!(capabilities["sandbox_backend"], backend);
     assert!(!data_root.exists());
+}
+
+/// Package-network profiles are recorded with revisions but never authorize a
+/// run. Invalid origins and duplicates are refused without a revision change.
+#[test]
+fn package_profiles_are_configuration_only_and_revisioned() {
+    let temporary = TempDir::new().expect("temporary directory");
+    let data_root = temporary.path().join("application-data");
+    let development_root = temporary.path().join("development");
+    fs::create_dir_all(&development_root).expect("development root");
+    let snapshot = set_root(&data_root, &development_root);
+    let revision = snapshot["revision"].as_u64().expect("revision");
+
+    let output = run_cli(
+        &data_root,
+        &[
+            "workspace",
+            "package-profile-add",
+            "crates",
+            "--registry",
+            "https://registry.example.com/api/v4",
+            "--revision",
+            &revision.to_string(),
+        ],
+    );
+    assert_success(&output);
+    let added = json_output(&output);
+    assert!(added["package_profile_id"].as_str().is_some());
+    assert_eq!(added["snapshot"]["package_profiles"][0]["name"], "crates");
+    let revision = added["snapshot"]["revision"]
+        .as_u64()
+        .expect("revision after add");
+
+    let output = run_cli(&data_root, &["workspace", "package-profile-show", "CRATES"]);
+    assert_success(&output);
+    let shown = json_output(&output);
+    assert_eq!(shown["package_profile"]["name"], "crates");
+    assert_eq!(shown["package_profile"]["origins"][0]["scheme"], "https");
+    assert_eq!(
+        shown["package_profile"]["origins"][0]["host"],
+        "registry.example.com"
+    );
+    assert_eq!(shown["package_profile"]["origins"][0]["port"], 443);
+    assert_eq!(
+        shown["package_profile"]["origins"][0]["path_prefix"],
+        "/api/v4/"
+    );
+
+    let output = run_cli(&data_root, &["workspace", "status"]);
+    assert_success(&output);
+    assert_eq!(
+        json_output(&output)["package_profiles"][0]["name"],
+        "crates"
+    );
+
+    let output = run_cli(
+        &data_root,
+        &[
+            "workspace",
+            "package-profile-add",
+            "plain",
+            "--registry",
+            "http://registry.example.com/",
+            "--revision",
+            &revision.to_string(),
+        ],
+    );
+    assert_control_error(&output);
+    let output = run_cli(&data_root, &["workspace", "status"]);
+    assert_eq!(
+        json_output(&output)["revision"],
+        Value::from(revision),
+        "a refused profile changed the revision"
+    );
+
+    let output = run_cli(
+        &data_root,
+        &[
+            "workspace",
+            "package-profile-add",
+            "CRATES",
+            "--registry",
+            "https://other.example.com/",
+            "--revision",
+            &revision.to_string(),
+        ],
+    );
+    assert_control_error(&output);
+
+    let output = run_cli(
+        &data_root,
+        &[
+            "workspace",
+            "package-profile-remove",
+            "crates",
+            "--revision",
+            "0",
+        ],
+    );
+    assert_control_error(&output);
+
+    let output = run_cli(
+        &data_root,
+        &[
+            "workspace",
+            "package-profile-remove",
+            "crates",
+            "--revision",
+            &revision.to_string(),
+        ],
+    );
+    assert_success(&output);
+    assert!(
+        json_output(&output)["snapshot"]
+            .get("package_profiles")
+            .is_none()
+    );
+
+    let output = run_cli(&data_root, &["workspace", "package-profile-show", "crates"]);
+    assert_control_error(&output);
 }
 
 fn register(data_root: &Path, workspace: &Path, revision: u64) -> String {

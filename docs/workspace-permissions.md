@@ -114,6 +114,10 @@ zero-based sequence, UTC timestamp, global revision, and tagged `action`:
 | `workspace_registered` | New ID, directory identity, default preferences; increment revision |
 | `permissions_changed` | Existing ID and complete preference set; increment revision |
 | `policy_checked` | Explicit diagnostic binding/request check and decision; preserve revision |
+| `profile_added` | New toolchain profile; increment revision |
+| `profile_removed` | Remove a toolchain profile; increment revision |
+| `package_profile_added` | New package-network profile; increment revision |
+| `package_profile_removed` | Remove a package-network profile; increment revision |
 
 Operational file checks do not append `policy_checked`. They use current
 settings and their separate [operation journal](file-access.md). This prevents
@@ -166,6 +170,21 @@ same as version 0.15.0's. Version 0.15.0 refuses a settings log
 that records a profile. The
 [execution guide](execution.md#toolchain-profiles) owns the rules. Profile
 variables are stored here in plain text; never put secrets in them.
+
+## Package-network profiles
+
+`workspace package-profile-add`, `package-profile-show`, and
+`package-profile-remove` record operator-declared registry origins as
+configuration only. Adding and removing need the expected revision and
+increment it, through the `package_profile_added` and
+`package_profile_removed` events. `workspace status` lists profiles under
+`package_profiles` and omits the field until a profile exists. Each profile
+has a name and 1 to 8 origins; there are at most 32 profiles, and one origin
+text is at most 2,048 bytes. No run accepts a profile, and a profile never
+authorizes network access. Version 0.19.0 refuses a settings log that records
+one; a 0.20.0 control journal cannot be read by 0.19.0. The
+[execution guide](execution.md#package-network-profile-contract-only) owns the
+contract and the remaining enforcement gate.
 
 ## Task network
 
