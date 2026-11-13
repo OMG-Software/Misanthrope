@@ -195,7 +195,11 @@ Changes are recorded here before a release version is assigned.
   - **Nested Windows jobs:** a job nested in the run's job, such as a tool's
     own stricter job, can send its limit messages to the run's port. The
     runner now counts a message only when the run's own job confirms it. Each
-    poll takes at most 256 messages.
+    poll takes at most 256 messages. Once the program has exited, the runner
+    takes up to 64 batches before it stops the tree, so a limit queued behind
+    other messages still decides the result. A nested job's memory message
+    can still end a run already within a sixteenth of its own memory limit,
+    because Windows does not identify the sending job.
   - **Linux termination:** a failed `cgroup.kill` no longer skips the process
     group kill; both are tried and the first failure is reported.
   - **Cleanup:** the run's cgroup or job limit state is released even when its

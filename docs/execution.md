@@ -365,10 +365,19 @@ message only when the run's own job confirms it:
   allocation refused further below the limit, because it was large, is still
   refused but is not recorded as `limit_exceeded`.
 
+These checks narrow attribution but do not identify the sending job. A job
+message carries the receiving port's own completion key and, for memory, only
+the process ID. If the run is already within a sixteenth of its memory limit
+when a nested job reaches its own memory limit, the runner still ends the run
+as `limit_exceeded` for memory.
+
 Each 10 ms poll takes at most 256 job messages, so a tree that keeps starting
-processes cannot hold the supervisor away from its other checks. On Windows 11
-build 26300, a nested job's limit messages did not reach the run's port in
-testing; the check follows the documented behaviour.
+processes cannot hold the supervisor away from its other checks. Once the
+program has exited, the runner takes up to 64 such batches before it stops the
+tree, until the queue is empty or a limit is confirmed. So a limit reported
+behind other messages still decides the result. On Windows 11 build 26300, a
+nested job's limit messages did not reach the run's port in testing; the
+check follows the documented behaviour.
 
 #### Linux delegated cgroup
 

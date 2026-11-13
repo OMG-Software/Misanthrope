@@ -88,7 +88,9 @@ owns the details.
   unattributed. Windows routes a nested job's limit messages to its
   ancestors, so the runner counts a memory or process message only when the
   run's own job confirms it. A large allocation refused well below the memory
-  limit is then not attributed either.
+  limit is then not attributed either. No documented API identifies the job
+  that sent a message, so a nested job's memory message still ends a run that
+  is already within a sixteenth of its own memory limit.
 - There is still no disk limit.
 
 ## References

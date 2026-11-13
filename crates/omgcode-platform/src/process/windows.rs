@@ -277,6 +277,20 @@ struct JobLimits {
 /// starting processes cannot hold the supervisor in the drain.
 const MAX_DRAINED_MESSAGES: usize = 256;
 
+/// Batches of [`MAX_DRAINED_MESSAGES`] taken once the program has exited, so a
+/// limit message queued behind other messages is still seen. Bounded because
+/// the program's descendants can post messages until the tree is stopped.
+const MAX_EXIT_BATCHES: usize = 64;
+
+/// The limit messages one drain took, and whether it stopped at its bound
+/// with messages possibly left in the queue.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Drained {
+    memory: bool,
+    processes: bool,
+    full: bool,
+}
+
 /// Basic accounting of a job and every job nested in it.
 #[allow(unsafe_code)]
 fn job_accounting(job: &OwnedHandle) -> io::Result<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION> {
@@ -341,6 +355,11 @@ fn job_peak_memory(job: &OwnedHandle) -> io::Result<u64> {
 /// memory message counts once the job's peak commit came within a sixteenth of
 /// the limit; a larger allocation refused further below is enforced but not
 /// attributed.
+///
+/// This narrows attribution but does not identify the sending job: a message
+/// carries the receiving port's own completion key and, for memory, only a
+/// process ID. A nested job's memory message that arrives while the run is
+/// already within a sixteenth of its own limit is still counted.
 fn job_confirms(job: &OwnedHandle, limits: &JobLimits, limit: ResourceLimit) -> io::Result<bool> {
     Ok(match limit {
         ResourceLimit::Processes => job_accounting(job)?.ActiveProcesses >= limits.max_processes,
@@ -354,23 +373,36 @@ fn job_confirms(job: &OwnedHandle, limits: &JobLimits, limit: ResourceLimit) -> 
 
 /// The limit the job has reached, if any: a confirmed limit message, or its
 /// CPU time. The first limit found is kept.
+///
+/// A poll takes one batch of messages. Once the program has exited, it takes
+/// up to [`MAX_EXIT_BATCHES`], until the queue is empty or a limit is
+/// confirmed, while the tree still holds the processes that confirm it.
 fn job_limit_reached(
     job: &OwnedHandle,
     limits: &mut JobLimits,
+    exited: bool,
 ) -> io::Result<Option<ResourceLimit>> {
     if limits.reached.is_some() {
         return Ok(limits.reached);
     }
-    let (memory, processes) = drain_limit_messages(&limits.port);
-    for (reported, limit) in [
-        (memory, ResourceLimit::Memory),
-        (processes, ResourceLimit::Processes),
-        (true, ResourceLimit::CpuTime),
-    ] {
-        if reported && job_confirms(job, limits, limit)? {
-            limits.reached = Some(limit);
+    let batches = if exited { MAX_EXIT_BATCHES } else { 1 };
+    for _ in 0..batches {
+        let drained = drain_limit_messages(&limits.port);
+        for (reported, limit) in [
+            (drained.memory, ResourceLimit::Memory),
+            (drained.processes, ResourceLimit::Processes),
+        ] {
+            if reported && job_confirms(job, limits, limit)? {
+                limits.reached = Some(limit);
+                return Ok(limits.reached);
+            }
+        }
+        if !drained.full {
             break;
         }
+    }
+    if job_confirms(job, limits, ResourceLimit::CpuTime)? {
+        limits.reached = Some(ResourceLimit::CpuTime);
     }
     Ok(limits.reached)
 }
@@ -380,8 +412,11 @@ fn job_limit_reached(
 /// not guarantee delivery of these messages; the job enforces the limits
 /// either way.
 #[allow(unsafe_code)]
-fn drain_limit_messages(port: &OwnedHandle) -> (bool, bool) {
-    let (mut memory, mut processes) = (false, false);
+fn drain_limit_messages(port: &OwnedHandle) -> Drained {
+    let mut drained = Drained {
+        full: true,
+        ..Drained::default()
+    };
     for _ in 0..MAX_DRAINED_MESSAGES {
         let mut message = 0u32;
         let mut key = 0usize;
@@ -401,15 +436,16 @@ fn drain_limit_messages(port: &OwnedHandle) -> (bool, bool) {
         if result == 0 {
             // No packet: the queue is empty (or the port failed, which a
             // later poll or the job's own enforcement still covers).
+            drained.full = false;
             break;
         }
         match message {
-            JOB_OBJECT_MSG_JOB_MEMORY_LIMIT => memory = true,
-            JOB_OBJECT_MSG_ACTIVE_PROCESS_LIMIT => processes = true,
+            JOB_OBJECT_MSG_JOB_MEMORY_LIMIT => drained.memory = true,
+            JOB_OBJECT_MSG_ACTIVE_PROCESS_LIMIT => drained.processes = true,
             _ => {}
         }
     }
-    (memory, processes)
+    drained
 }
 
 impl ProcessTree for WindowsTree {
@@ -451,7 +487,14 @@ impl ProcessTree for WindowsTree {
 
     fn limit_reached(&mut self) -> io::Result<Option<ResourceLimit>> {
         match &mut self.limits {
-            Some(limits) => job_limit_reached(&self.job, limits),
+            Some(limits) => job_limit_reached(&self.job, limits, false),
+            None => Ok(None),
+        }
+    }
+
+    fn limit_reached_at_exit(&mut self) -> io::Result<Option<ResourceLimit>> {
+        match &mut self.limits {
+            Some(limits) => job_limit_reached(&self.job, limits, true),
             None => Ok(None),
         }
     }
@@ -944,8 +987,11 @@ mod limit_tests {
         let (job, mut limits) = limited_job();
         post(&limits.port, JOB_OBJECT_MSG_JOB_MEMORY_LIMIT);
         post(&limits.port, JOB_OBJECT_MSG_ACTIVE_PROCESS_LIMIT);
-        assert_eq!(job_limit_reached(&job, &mut limits).expect("check"), None);
-        assert_eq!(drain_limit_messages(&limits.port), (false, false));
+        assert_eq!(
+            job_limit_reached(&job, &mut limits, true).expect("check"),
+            None
+        );
+        assert_eq!(drain_limit_messages(&limits.port), Drained::default());
     }
 
     /// One poll takes a bounded number of messages and leaves the rest for
@@ -957,7 +1003,89 @@ mod limit_tests {
             post(&limits.port, JOB_OBJECT_MSG_NEW_PROCESS);
         }
         post(&limits.port, JOB_OBJECT_MSG_JOB_MEMORY_LIMIT);
-        assert_eq!(drain_limit_messages(&limits.port), (false, false));
-        assert_eq!(drain_limit_messages(&limits.port), (true, false));
+        let first = drain_limit_messages(&limits.port);
+        assert_eq!(
+            first,
+            Drained {
+                full: true,
+                ..Drained::default()
+            }
+        );
+        let second = drain_limit_messages(&limits.port);
+        assert_eq!(
+            second,
+            Drained {
+                memory: true,
+                ..Drained::default()
+            }
+        );
+    }
+
+    /// A process that stays alive, reading standard input until it closes.
+    fn sleeper() -> std::process::Child {
+        std::process::Command::new("findstr.exe")
+            .arg("x")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("start a sleeper")
+    }
+
+    /// A limit reported behind more than one poll's worth of other messages
+    /// still decides the run once the program has exited, and is confirmed
+    /// before the tree is stopped.
+    #[test]
+    #[allow(unsafe_code)]
+    fn an_exit_takes_every_queued_limit_report() {
+        use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+
+        let (job, limits) = create_job(Some(TreeLimits {
+            max_memory_bytes: 64 * 1024 * 1024,
+            max_processes: 1,
+            max_cpu_time: Duration::from_secs(60),
+        }))
+        .expect("job");
+        let limits = limits.expect("job limits");
+        // The job holds its one allowed process, so a process-limit message
+        // is the job's own.
+        let mut held = sleeper();
+        // SAFETY: both handles are live; the sleeper is in no job of ours yet.
+        let joined = unsafe {
+            AssignProcessToJobObject(
+                job.as_raw_handle() as HANDLE,
+                held.as_raw_handle() as HANDLE,
+            )
+        };
+        assert_ne!(joined, 0, "put the sleeper in the job");
+        for _ in 0..MAX_DRAINED_MESSAGES + 44 {
+            post(&limits.port, JOB_OBJECT_MSG_NEW_PROCESS);
+        }
+        post(&limits.port, JOB_OBJECT_MSG_ACTIVE_PROCESS_LIMIT);
+        let mut program = std::process::Command::new("cmd.exe")
+            .args(["/d", "/c", "exit 0"])
+            .spawn()
+            .expect("start the program");
+        program.wait().expect("the program exits");
+        let mut tree = WindowsTree {
+            job,
+            process: OwnedHandle::from(program),
+            limits: Some(limits),
+        };
+        let termination = super::super::watch(
+            &mut tree,
+            std::time::Instant::now(),
+            Duration::from_secs(60),
+            &super::super::CancelSignal::new(),
+        )
+        .expect("watch");
+        assert_eq!(
+            termination,
+            Termination::LimitExceeded {
+                limit: ResourceLimit::Processes
+            }
+        );
+        drop(tree);
+        // The job's kill-on-close has ended the sleeper.
+        held.wait().expect("the sleeper ends");
     }
 }

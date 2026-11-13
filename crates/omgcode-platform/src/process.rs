@@ -508,6 +508,11 @@ trait ProcessTree {
     fn limit_reached(&mut self) -> io::Result<Option<ResourceLimit>> {
         Ok(None)
     }
+    /// The tree limit reached by the time the program exited, taking any
+    /// reports still queued. Called before the tree is stopped.
+    fn limit_reached_at_exit(&mut self) -> io::Result<Option<ResourceLimit>> {
+        self.limit_reached()
+    }
     /// What a limited tree used. Called once, after the tree is empty.
     fn usage(&mut self) -> io::Result<Option<TreeUsage>> {
         Ok(None)
@@ -645,7 +650,12 @@ fn watch(
         let exited = tree.try_exit()?;
         // A limit reached before or as the program exited ends the run as
         // limit exceeded: the exit may be the program's reaction to it.
-        if let Some(limit) = tree.limit_reached()? {
+        let reached = if exited.is_some() {
+            tree.limit_reached_at_exit()?
+        } else {
+            tree.limit_reached()?
+        };
+        if let Some(limit) = reached {
             return Ok(Termination::LimitExceeded { limit });
         }
         if let Some(termination) = exited {

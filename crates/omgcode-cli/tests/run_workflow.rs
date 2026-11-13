@@ -544,6 +544,7 @@ fn an_unreadable_run_journal_does_not_keep_a_container_grant() {
         "the revoked grant is still listed"
     );
     scene.grants.retain(|tracked| tracked != &grant);
+    scene.close();
 }
 
 /// Revoking any container grant of the workspace, not only its read-write
