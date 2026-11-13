@@ -29,6 +29,18 @@ const HOST_TCP: &str = "OMGCODE_PROBE_HOST_TCP";
 /// `host:port` of an internet service, for the opt-in live probe.
 const INTERNET_HOST: &str = "OMGCODE_PROBE_INTERNET_HOST";
 
+/// Host certificate directories that the probes list, by probe name: the
+/// public stores that network access grants, the private-key directories it
+/// must not, and their parents. A directory that does not exist is skipped.
+const CERTIFICATE_PROBES: [(&str, &str); 6] = [
+    ("list-ssl-certs", "/etc/ssl/certs"),
+    ("list-ssl", "/etc/ssl"),
+    ("list-ssl-private", "/etc/ssl/private"),
+    ("list-pki-certs", "/etc/pki/tls/certs"),
+    ("list-pki", "/etc/pki"),
+    ("list-pki-private", "/etc/pki/tls/private"),
+];
+
 /// Child side: run every probe and print its result.
 pub(super) fn probes() -> i32 {
     let read_only = path_var(READ_ONLY_FILE);
@@ -62,6 +74,11 @@ pub(super) fn probes() -> i32 {
     report("unix-stream-pair", UnixStream::pair().map(drop));
     report("unix-datagram-pair", UnixDatagram::pair().map(drop));
     report("io-uring-setup", io_uring_setup());
+    for (name, directory) in CERTIFICATE_PROBES {
+        if Path::new(directory).is_dir() {
+            report(name, fs::read_dir(directory).map(drop));
+        }
+    }
     if let Some(host) = env::var_os(INTERNET_HOST) {
         report(
             "internet-connect",
@@ -436,6 +453,34 @@ fn network_access_reaches_ip_but_keeps_files_and_unix_rules() {
             ("unix-datagram-pair", "EPERM"),
         ],
     );
+}
+
+/// A networked run can list the public certificate stores but not a
+/// private-key directory or the parent that holds one. Where this test
+/// process, unconfined, can list a denied directory, the denial comes from
+/// Landlock rather than the directory's own permissions.
+#[test]
+fn a_networked_run_cannot_reach_private_key_directories() {
+    let scene = Scene::new();
+    let (_, results) = scene.run(UnixSocketAccess::PairsOnly, NetworkAccess::Internet);
+    let mut attributed = 0;
+    for (name, directory) in CERTIFICATE_PROBES {
+        if !Path::new(directory).is_dir() {
+            assert!(!results.contains_key(name), "{name}: {results:?}");
+            continue;
+        }
+        if name.ends_with("-certs") {
+            assert_results(&results, &[(name, "ok")]);
+            continue;
+        }
+        assert_results(&results, &[(name, "EACCES")]);
+        if fs::read_dir(directory).is_ok() {
+            attributed += 1;
+        }
+    }
+    if Path::new("/etc/ssl").is_dir() || Path::new("/etc/pki").is_dir() {
+        assert!(attributed > 0, "no denial could be attributed to Landlock");
+    }
 }
 
 /// Certificate access never includes a private-key directory: not the
