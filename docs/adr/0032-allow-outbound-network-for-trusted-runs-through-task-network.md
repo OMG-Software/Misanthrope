@@ -52,9 +52,11 @@ details.
   `socket(AF_INET6)` of any type. Every other family keeps its rule;
   `socketpair` stays Unix-only and `io_uring` stays denied. On Landlock ABI 4
   and later the ruleset stops handling TCP connect but still handles TCP
-  bind, so the tree cannot serve TCP. The runner adds the existing entries of
-  a fixed list of resolver and certificate paths, as real paths, to the
-  read-only rules.
+  bind, which denies an explicit bind to a chosen port. The runner adds the
+  existing entries of a fixed list of resolver files and public certificate
+  stores, as real paths, to the read-only rules. The list never names
+  `/etc/ssl` or `/etc/pki`, and any entry that would expose
+  `/etc/ssl/private` or `/etc/pki/tls/private` is left out.
 - **Windows:** the AppContainer's `SECURITY_CAPABILITIES` carries the
   `internetClient` capability SID, enabled. No other capability is added.
 - **Records:** `run_started` records `network` with the support paths the run
@@ -69,6 +71,13 @@ details.
 - **Private networks on Windows.** `privateNetworkClientServer` would also
   allow inbound connections and the local network. Rejected: package
   downloads need only the internet.
+- **Whole certificate directories.** Granting `/etc/ssl` and `/etc/pki`
+  would also expose the private keys beneath them. Rejected in review in
+  favour of the public trust stores.
+- **Denying `listen` with seccomp.** `listen` on an unbound TCP socket takes
+  a kernel-chosen port without the bind check, but seccomp sees only the
+  descriptor, so a `listen` rule would also block Unix listeners in host
+  services mode. Rejected; the gap is documented instead.
 - **Operator-added support files.** Letting profiles add resolver or
   certificate paths would widen the trusted file set per run. The fixed list
   covers common distributions; profiles can still list their own roots.
@@ -85,10 +94,12 @@ details.
   services, the local network, and cloud metadata endpoints. A networked run
   on either platform can send any workspace data it can read to any host it
   can reach.
-- On Landlock ABI 3, nothing stops a networked Linux run from listening on
-  TCP. UDP bind is never limited.
-- A networked Linux run can read the host's `/etc/hosts` and resolver
-  configuration.
+- A networked Linux run can accept TCP connections: on ABI 3 through any
+  bind, and on ABI 4 and later through `listen` on an unbound socket. Only an
+  explicit TCP bind is denied from ABI 4. UDP bind is never limited.
+- A networked Linux run can read the host's `/etc/hosts`, resolver
+  configuration, and public certificate stores. A private key kept inside a
+  trust store would be exposed.
 - Turning `task_network` off stops networked runs of the workspace.
 - There is still no destination allowlist, registry credential path, or
   development-server networking.

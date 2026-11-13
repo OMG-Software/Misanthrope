@@ -10,8 +10,10 @@
 //! ABI 3 is the minimum: earlier versions do not handle truncation, so a
 //! read-only file could still be truncated by path. Rights that later ABIs add
 //! are handled when the kernel reports them; rights added after ABI 6 are not.
-//! From ABI 4, TCP bind is always denied, and TCP connect is denied unless the
-//! run has [`NetworkAccess::Internet`].
+//! From ABI 4, an explicit TCP bind is always denied, and TCP connect is denied
+//! unless the run has [`NetworkAccess::Internet`]. Landlock does not check the
+//! port the kernel chooses when `listen` is called on an unbound socket, so a
+//! networked run can still accept TCP connections.
 
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -96,6 +98,7 @@ impl RulesetPlan {
 /// Choose what to handle for a kernel that reports `abi`. Fails closed below
 /// [`MINIMUM_ABI`]. Network access leaves TCP connect unhandled, and so
 /// allowed to every port; TCP bind stays handled, with no rule allowing it.
+/// That stops an explicit bind only, not `listen` on an unbound socket.
 pub(super) fn plan(abi: u32, network: NetworkAccess) -> Result<RulesetPlan, ProcessError> {
     if abi < MINIMUM_ABI {
         return Err(ProcessError::Unsupported(

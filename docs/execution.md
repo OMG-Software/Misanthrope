@@ -167,7 +167,7 @@ The user chose the C6 options on 2026-11-13; see
 
 | Platform | `Denied` (default) | `Internet` |
 | --- | --- | --- |
-| Linux | No `AF_INET` or `AF_INET6` socket. | `socket(AF_INET)` and `socket(AF_INET6)` of any type. **Every destination is reachable, including loopback services, the local network, and cloud metadata endpoints.** On Landlock ABI 4 and later, TCP bind is denied. |
+| Linux | No `AF_INET` or `AF_INET6` socket. | `socket(AF_INET)` and `socket(AF_INET6)` of any type. **Every destination is reachable, including loopback services, the local network, and cloud metadata endpoints.** On Landlock ABI 4 and later, an explicit TCP bind is denied, but `listen` on an unbound socket still accepts connections on a port the kernel chooses. |
 | Windows | The container has no capabilities: no network, including loopback. | The container gets the `internetClient` capability: outbound connections to the internet. Loopback, private networks, and inbound connections stay denied. |
 
 On both platforms a networked tree can send any data it can read, workspace
@@ -181,8 +181,16 @@ trusted run adds them read-only:
 
 - `/etc/resolv.conf`, `/etc/hosts`, `/etc/nsswitch.conf`, `/etc/gai.conf`,
   `/etc/host.conf`, `/etc/services`, and `/etc/protocols`;
-- `/etc/ssl`, `/etc/pki`, `/etc/ca-certificates`,
+- `/etc/ssl/certs`, `/etc/ssl/cert.pem`, `/etc/ssl/openssl.cnf`,
+  `/etc/pki/tls/certs`, `/etc/pki/tls/cert.pem`, `/etc/pki/tls/openssl.cnf`,
+  `/etc/pki/ca-trust/extracted`, `/etc/ca-certificates/extracted`,
   `/usr/share/ca-certificates`, and `/usr/local/share/ca-certificates`.
+
+The list names public trust stores, not `/etc/ssl` or `/etc/pki`, which hold
+private keys beneath them. A path whose real path is, lies beneath, or
+contains `/etc/ssl/private` or `/etc/pki/tls/private` is left out. A trust
+store in another place, or a private key kept inside a trust store, is not
+covered: list such a store as a profile root only after checking it.
 
 A link such as `/etc/resolv.conf` is resolved when the run starts; a later
 change of its target is not followed. Resolvers that need other services, such
@@ -649,8 +657,8 @@ For `run_confined`, the parent prepares everything that can fail before
    or below ABI 3, it returns `Unsupported`. ABI 3 is the first that handles
    truncation, so earlier ABIs could not keep a read-only file intact.
 2. It creates a ruleset that handles every filesystem right the ABI knows,
-   TCP bind from ABI 4, TCP connect from ABI 4 unless the run has network
-   access, and signal and abstract-socket scoping from ABI 6. Rights added
+   explicit TCP bind from ABI 4, TCP connect from ABI 4 unless the run has
+   network access, and signal and abstract-socket scoping from ABI 6. Rights added
    after ABI 6 are not handled. No network rule is added, so a handled right
    is denied for every port.
 3. It opens each path with `openat2(O_PATH, RESOLVE_NO_SYMLINKS |
@@ -743,8 +751,10 @@ These remain true after C6:
   downloads, loopback test servers, and development servers fail. With it,
   a Linux run reaches every destination, loopback and the local network
   included, and a Windows run reaches the internet but not loopback. There is
-  no destination allowlist. On Landlock ABI 3 a networked Linux run can also
-  listen on TCP, and UDP bind is never limited. See
+  no destination allowlist. A networked Linux run can accept TCP
+  connections: on ABI 3 through any bind, and on ABI 4 and later through
+  `listen` on an unbound socket, which takes a port the kernel chooses. UDP
+  bind is never limited. See
   [network access](#network-access).
 - **Network coverage.** Network access was tested on Windows 11 build 26300
   and WSL 6.6 (Landlock ABI 3) only, including a TLS fetch with the system

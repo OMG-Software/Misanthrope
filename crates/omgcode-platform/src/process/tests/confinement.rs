@@ -408,7 +408,7 @@ fn host_services_mode_reaches_unix_sockets_but_not_ip_or_files() {
 
 /// Network access opens IP sockets to every destination, loopback included,
 /// for the whole tree. Files and Unix sockets keep their rules. On Landlock
-/// ABI 4 and later, TCP bind stays denied.
+/// ABI 4 and later, an explicit TCP bind stays denied.
 #[test]
 fn network_access_reaches_ip_but_keeps_files_and_unix_rules() {
     let scene = Scene::new();
@@ -435,6 +435,41 @@ fn network_access_reaches_ip_but_keeps_files_and_unix_rules() {
             ("unix-bind-workspace", "EPERM"),
             ("unix-datagram-pair", "EPERM"),
         ],
+    );
+}
+
+/// Certificate access never includes a private-key directory: not the
+/// directory, anything beneath it, or a parent that contains it.
+#[test]
+fn support_paths_never_expose_private_keys() {
+    use crate::process::confinement::exposes_private_keys;
+
+    for exposed in [
+        "/etc",
+        "/etc/ssl",
+        "/etc/pki",
+        "/etc/pki/tls",
+        "/etc/ssl/private",
+        "/etc/ssl/private/host.key",
+        "/etc/pki/tls/private",
+    ] {
+        assert!(exposes_private_keys(Path::new(exposed)), "{exposed}");
+    }
+    for public in [
+        "/etc/ssl/certs",
+        "/etc/ssl/certs/ca-certificates.crt",
+        "/etc/ssl/openssl.cnf",
+        "/etc/pki/tls/certs",
+        "/etc/pki/ca-trust/extracted",
+        "/usr/share/ca-certificates",
+        "/etc/hosts",
+    ] {
+        assert!(!exposes_private_keys(Path::new(public)), "{public}");
+    }
+    let paths = network_support_paths().expect("network support paths");
+    assert!(
+        !paths.iter().any(|path| exposes_private_keys(path)),
+        "{paths:?}"
     );
 }
 

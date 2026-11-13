@@ -68,8 +68,10 @@ pub enum NetworkAccess {
     ///   any type the user may create. Nothing limits the destination: the
     ///   tree can reach **loopback services, the local network, and cloud
     ///   metadata endpoints** as well as the internet. On Landlock ABI 4 and
-    ///   later, TCP `bind` stays denied, so the tree cannot serve TCP; UDP and
-    ///   older ABIs are not limited.
+    ///   later, an explicit TCP `bind` stays denied, but the tree can still
+    ///   accept TCP connections: `listen` on an unbound socket takes a port
+    ///   the kernel chooses, which Landlock does not check. UDP and older ABIs
+    ///   are not limited.
     /// - **Windows:** the AppContainer gets the `internetClient` capability:
     ///   outbound connections to the internet and public networks. Private
     ///   networks, loopback, and inbound connections stay denied.
@@ -127,8 +129,12 @@ fn validate_path(path: &Path) -> Result<(), ProcessError> {
 /// Host files that name resolution and TLS read on Linux. With network access
 /// a confined program can open sockets, but it can read only listed paths, so
 /// without these it can neither resolve a name nor verify a certificate.
+///
+/// Certificate entries name public trust stores and OpenSSL configuration
+/// only, never `/etc/ssl` or `/etc/pki` themselves, because those hold the
+/// host's private keys beneath them.
 #[cfg(target_os = "linux")]
-const NETWORK_SUPPORT_PATHS: [&str; 12] = [
+const NETWORK_SUPPORT_PATHS: [&str; 17] = [
     "/etc/resolv.conf",
     "/etc/hosts",
     "/etc/nsswitch.conf",
@@ -136,12 +142,31 @@ const NETWORK_SUPPORT_PATHS: [&str; 12] = [
     "/etc/host.conf",
     "/etc/services",
     "/etc/protocols",
-    "/etc/ssl",
-    "/etc/pki",
-    "/etc/ca-certificates",
+    "/etc/ssl/certs",
+    "/etc/ssl/cert.pem",
+    "/etc/ssl/openssl.cnf",
+    "/etc/pki/tls/certs",
+    "/etc/pki/tls/cert.pem",
+    "/etc/pki/tls/openssl.cnf",
+    "/etc/pki/ca-trust/extracted",
+    "/etc/ca-certificates/extracted",
     "/usr/share/ca-certificates",
     "/usr/local/share/ca-certificates",
 ];
+
+/// Conventional private-key directories. A support path may not be one of
+/// these, lie beneath one, or contain one.
+#[cfg(target_os = "linux")]
+const PRIVATE_KEY_DIRECTORIES: [&str; 2] = ["/etc/ssl/private", "/etc/pki/tls/private"];
+
+/// Whether a resolved support path would expose a private-key directory.
+#[cfg(target_os = "linux")]
+pub(super) fn exposes_private_keys(path: &Path) -> bool {
+    PRIVATE_KEY_DIRECTORIES.iter().any(|private| {
+        let private = Path::new(private);
+        path.starts_with(private) || private.starts_with(path)
+    })
+}
 
 /// The fixed resolver and certificate paths a networked Linux run reads, as
 /// real paths without symbolic links, which confinement rules require. Paths
@@ -149,7 +174,8 @@ const NETWORK_SUPPORT_PATHS: [&str; 12] = [
 /// record them, because they expose host configuration such as `/etc/hosts`.
 ///
 /// `/etc/resolv.conf` is often a link into `/run`; the rule then names the
-/// file the link pointed to when the run started.
+/// file the link pointed to when the run started. A path whose real path is,
+/// lies beneath, or contains a private-key directory is left out too.
 ///
 /// # Errors
 ///
@@ -160,7 +186,7 @@ pub fn network_support_paths() -> std::io::Result<Vec<PathBuf>> {
     for listed in NETWORK_SUPPORT_PATHS {
         match std::fs::canonicalize(listed) {
             Ok(path) => {
-                if !paths.contains(&path) {
+                if !paths.contains(&path) && !exposes_private_keys(&path) {
                     paths.push(path);
                 }
             }
@@ -177,8 +203,8 @@ pub enum AppliedConfinement {
     /// No filesystem or network confinement: the run came from [`super::run`].
     Unconfined,
     /// A Landlock ruleset at this ABI version, plus the seccomp socket filter.
-    /// ABI 4 and later also deny TCP bind and, without network access, TCP
-    /// connect through Landlock; ABI 6 and later also scope signals and
+    /// ABI 4 and later also deny an explicit TCP bind and, without network
+    /// access, TCP connect through Landlock; ABI 6 and later also scope signals and
     /// abstract Unix sockets to the tree.
     Landlock {
         /// The Landlock ABI version the kernel reported and the ruleset used.
