@@ -160,11 +160,17 @@ const NETWORK_SUPPORT_PATHS: [&str; 17] = [
 const PRIVATE_KEY_DIRECTORIES: [&str; 2] = ["/etc/ssl/private", "/etc/pki/tls/private"];
 
 /// Whether a resolved support path would expose a private-key directory.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", test))]
 pub(super) fn exposes_private_keys(path: &Path) -> bool {
+    exposes_private_keys_under(Path::new("/"), path)
+}
+
+/// [`exposes_private_keys`] for a host tree rooted at `root`, a real path.
+#[cfg(target_os = "linux")]
+fn exposes_private_keys_under(root: &Path, path: &Path) -> bool {
     PRIVATE_KEY_DIRECTORIES.iter().any(|private| {
-        let private = Path::new(private);
-        path.starts_with(private) || private.starts_with(path)
+        let private = root.join(private.trim_start_matches('/'));
+        path.starts_with(&private) || private.starts_with(path)
     })
 }
 
@@ -182,11 +188,19 @@ pub(super) fn exposes_private_keys(path: &Path) -> bool {
 /// Fails when a path exists but cannot be resolved.
 #[cfg(target_os = "linux")]
 pub fn network_support_paths() -> std::io::Result<Vec<PathBuf>> {
+    support_paths_under(Path::new("/"))
+}
+
+/// [`network_support_paths`] for a host tree rooted at `root`, so tests can
+/// apply the same rules to a tree they build.
+#[cfg(target_os = "linux")]
+pub(super) fn support_paths_under(root: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let root = std::fs::canonicalize(root)?;
     let mut paths: Vec<PathBuf> = Vec::new();
     for listed in NETWORK_SUPPORT_PATHS {
-        match std::fs::canonicalize(listed) {
+        match std::fs::canonicalize(root.join(listed.trim_start_matches('/'))) {
             Ok(path) => {
-                if !paths.contains(&path) && !exposes_private_keys(&path) {
+                if !paths.contains(&path) && !exposes_private_keys_under(&root, &path) {
                     paths.push(path);
                 }
             }

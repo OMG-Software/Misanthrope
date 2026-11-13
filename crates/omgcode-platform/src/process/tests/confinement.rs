@@ -28,6 +28,10 @@ const HOST_SOCKET: &str = "OMGCODE_PROBE_HOST_SOCKET";
 const HOST_TCP: &str = "OMGCODE_PROBE_HOST_TCP";
 /// `host:port` of an internet service, for the opt-in live probe.
 const INTERNET_HOST: &str = "OMGCODE_PROBE_INTERNET_HOST";
+/// Files the child reads, as a path list: public certificates and private
+/// keys in a host tree the test builds.
+const PUBLIC_FILES: &str = "OMGCODE_PROBE_PUBLIC_FILES";
+const PRIVATE_FILES: &str = "OMGCODE_PROBE_PRIVATE_FILES";
 
 /// Host certificate directories that the probes list, by probe name: the
 /// public stores that network access grants, the private-key directories it
@@ -77,6 +81,16 @@ pub(super) fn probes() -> i32 {
     for (name, directory) in CERTIFICATE_PROBES {
         if Path::new(directory).is_dir() {
             report(name, fs::read_dir(directory).map(drop));
+        }
+    }
+    for (variable, prefix) in [
+        (PUBLIC_FILES, "read-public"),
+        (PRIVATE_FILES, "read-private"),
+    ] {
+        if let Some(files) = env::var_os(variable) {
+            for (index, file) in env::split_paths(&files).enumerate() {
+                report(&format!("{prefix}-{index}"), fs::read(file).map(drop));
+            }
         }
     }
     if let Some(host) = env::var_os(INTERNET_HOST) {
@@ -294,13 +308,15 @@ impl Scene {
         unix_sockets: UnixSocketAccess,
         network: NetworkAccess,
     ) -> (AppliedConfinement, BTreeMap<String, String>) {
-        let outcome = run_confined(
-            spec,
-            &self.confinement(unix_sockets, network),
-            &limits(),
-            &CancelSignal::new(),
-        )
-        .expect("confined run");
+        Self::run_with(spec, &self.confinement(unix_sockets, network))
+    }
+
+    fn run_with(
+        spec: &ProcessSpec,
+        confinement: &Confinement,
+    ) -> (AppliedConfinement, BTreeMap<String, String>) {
+        let outcome =
+            run_confined(spec, confinement, &limits(), &CancelSignal::new()).expect("confined run");
         assert_eq!(
             outcome.termination,
             Termination::Exited { code: 0 },
@@ -480,6 +496,55 @@ fn a_networked_run_cannot_reach_private_key_directories() {
     }
     if Path::new("/etc/ssl").is_dir() || Path::new("/etc/pki").is_dir() {
         assert!(attributed > 0, "no denial could be attributed to Landlock");
+    }
+}
+
+/// The support-path rules applied to a host tree the test builds, with a
+/// private key the user can read beside each public certificate store. A
+/// networked child reads the certificates but not the keys, which this test
+/// process reads unconfined.
+#[test]
+fn a_networked_run_reads_certificates_but_not_private_keys() {
+    use crate::process::confinement::support_paths_under;
+
+    let host = tempfile::tempdir().expect("host tree");
+    let file = |relative: &str, contents: &[u8]| {
+        let path = host.path().join(relative);
+        fs::create_dir_all(path.parent().expect("parent")).expect("directories");
+        fs::write(&path, contents).expect("host file");
+        fs::canonicalize(path).expect("real path")
+    };
+    let public = [
+        file("etc/ssl/certs/ca-certificates.crt", b"certificate"),
+        file("etc/ssl/openssl.cnf", b"configuration"),
+        file("etc/pki/tls/certs/ca-bundle.crt", b"certificate"),
+    ];
+    let private = [
+        file("etc/ssl/private/host.key", b"private key"),
+        file("etc/pki/tls/private/host.key", b"private key"),
+    ];
+    for key in &private {
+        fs::read(key).expect("the key is readable unconfined");
+    }
+    let scene = Scene::new();
+    let mut confinement = scene.confinement(UnixSocketAccess::PairsOnly, NetworkAccess::Denied);
+    confinement.network = NetworkAccess::Internet;
+    confinement
+        .read_only
+        .extend(support_paths_under(host.path()).expect("support paths"));
+    let mut spec = scene.spec();
+    for (variable, files) in [(PUBLIC_FILES, &public[..]), (PRIVATE_FILES, &private[..])] {
+        spec.environment.push((
+            OsString::from(variable),
+            env::join_paths(files).expect("path list"),
+        ));
+    }
+    let (_, results) = Scene::run_with(&spec, &confinement);
+    for index in 0..public.len() {
+        assert_results(&results, &[(&format!("read-public-{index}"), "ok")]);
+    }
+    for index in 0..private.len() {
+        assert_results(&results, &[(&format!("read-private-{index}"), "EACCES")]);
     }
 }
 
