@@ -17,7 +17,7 @@ Changes are recorded here before a release version is assigned.
     `approval_required`; it starts nothing. After `approvals approve <id>`, a
     second identical call consumes the approval and calls the trusted runner.
     The model cannot approve, select limits, or select network/host services.
-  - **Limits:** 20-second deadline, 32 KiB per output stream, 1 GiB memory,
+  - **Limits:** 20-second deadline, 4 KiB per output stream, 1 GiB memory,
     64 processes, 20 seconds of CPU, and 256 MiB of disk growth.
   - **Records:** the session journal records the tool intent/result; the run
     journal records the run. A failed run consumes the approval; no replay

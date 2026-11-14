@@ -652,7 +652,7 @@ them, and the trusted run checks them again.
 
 Arguments are a recorded toolchain `profile`, a `program`, at most 64
 `arguments`, and an optional workspace-relative `cwd`. There is no shell.
-The tool fixes its limits: a 20-second deadline, 32 KiB retained from each
+The tool fixes its limits: a 20-second deadline, 4 KiB retained from each
 output stream, 1 GiB memory, 64 processes, 20 seconds of CPU, and 256 MiB of
 disk growth. It selects no network or host services.
 
@@ -985,7 +985,7 @@ These remain true after C6:
   nothing. There is no invalidation, eviction, or freshness check, and
   configuring a toolchain to use the directory is operator work.
 - **Model command limits.** The model command tool accepts no model-selected
-  limits, network, or host services. It uses a 20-second deadline and 32 KiB
+  limits, network, or host services. It uses a 20-second deadline and 4 KiB
   per output stream. The operator flow spans two turns, and no approval UI
   exists. A denied exact request stays denied for the current settings
   revision; a failed run consumes the approval. The gate and hand-off are

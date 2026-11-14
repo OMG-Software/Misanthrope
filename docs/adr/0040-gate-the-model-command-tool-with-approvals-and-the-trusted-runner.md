@@ -28,7 +28,7 @@ Add the model tool `workspace_run_command`:
    parent or absolute `cwd` values are refused. There is no shell; arguments
    are passed exactly.
 3. **Fixed limits:** the tool does not accept model-selected limits. It uses a
-   20-second deadline, 32 KiB retained from each output stream, 1 GiB memory,
+   20-second deadline, 4 KiB retained from each output stream, 1 GiB memory,
    64 processes, 20 seconds of CPU, and 256 MiB of disk growth. It selects no
    network or host services.
 4. **Approval binding:** the request digest covers the session, workspace,
@@ -83,8 +83,9 @@ native confinement remain the authority and the only process path.
   and the run hand-off. They do not qualify a successful native command on both
   hosts; the existing trusted-run tests and future acceptance work remain
   separate.
-- A model command can return up to 32 KiB per stream to the model; the turn's
-  result and aggregate limits still apply.
+- A model command can return up to 4 KiB per stream; the turn's result and
+  aggregate limits still apply, and a larger result is replaced with a
+  controlled `output_too_large` result.
 
 ## References
 

@@ -72,7 +72,7 @@ pub const MAX_COMMAND_PROGRAM_BYTES: usize = 1024;
 /// Deadline for one model command run.
 pub const COMMAND_DEADLINE: Duration = Duration::from_secs(20);
 /// Retained bytes from each model command output stream.
-pub const COMMAND_OUTPUT_BYTES: usize = 32 * 1024;
+pub const COMMAND_OUTPUT_BYTES: usize = 4 * 1024;
 /// Approval lifetime requested by a model command call.
 pub const COMMAND_APPROVAL_TTL_SECS: u64 = 900;
 
