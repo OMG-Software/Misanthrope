@@ -46,10 +46,11 @@ run bounds the allocated bytes it may add to its writable roots. No portable
 per-run disk quota exists, so the supervisor measures growth on a separate
 thread rather than the kernel enforcing a quota.
 
-The [package-network profile](#package-network-profile-contract-only) is
-recorded as configuration only (ADR-0034) since version 0.20.0. Version 0.21.0
-adds a trusted `packages fetch` for declared origins; no run accepts a profile,
-`--network` remains all-or-nothing, and the run does not yet read the cache.
+Version 0.22.0 exposes the fetched-package cache to Linux runs read-only. A
+run whose workspace has a cache receives `OMGCODE_PACKAGE_CACHE` and may read
+that directory, but not its parent or any other application storage. Windows
+runs do not get the cache yet; see
+[ADR-0036](adr/0036-expose-the-package-fetch-cache-read-only-to-linux-runs.md).
 
 ## Accepted decisions
 
@@ -292,8 +293,15 @@ text), the cache name, limits, HTTP status, byte count, and content digest. A
 failure records a controlled reason. An abandoned fetch leaves its start
 record without a finish; nothing retries automatically.
 
-The run does not yet read this cache. Exposing it read-only to a run is a
-separate increment. Registry credentials remain unsupported.
+The run does not contact the registry itself. On Linux, when
+`<data-dir>/package-cache/<workspace-id>` exists as a plain directory, the run
+adds only that directory to its read-only rules and sets
+`OMGCODE_PACKAGE_CACHE` to it. The parent `package-cache` directory and the
+rest of the data root stay outside the run's view, and the run cannot write
+the cache. Windows does not expose the cache because the AppContainer cannot
+read application storage without an ACL grant, and container grants refuse
+that storage. Tool-specific use of the directory is operator configuration.
+Registry credentials remain unsupported.
 
 ## Container grants
 
@@ -457,8 +465,8 @@ entries, the runner-owned variables below, and the profile's variables.
 
 | Platform | Runner-owned variables | Read-only | Read-write |
 | --- | --- | --- | --- |
-| Linux | `HOME`, `TMPDIR`, and `XDG_CACHE_HOME`, all set to `<data-dir>/run-scratch/<run id>` (mode 0700, removed after the run) | Profile roots, `/dev/zero`, `/dev/random`, `/dev/urandom`, and, with `--network`, the [network support paths](#network-access) | The workspace, the scratch directory, `/dev/null` |
-| Windows | `LOCALAPPDATA`, `SystemRoot`, `windir`, and `HOME` and `USERPROFILE` set to the container's `AC` folder. Windows then sets `TEMP` and `TMP` inside it | Profile roots, checked against their live ACLs | The workspace, through its grant |
+| Linux | `HOME`, `TMPDIR`, and `XDG_CACHE_HOME`, all set to `<data-dir>/run-scratch/<run id>` (mode 0700, removed after the run), and, when the workspace cache exists, `OMGCODE_PACKAGE_CACHE` set to `<data-dir>/package-cache/<workspace id>` | Profile roots, `/dev/zero`, `/dev/random`, `/dev/urandom`, the workspace's [package cache](#trusted-package-fetch) when it exists, and, with `--network`, the [network support paths](#network-access) | The workspace, the scratch directory, `/dev/null` |
+| Windows | `LOCALAPPDATA`, `SystemRoot`, `windir`, and `HOME` and `USERPROFILE` set to the container's `AC` folder. Windows then sets `TEMP` and `TMP` inside it. The package cache is not exposed | Profile roots, checked against their live ACLs | The workspace, through its grant |
 
 Linux runs use `PairsOnly` sockets unless host services were selected. Runs
 have no IP networking unless `--network` was passed. Windows
@@ -641,8 +649,8 @@ Rules:
   - A name starts with a letter or `_`, continues with letters, digits, or
     `_`, and is unique case-insensitively.
   - `PATH`, `HOME`, `TMPDIR`, `TEMP`, `TMP`, `USERPROFILE`, `LOCALAPPDATA`,
-    `SYSTEMROOT`, `WINDIR`, and `XDG_CACHE_HOME` are reserved for the runner,
-    in any case.
+    `SYSTEMROOT`, `WINDIR`, `XDG_CACHE_HOME`, and `OMGCODE_PACKAGE_CACHE` are
+    reserved for the runner, in any case.
   - Values are stored in the private settings journal and shown by `status`.
     Never put secrets in them.
 - **Limit:** at most 32 profiles.
@@ -662,7 +670,7 @@ sequence, a UTC timestamp, and a tagged `action`:
 | Action | Meaning |
 | --- | --- |
 | `created` | Header |
-| `run_started` | Synced before the program starts. Records the run ID, workspace, settings revision, profile ID, name, and revision, program path, argument count, `arguments_sha256`, working directory, socket mode, since 0.17.0 `limits` (`max_memory_bytes`, `max_processes`, `max_cpu_ms`, and since 0.19.0 `max_disk_bytes`), and, since 0.18.0 and only for a networked run, `network` with the `support_paths` it could read (at most 32). |
+| `run_started` | Synced before the program starts. Records the run ID, workspace, settings revision, profile ID, name, and revision, program path, argument count, `arguments_sha256`, working directory, socket mode, since 0.17.0 `limits` (`max_memory_bytes`, `max_processes`, `max_cpu_ms`, and since 0.19.0 `max_disk_bytes`), since 0.18.0 and only for a networked run `network` with the `support_paths` it could read (at most 32), and, since 0.22.0 and only when true, `package_cache` for read access to the workspace cache. |
 | `run_finished` | Records the result (`exited`, `signalled`, `deadline_exceeded`, `cancelled`, `revoked`, `limit_exceeded` with its `limit`, `not_started`, `supervision_failed`, or `cleanup_unconfirmed`), the applied confinement, the elapsed time, the output byte counts, and, for a started run, `usage` (`cpu_ms`, where reported `peak_memory_bytes`, and since 0.19.0 `peak_disk_bytes`) |
 | `run_acknowledged` | The operator cleared a pending run |
 
@@ -681,6 +689,7 @@ How it works:
     intent is recorded until the outcome is recorded.
 - **Limits:** at most 16 pending runs; 8 MiB, 4,096 events, and 64 KiB per
   event. A journal that records the 0.19.0 fields cannot be read by 0.18.0.
+  A 0.22.0 journal that records `package_cache` cannot be read by 0.21.0.
 - **Reserve:** a new run must leave room for every pending run's remaining
   events, 1 KiB each: two for a run in progress, one for a run that needs
   acknowledgement.
@@ -911,15 +920,21 @@ These remain true after C6:
   [network access](#network-access).
 - **No run destination enforcement.** Package-network profiles are recorded,
   and the trusted [`packages fetch`](#trusted-package-fetch) command contacts
-  only declared origins. No run accepts a profile, `--network` remains
-  all-or-nothing, and the run does not yet read the package cache. A proxy or
-  proxy environment variables are not a boundary: a hostile tree can connect
-  directly.
+  only declared origins. No run accepts a profile, and `--network` remains
+  all-or-nothing. On Linux a run can read only its workspace's cache; Windows
+  does not expose the cache. A proxy or proxy environment variables are not a
+  boundary: a hostile tree can connect directly.
 - **Package fetch limits.** The fetch is trusted-CLI only. It sends no
   credentials, follows no redirects, ignores proxy variables, and uses the
-  system TLS store. The cache is private application storage, is not exposed
-  to runs, and makes no power-loss claim. Tests use loopback HTTP; a live
-  HTTPS registry is not qualified.
+  system TLS store. The cache is private application storage; only the
+  per-workspace subtree is exposed to Linux runs, read-only. It makes no
+  power-loss claim. Tests use loopback HTTP; a live HTTPS registry is not
+  qualified.
+- **Package cache exposure is Linux-only.** A Linux run receives
+  `OMGCODE_PACKAGE_CACHE` and may read that directory, but not its parent,
+  journals, settings, or another workspace's cache. Windows does not expose
+  it. There is no invalidation, eviction, or freshness check, and configuring
+  a toolchain to use the directory is operator work.
 - **Network coverage.** Network access was tested on Windows 11 build 26300
   and WSL 6.6 (Landlock ABI 3) only, including a TLS fetch with the system
   `curl` on both. The ABI 4 TCP-bind denial has not run on a live kernel.
@@ -972,11 +987,12 @@ These remain true after C6:
 | C7 (0.19.0) | Sampled disk-growth limit for every trusted run | Done: see [disk growth](#disk-growth) and ADR-0033 |
 | C8 (contract only, 0.19.0) | Package-network profile contract and implementation gate | Done as a contract: see [package-network profile](#package-network-profile-contract-only) and ADR-0034. No destination enforcement. |
 | C9 (0.20.0) | Package-network profile records | Done as configuration: `workspace package-profile-add/show/remove` and the control journal events. No run accepts a profile. |
-| C10 (0.21.0) | Trusted allowlisted package fetch | Done: see [trusted package fetch](#trusted-package-fetch) and ADR-0035. The run remains offline and does not yet read the cache. |
+| C10 (0.21.0) | Trusted allowlisted package fetch | Done: see [trusted package fetch](#trusted-package-fetch) and ADR-0035. The run remains offline. |
+| C11 (0.22.0) | Read-only package cache for Linux runs | Done: see [trusted package fetch](#trusted-package-fetch) and ADR-0036. Windows does not expose the cache. |
 
 Later work needs its own decisions:
 
-- exposing the package cache to runs read-only, registry credentials, and
+- a Windows package-cache root and grant design, registry credentials, and
   development-server networking;
 - a model-callable command tool.
 

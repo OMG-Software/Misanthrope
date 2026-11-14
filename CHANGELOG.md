@@ -6,6 +6,21 @@ Changes are recorded here before a release version is assigned.
 
 ### Added
 
+- Version 0.22.0 exposes the fetched-package cache to Linux runs read-only.
+  See ADR-0036.
+  - **Linux:** when `<data-dir>/package-cache/<workspace-id>` exists as a
+    plain directory, the run gets it read-only and `OMGCODE_PACKAGE_CACHE`.
+    The parent, journals, settings, and other workspaces stay denied; the run
+    cannot write the cache.
+  - **Windows:** the cache is not exposed. The AppContainer cannot read
+    application storage without an ACL grant, and container grants refuse
+    that storage.
+  - **Records:** `run_started` records `package_cache` only when true. A 0.22
+    journal that records it cannot be read by 0.21.0.
+  - **Reserved:** `OMGCODE_PACKAGE_CACHE` cannot be declared in a toolchain
+    profile.
+  - **Limits:** no invalidation, eviction, or freshness check; configuring a
+    toolchain to use the directory is operator work.
 - Version 0.21.0 adds the trusted operator command `omgcode packages fetch`
   and a private allowlisted package cache. See ADR-0035.
   - **Command:** `packages fetch <workspace-id> --profile <name> --url <url>

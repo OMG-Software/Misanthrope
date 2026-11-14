@@ -131,8 +131,10 @@ is recorded as configuration only (ADR-0034): `workspace
 package-profile-add/show/remove` store registry origins, but no run accepts a
 profile, and a proxy or proxy environment variables are not a boundary. The
 trusted `packages fetch` command contacts only declared origins and writes a
-private cache; the run remains offline and does not yet read that cache.
-Registry credentials require a narrow reviewed credential path. Offline tasks
+private cache. On Linux, a run can read only its workspace's cache through
+`OMGCODE_PACKAGE_CACHE`; on Windows the cache is not exposed. Tool-specific
+configuration to use that directory is operator work. Registry credentials
+require a narrow reviewed credential path. Offline tasks
 must work with available dependencies or explain which download is needed.
 
 Development servers, debuggers, license servers, hardware access, and other

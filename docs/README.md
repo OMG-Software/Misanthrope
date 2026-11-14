@@ -89,8 +89,8 @@ sampled net disk-growth limits; the disk limit is not a filesystem quota.
 Package-network profiles are recorded as configuration only (ADR-0034); no run
 uses them, and network access remains all-or-nothing. The trusted
 `packages fetch` command downloads from declared origins into a private cache;
-the run does not yet read that cache. The
-limited file broker and the core read/list turn runtime
+Linux runs can read only their workspace's cache, and Windows does not expose
+it. The limited file broker and the core read/list turn runtime
 do not provide general model tools. Chat dispatches only the read and
 list tools, and only for a workspace that enables `model_tools`. A read-only CLI preview compares a workspace file with trusted proposed
 content without writing to the workspace or creating a checkpoint.

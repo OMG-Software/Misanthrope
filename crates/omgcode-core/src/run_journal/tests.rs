@@ -25,6 +25,7 @@ fn start(run_id: Uuid) -> RunStart {
             max_disk_bytes: Some(8 << 30),
         }),
         network: None,
+        package_cache: false,
     }
 }
 
@@ -602,4 +603,34 @@ fn pending_starts_and_outcomes_follow_the_recorded_events() {
         Some(RunResult::CleanupUnconfirmed)
     );
     assert_eq!(journal.outcome(abandoned), None);
+}
+
+/// A package-cache exposure is recorded only when it applies; a run without
+/// it keeps the earlier journal shape.
+#[test]
+fn package_cache_access_is_recorded_only_when_present() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let store = store_id();
+    let (cached, plain) = (Uuid::new_v4(), Uuid::new_v4());
+    let mut cached_start = start(cached);
+    cached_start.package_cache = true;
+    let mut journal = RunJournal::open(directory.path(), store).expect("journal");
+    journal.start(cached_start).expect("cached start");
+    journal.start(start(plain)).expect("plain start");
+    drop(journal);
+    let text = fs::read_to_string(directory.path().join(FILE_NAME)).expect("journal text");
+    assert_eq!(text.matches("\"package_cache\"").count(), 1, "{text}");
+    assert!(text.contains("\"package_cache\":true"), "{text}");
+    let journal = RunJournal::open(directory.path(), store).expect("replay");
+    let starts = journal.pending_starts();
+    assert!(
+        starts
+            .iter()
+            .any(|start| start.run_id == cached && start.package_cache)
+    );
+    assert!(
+        starts
+            .iter()
+            .any(|start| start.run_id == plain && !start.package_cache)
+    );
 }

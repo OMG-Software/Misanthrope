@@ -848,7 +848,7 @@ fn prepare(
     let search_path = std::env::join_paths(&path_entries)
         .map_err(|_| RunError::Refused("a PATH entry contains the platform's list separator"))?;
     let mut environment = vec![(OsString::from("PATH"), search_path)];
-    let (confinement, scratch, support_paths) = platform_setup(
+    let (confinement, scratch, support_paths, package_cache) = platform_setup(
         control,
         request,
         &scope.workspace,
@@ -893,6 +893,7 @@ fn prepare(
         } else {
             None
         },
+        package_cache,
     };
     Ok(Prepared {
         start,
@@ -1032,7 +1033,7 @@ fn platform_setup(
     data_root: &Path,
     run_id: Uuid,
     environment: &mut Vec<(OsString, OsString)>,
-) -> Result<(Confinement, Option<Scratch>, Vec<PathBuf>), RunError> {
+) -> Result<(Confinement, Option<Scratch>, Vec<PathBuf>, bool), RunError> {
     let parent = data_root.join("run-scratch");
     crate::storage::create_private_directories(&parent)
         .map_err(|error| io::Error::other(error.to_string()))?;
@@ -1061,6 +1062,13 @@ fn platform_setup(
         Vec::new()
     };
     read_only.extend(support_paths.iter().cloned());
+    // Expose only this workspace's fetched-package cache. Application storage
+    // otherwise stays outside the run's view.
+    let package_cache = package_cache_path(data_root, request.workspace_id);
+    if let Some(cache) = &package_cache {
+        read_only.push(cache.clone());
+        environment.push(("OMGCODE_PACKAGE_CACHE".into(), cache.as_os_str().to_owned()));
+    }
     let confinement = Confinement {
         read_only,
         read_write: vec![workspace.to_path_buf(), path, PathBuf::from("/dev/null")],
@@ -1072,7 +1080,25 @@ fn platform_setup(
         network: network_access(request),
         container: None,
     };
-    Ok((confinement, Some(scratch), support_paths))
+    Ok((
+        confinement,
+        Some(scratch),
+        support_paths,
+        package_cache.is_some(),
+    ))
+}
+
+/// The private package cache for one workspace, when it exists as a plain
+/// directory. A link or other entry is not exposed.
+#[cfg(target_os = "linux")]
+fn package_cache_path(data_root: &Path, workspace_id: WorkspaceId) -> Option<PathBuf> {
+    let path = data_root
+        .join("package-cache")
+        .join(workspace_id.to_string());
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => Some(path),
+        _ => None,
+    }
 }
 
 /// Build the platform confinement and the runner-owned variables. Windows
@@ -1094,7 +1120,7 @@ fn platform_setup(
     _data_root: &Path,
     _run_id: Uuid,
     environment: &mut Vec<(OsString, OsString)>,
-) -> Result<(Confinement, Option<Scratch>, Vec<PathBuf>), RunError> {
+) -> Result<(Confinement, Option<Scratch>, Vec<PathBuf>, bool), RunError> {
     use crate::control::container_name;
 
     workspace_access(control, request.workspace_id, workspace_record, false)
@@ -1119,7 +1145,7 @@ fn platform_setup(
         network: network_access(request),
         container: Some(name),
     };
-    Ok((confinement, None, Vec::new()))
+    Ok((confinement, None, Vec::new(), false))
 }
 
 #[cfg(not(any(target_os = "linux", windows)))]
@@ -1133,7 +1159,7 @@ fn platform_setup(
     _data_root: &Path,
     _run_id: Uuid,
     _environment: &mut Vec<(OsString, OsString)>,
-) -> Result<(Confinement, Option<Scratch>, Vec<PathBuf>), RunError> {
+) -> Result<(Confinement, Option<Scratch>, Vec<PathBuf>, bool), RunError> {
     Err(RunError::Refused(
         "trusted runs exist only on Linux and Windows",
     ))
@@ -1304,6 +1330,7 @@ mod tests {
             unix_sockets: SocketMode::PairsOnly,
             limits: None,
             network: None,
+            package_cache: false,
         }
     }
 

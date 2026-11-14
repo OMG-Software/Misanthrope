@@ -180,6 +180,14 @@ pub struct RunStart {
     /// runs never had it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network: Option<NetworkRecord>,
+    /// Whether the run could read the workspace's fetched-package cache,
+    /// since 0.22.0. False and earlier runs omit it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub package_cache: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// The outcome recorded after a run.

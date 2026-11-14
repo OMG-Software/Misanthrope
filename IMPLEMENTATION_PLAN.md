@@ -61,10 +61,12 @@ This is a resume guide, not a replacement for the owning contracts in
 - This branch, `codex/package-network-profile`: **Phase C8** at `16d8945`,
   the contract-only package-network profile and implementation gate
   (ADR-0034), **Phase C9**, version **0.20.0**, with operator-declared
-  package-network profile records, and **Phase C10**, version **0.21.0**, with
-  the trusted allowlisted package fetch and private cache (ADR-0035). It is
-  stacked on C7 at `0426e42`. No run accepts a profile or reads the cache, and
-  no run destination filter exists.
+  package-network profile records, **Phase C10**, version **0.21.0**, with
+  the trusted allowlisted package fetch and private cache (ADR-0035), and
+  **Phase C11**, version **0.22.0**, with read-only Linux run access to that
+  cache (ADR-0036). It is stacked on C7 at `0426e42`. No run accepts a
+  profile or has destination-scoped networking; Windows does not expose the
+  cache.
 
 Implemented today:
 
@@ -141,6 +143,10 @@ Implemented today:
   credentials, bounds and hashes the response, writes a private per-workspace
   cache, and records the intent and outcome. The run remains offline and does
   not yet read the cache.
+- Read-only Linux run access to the workspace's fetched-package cache
+  (ADR-0036). The cache directory is added to the Landlock read-only rules and
+  named by `OMGCODE_PACKAGE_CACHE`; its parent and other application storage
+  stay denied. Windows does not expose it.
 - Trusted `file restore` through a new checkpoint and
   `file delete-checkpoint --permanent` for one resolved checkpoint, on the same
   filesystems as apply. Neither is power-loss qualified. See
@@ -506,10 +512,15 @@ on Windows, and trusted CLI commands as the first caller. See
   bounds and hashes the body, and audits the intent and outcome. The run
   remains offline and does not read the cache. See
   [ADR-0035](docs/adr/0035-fetch-packages-through-a-trusted-allowlisted-cache.md).
+- **C11 (this branch, version 0.22.0):** read-only Linux run access to the
+  workspace package cache. The cache directory is a narrow exception to
+  keeping application storage outside the task view; the parent and sibling
+  workspaces stay denied. Windows does not expose the cache. See
+  [ADR-0036](docs/adr/0036-expose-the-package-fetch-cache-read-only-to-linux-runs.md).
 
 Next decisions, not yet scheduled:
 
-- exposing the package cache to runs read-only, registry credentials, and
+- a Windows package-cache root and grant design, registry credentials, and
   development-server networking;
 - a model-callable command tool with per-call approval.
 

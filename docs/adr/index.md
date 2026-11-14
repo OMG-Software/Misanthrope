@@ -50,3 +50,4 @@ meaningful alternative does not need an ADR.
 | [0033: Bound run disk growth by sampling writable roots](0033-bound-run-disk-growth-by-sampling-writable-roots.md) | Accepted | 2026-11-13 |
 | [0034: Gate package networking behind enforceable destination control](0034-gate-package-networking-behind-enforceable-destination-control.md) | Accepted | 2026-11-13 |
 | [0035: Fetch packages through a trusted allowlisted cache](0035-fetch-packages-through-a-trusted-allowlisted-cache.md) | Accepted | 2026-11-13 |
+| [0036: Expose the package fetch cache read-only to Linux runs](0036-expose-the-package-fetch-cache-read-only-to-linux-runs.md) | Accepted | 2026-11-14 |

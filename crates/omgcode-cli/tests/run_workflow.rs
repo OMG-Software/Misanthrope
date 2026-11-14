@@ -28,6 +28,52 @@ fn assert_no_runs(scene: &Scene) {
     assert_eq!(audit["pending"], Value::Array(Vec::new()));
 }
 
+/// A Linux run can read only its workspace's package cache. The cache is
+/// read-only and its parent application directory stays invisible.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_linux_run_reads_only_its_package_cache() {
+    let scene = Scene::new();
+    assert_success(&scene.add_profile("system", &[]));
+    let cache = scene.data.join("package-cache").join(&scene.id);
+    fs::create_dir_all(&cache).expect("cache directory");
+    fs::write(cache.join("pkg.bin"), b"cached-package").expect("cache file");
+    let script = "printf '%s\\n' \"$OMGCODE_PACKAGE_CACHE\"; \
+        cat \"$OMGCODE_PACKAGE_CACHE/pkg.bin\" > seen.txt; \
+        echo x > \"$OMGCODE_PACKAGE_CACHE/out\" 2>/dev/null && echo writable || echo read-only; \
+        ls \"$OMGCODE_PACKAGE_CACHE/..\" >/dev/null 2>&1 && echo parent-listed || echo parent-denied";
+    let run = run_json(&scene.run("system", &[], &shell(script)));
+    let stdout = run["stdout"]["text"].as_str().expect("stdout");
+    assert!(
+        stdout.contains(&cache.display().to_string()),
+        "the cache path was not exposed: {run}"
+    );
+    assert!(stdout.contains("read-only"), "{run}");
+    assert!(stdout.contains("parent-denied"), "{run}");
+    assert_eq!(
+        fs::read_to_string(scene.workspace.join("seen.txt")).expect("read cache"),
+        "cached-package"
+    );
+    assert_eq!(run["start"]["package_cache"], true);
+    scene.close();
+}
+
+/// Windows does not expose the application-storage cache to the AppContainer.
+#[cfg(windows)]
+#[test]
+fn windows_runs_do_not_see_the_package_cache() {
+    let scene = Scene::new();
+    assert_success(&scene.add_profile("system", &[]));
+    let cache = scene.data.join("package-cache").join(&scene.id);
+    fs::create_dir_all(&cache).expect("cache directory");
+    fs::write(cache.join("pkg.bin"), b"cached-package").expect("cache file");
+    let run = run_json(&scene.run("system", &[], &shell("set")));
+    let stdout = run["stdout"]["text"].as_str().expect("stdout");
+    assert!(!stdout.contains("OMGCODE_PACKAGE_CACHE"), "{run}");
+    assert!(run["start"].get("package_cache").is_none(), "{run}");
+    scene.close();
+}
+
 /// A run writes in the workspace, cannot read host data, sees only the
 /// curated environment, and records its intent and outcome but not its
 /// argument text or output.
