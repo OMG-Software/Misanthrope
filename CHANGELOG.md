@@ -6,6 +6,134 @@ Changes are recorded here before a release version is assigned.
 
 ### Added
 
+- Version 0.25.0 adds an approval-gated model command tool. See ADR-0040.
+  - **Offering:** `workspace_run_command` is advertised only when the
+    workspace's live `model_tools`, `execute`, `read`, and `write`
+    preferences are enabled. Every call rechecks them; the trusted run checks
+    them again.
+  - **Arguments:** a recorded toolchain profile, program, at most 64
+    arguments, and an optional workspace-relative `cwd`. There is no shell.
+  - **Approval:** the first call records a pending approval and returns
+    `approval_required`; it starts nothing. After `approvals approve <id>`, a
+    second identical call consumes the approval and calls the trusted runner.
+    The model cannot approve, select limits, or select network/host services.
+  - **Limits:** 20-second deadline, 4 KiB per output stream, 1 GiB memory,
+    64 processes, 20 seconds of CPU, and 256 MiB of disk growth.
+  - **Records:** the session journal records the tool intent/result; the run
+    journal records the run. A failed run consumes the approval; no replay
+    executes a recorded call.
+  - **Qualified:** a successful approved command through the real chat CLI on
+    both hosts. A mock provider requests the platform shell's `echo`; the first
+    turn records `approval_required`, the operator approves, and the second
+    identical turn consumes the record and runs the command through the trusted
+    runner. The test asserts an `exited` result with code 0, the bounded output,
+    the session tool result, and the consumed approval. On Linux the CLI starts
+    in a delegated cgroup; on Windows the scene grants the workspace.
+- Version 0.24.0 records provider profiles and trusted per-call approvals.
+  See ADR-0038 and ADR-0039.
+  - **Provider profiles:** `workspace provider-profile-add/show/remove` record
+    a name, provider kind, and authentication mode (`subscription`,
+    `api_key`, or `none`). Subscription is limited to OpenAI and Anthropic;
+    local providers use `none`. No endpoint, account, token, or credential is
+    stored, and no adapter or login uses a profile. `capabilities` reports
+    `provider_profiles: true` and `provider_adapters: false`.
+  - **Approvals:** `approvals request/list/show/approve/deny/consume` manage
+    trusted, single-use records bound to a session, workspace, operation,
+    exact request digest, and settings revision. Records expire in 60 to 3600
+    seconds; a settings change invalidates them; no argument text is stored.
+    The CLI consume command executes nothing, and no model tool consumes an
+    approval yet.
+  - **Records:** `provider_profile_added`, `provider_profile_removed`,
+    `approval_requested`, `approval_decided`, and `approval_consumed` in the
+    control journal. A 0.24.0 journal cannot be read by 0.23.0.
+- Version 0.23.0 adds a per-workspace package cache root and scoped Windows
+  access. See ADR-0037.
+  - **Commands:** `workspace set-package-cache <workspace-id> <dir>
+    --revision <n>` and `workspace clear-package-cache <workspace-id>
+    --revision <n>`. `status` lists roots under `package_cache_roots`.
+  - **Rules:** the root must exist, must not overlap application storage or
+    the development root, and must not overlap another workspace's root.
+  - **Fetch:** `packages fetch` writes into the selected root. Without one,
+    Linux keeps the application-storage fallback and Windows has none.
+  - **Runs:** a selected root is exposed read-only and named by
+    `OMGCODE_PACKAGE_CACHE` on both platforms. Windows requires a read-execute
+    container grant on that root and traversable ancestors; without the grant
+    the run fails before the program starts. `run_started` records
+    `package_cache` when true.
+  - **Records:** `package_cache_root_set` and `package_cache_root_cleared` in
+    the control journal. A 0.23.0 control journal cannot be read by 0.22.0.
+  - **Limits:** no invalidation, eviction, or freshness check; changing the
+    root leaves old files and old grants for the operator to manage.
+- Version 0.22.0 exposes the fetched-package cache to Linux runs read-only.
+  See ADR-0036.
+  - **Linux:** when `<data-dir>/package-cache/<workspace-id>` exists as a
+    plain directory, the run gets it read-only and `OMGCODE_PACKAGE_CACHE`.
+    The parent, journals, settings, and other workspaces stay denied; the run
+    cannot write the cache.
+  - **Windows:** the cache is not exposed. The AppContainer cannot read
+    application storage without an ACL grant, and container grants refuse
+    that storage.
+  - **Records:** `run_started` records `package_cache` only when true. A 0.22
+    journal that records it cannot be read by 0.21.0.
+  - **Reserved:** `OMGCODE_PACKAGE_CACHE` cannot be declared in a toolchain
+    profile.
+  - **Limits:** no invalidation, eviction, or freshness check; configuring a
+    toolchain to use the directory is operator work.
+- Version 0.21.0 adds the trusted operator command `omgcode packages fetch`
+  and a private allowlisted package cache. See ADR-0035.
+  - **Command:** `packages fetch <workspace-id> --profile <name> --url <url>
+    --name <cache-file> [--max-bytes <n>] [--timeout-secs <n>]`.
+  - **Gating:** trusted CLI only; never a model tool. The workspace must be
+    registered and enable `task_network`.
+  - **Destination:** the URL must match a recorded origin's scheme, host,
+    port, and path prefix. Normal use is `https`; `http` is accepted only for
+    loopback tests. Credentials, queries, fragments, and redirects are
+    refused. Proxy environment variables are ignored.
+  - **Transport:** system TLS trust through `reqwest`'s `native-tls` feature;
+    certificate validation is never disabled.
+  - **Bounds:** one GET, 1 byte to 1 GiB, 1 to 600 seconds. The body is
+    streamed, hashed with SHA-256, and stopped at the limit.
+  - **Cache:** `<data-dir>/package-cache/<workspace-id>/<cache-file>`, private
+    directories and files, exclusive name, temporary file then rename. No
+    power-loss claim. The run does not yet read the cache.
+  - **Audit:** `package_fetch_started` and `package_fetch_finished` in the
+    control journal preserve the settings revision and omit the URL text. A
+    control journal written by 0.21.0 cannot be read by 0.20.0.
+- Version 0.20.0 records operator-declared package-network profiles as
+  configuration only. See ADR-0034.
+  - **Commands:** `workspace package-profile-add`, `package-profile-show`, and
+    `package-profile-remove` use the expected settings revision. `status`
+    lists recorded profiles.
+  - **Contents:** a name and 1 to 8 registry origins. An origin is `https`
+    with a host, optional port, and optional path prefix; `http` is accepted
+    only for `localhost`, `127.0.0.1`, or `::1`. Credentials, queries,
+    fragments, wildcards, and path traversal are refused.
+  - **Not enforcement:** no run accepts a profile, `--network` remains
+    all-or-nothing, and no destination filter exists. A profile never
+    authorizes network access or a run.
+  - **Records:** `package_profile_added` and `package_profile_removed` events
+    in the control journal. A control journal written by 0.20.0 cannot be read
+    by 0.19.0; 0.20.0 reads earlier journals.
+- Version 0.19.0 bounds each trusted run's net disk growth. See ADR-0033.
+  - **Flag:** `--max-disk-mib` (16 to 1048576, default 8192) is required for
+    every trusted run. A run without a disk limit is refused before anything
+    is recorded.
+  - **Enforcement:** the supervisor measures allocated bytes and file lengths
+    under the confinement's writable roots before the program starts and once
+    a second on a separate thread. Each total has its own budget; passing
+    either ends the whole tree and records `limit_exceeded` with `disk`. A
+    final measurement runs after the tree is empty. The limit is sampled; it
+    is not a filesystem quota.
+  - **Fail closed:** a baseline that cannot be measured records `not_started`.
+    An unreadable root, or more than 4,000,000 entries, while the run lives
+    ends it as `supervision_failed`. Links and reparse points are not
+    followed. Other writers to the roots count as the run's growth.
+  - **Records:** `run_started` records `max_disk_bytes`, and the `usage` field
+    of `run_finished` records `peak_disk_bytes`. A run journal written by
+    0.19.0 cannot be read by 0.18.0; 0.19.0 reads 0.18.0 journals.
+  - **Not counted:** directory entries, inode or MFT use, and filesystem
+    metadata. A hard-linked file is counted once per name. Tested on Windows
+    11 build 26300 and WSL 6.6 only.
 - Version 0.18.0 adds outbound network access for trusted runs. See ADR-0032.
   - **Gating:** `omgcode run ... --network` needs the workspace
     `task_network` preference. Without both, a run has no IP networking, as
@@ -185,6 +313,11 @@ Changes are recorded here before a release version is assigned.
 
 ### Changed
 
+- Package-network destination enforcement is defined as a contract only in
+  ADR-0034. No run accepts a package-network profile, and `--network` remains
+  all-or-nothing. An advisory proxy or proxy environment variables are
+  explicitly rejected because a confined tree can bypass them. This is a
+  documentation change; no application version is bumped.
 - The SonarQube Cloud project key is now `OMG-Software_OMGCode`, matching the
   key a Sonar administrator set on the server. `sonar-project.properties` and
   the repository-checks guide use the new key.

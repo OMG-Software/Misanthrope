@@ -22,8 +22,10 @@ fn start(run_id: Uuid) -> RunStart {
             max_memory_bytes: 8 << 30,
             max_processes: 1024,
             max_cpu_ms: 7_200_000,
+            max_disk_bytes: Some(8 << 30),
         }),
         network: None,
+        package_cache: false,
     }
 }
 
@@ -57,12 +59,15 @@ fn limits_and_usage_are_recorded_and_checked_on_replay() {
     outcome.usage = Some(UsageRecord {
         cpu_ms: 40,
         peak_memory_bytes: Some(1 << 27),
+        peak_disk_bytes: Some(1 << 24),
     });
     journal.finish(limited, outcome).expect("finish");
     drop(journal);
     let text = fs::read_to_string(directory.path().join(FILE_NAME)).expect("journal text");
     assert!(text.contains(r#""kind":"limit_exceeded","limit":"memory""#));
     assert!(text.contains(r#""max_cpu_ms":7200000"#));
+    assert!(text.contains(r#""max_disk_bytes":8589934592"#));
+    assert!(text.contains(r#""peak_disk_bytes":16777216"#));
     // The earlier start's line carries no limits field at all.
     assert_eq!(text.matches("\"limits\"").count(), 1);
     let journal = RunJournal::open(directory.path(), store).expect("replay");
@@ -79,6 +84,7 @@ fn limits_and_usage_are_recorded_and_checked_on_replay() {
     not_started.usage = Some(UsageRecord {
         cpu_ms: 0,
         peak_memory_bytes: None,
+        peak_disk_bytes: None,
     });
     let run = Uuid::new_v4();
     let entries = [
@@ -93,6 +99,7 @@ fn limits_and_usage_are_recorded_and_checked_on_replay() {
         max_memory_bytes: 0,
         max_processes: 1,
         max_cpu_ms: 1,
+        max_disk_bytes: Some(1),
     });
     assert!(matches!(
         RunJournal::apply(
@@ -310,6 +317,32 @@ fn entry(store: Uuid, sequence: u64, action: RunAction) -> RunEntry {
     }
 }
 
+/// A start or outcome written before 0.19.0 has no disk field. It must
+/// deserialize with the default, and a 0.19.0 record must carry the field.
+#[test]
+fn disk_fields_are_optional_for_pre_0_19_records() {
+    let mut earlier = start(Uuid::new_v4());
+    let limits = earlier.limits.expect("limits");
+    earlier.limits = Some(LimitsRecord {
+        max_disk_bytes: None,
+        ..limits
+    });
+    let text = serde_json::to_string(&earlier).expect("serialize start");
+    assert!(!text.contains("max_disk_bytes"), "{text}");
+    let decoded: RunStart = serde_json::from_str(&text).expect("deserialize start");
+    assert_eq!(decoded, earlier);
+
+    let usage = UsageRecord {
+        cpu_ms: 1,
+        peak_memory_bytes: None,
+        peak_disk_bytes: None,
+    };
+    let text = serde_json::to_string(&usage).expect("serialize usage");
+    assert!(!text.contains("peak_disk_bytes"), "{text}");
+    let decoded: UsageRecord = serde_json::from_str(&text).expect("deserialize usage");
+    assert_eq!(decoded, usage);
+}
+
 /// The largest outcome and acknowledgement fit the reserved budget.
 #[test]
 fn outcome_events_fit_their_reserve() {
@@ -322,6 +355,7 @@ fn outcome_events_fit_their_reserve() {
         usage: Some(UsageRecord {
             cpu_ms: u64::MAX,
             peak_memory_bytes: Some(u64::MAX),
+            peak_disk_bytes: Some(u64::MAX),
         }),
     };
     for action in [
@@ -569,4 +603,34 @@ fn pending_starts_and_outcomes_follow_the_recorded_events() {
         Some(RunResult::CleanupUnconfirmed)
     );
     assert_eq!(journal.outcome(abandoned), None);
+}
+
+/// A package-cache exposure is recorded only when it applies; a run without
+/// it keeps the earlier journal shape.
+#[test]
+fn package_cache_access_is_recorded_only_when_present() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let store = store_id();
+    let (cached, plain) = (Uuid::new_v4(), Uuid::new_v4());
+    let mut cached_start = start(cached);
+    cached_start.package_cache = true;
+    let mut journal = RunJournal::open(directory.path(), store).expect("journal");
+    journal.start(cached_start).expect("cached start");
+    journal.start(start(plain)).expect("plain start");
+    drop(journal);
+    let text = fs::read_to_string(directory.path().join(FILE_NAME)).expect("journal text");
+    assert_eq!(text.matches("\"package_cache\"").count(), 1, "{text}");
+    assert!(text.contains("\"package_cache\":true"), "{text}");
+    let journal = RunJournal::open(directory.path(), store).expect("replay");
+    let starts = journal.pending_starts();
+    assert!(
+        starts
+            .iter()
+            .any(|start| start.run_id == cached && start.package_cache)
+    );
+    assert!(
+        starts
+            .iter()
+            .any(|start| start.run_id == plain && !start.package_cache)
+    );
 }

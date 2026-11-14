@@ -28,6 +28,154 @@ fn assert_no_runs(scene: &Scene) {
     assert_eq!(audit["pending"], Value::Array(Vec::new()));
 }
 
+/// A configured cache root is exposed read-only on Linux without using
+/// application storage.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_linux_run_reads_a_configured_package_cache_root() {
+    let scene = Scene::new();
+    assert_success(&scene.add_profile("system", &[]));
+    let cache_root = scene.path("package-cache-root");
+    fs::create_dir(&cache_root).expect("cache root");
+    let output = scene.cli(&[
+        "workspace",
+        "set-package-cache",
+        &scene.id,
+        path_arg(&cache_root),
+        "--revision",
+        &scene.revision().to_string(),
+    ]);
+    assert_success(&output);
+    fs::write(cache_root.join("pkg.bin"), b"configured-cache").expect("cache file");
+    let cache = cache_root.clone();
+    let script = "printf '%s\\n' \"$OMGCODE_PACKAGE_CACHE\"; \
+        cat \"$OMGCODE_PACKAGE_CACHE/pkg.bin\" > seen.txt; \
+        echo x > \"$OMGCODE_PACKAGE_CACHE/out\" 2>/dev/null && echo writable || echo read-only; \
+        ls \"$OMGCODE_PACKAGE_CACHE/..\" >/dev/null 2>&1 && echo parent-listed || echo parent-denied";
+    let run = run_json(&scene.run("system", &[], &shell(script)));
+    let stdout = run["stdout"]["text"].as_str().expect("stdout");
+    assert!(
+        stdout.contains(&cache.display().to_string()),
+        "the configured cache path was not exposed: {run}"
+    );
+    assert!(stdout.contains("read-only"), "{run}");
+    assert!(stdout.contains("parent-denied"), "{run}");
+    assert_eq!(
+        fs::read_to_string(scene.workspace.join("seen.txt")).expect("read cache"),
+        "configured-cache"
+    );
+    assert_eq!(run["start"]["package_cache"], true);
+    scene.close();
+}
+
+/// On Windows a configured cache root is exposed only after the container
+/// receives a read-execute grant on the per-workspace cache directory.
+#[cfg(windows)]
+#[test]
+fn a_windows_run_reads_a_granted_package_cache_root() {
+    let mut scene = Scene::new();
+    assert_success(&scene.add_profile("system", &[]));
+    // A top-level root has ancestors app packages can traverse; a root beneath
+    // the user's private temp directory cannot be reached by the container.
+    let cache_root = tempfile::TempDir::new_in("C:\\").expect("top-level cache root");
+    let cache_root_path = cache_root.path().to_path_buf();
+    let output = scene.cli(&[
+        "workspace",
+        "set-package-cache",
+        &scene.id,
+        path_arg(&cache_root_path),
+        "--revision",
+        &scene.revision().to_string(),
+    ]);
+    assert_success(&output);
+    fs::write(cache_root_path.join("pkg.bin"), b"configured-cache").expect("cache file");
+    let cache = cache_root_path.clone();
+    scene.grant(&cache_root_path, "read-execute");
+    let script = "type %OMGCODE_PACKAGE_CACHE%\\pkg.bin & echo %OMGCODE_PACKAGE_CACHE%";
+    let run = run_json(&scene.run("system", &[], &shell(script)));
+    let stdout = run["stdout"]["text"].as_str().expect("stdout");
+    assert!(
+        stdout.contains(&cache.display().to_string()),
+        "the configured cache path was not exposed: {run}"
+    );
+    assert!(
+        stdout.contains("configured-cache"),
+        "the cache file was not read: {run}"
+    );
+    assert_eq!(run["start"]["package_cache"], true);
+    scene.close();
+}
+
+/// Without the container grant, the configured cache path fails the run
+/// before the program starts.
+#[cfg(windows)]
+#[test]
+fn an_ungranted_package_cache_root_fails_the_run() {
+    let scene = Scene::new();
+    assert_success(&scene.add_profile("system", &[]));
+    let cache_root = scene.path("package-cache-root");
+    fs::create_dir(&cache_root).expect("cache root");
+    let output = scene.cli(&[
+        "workspace",
+        "set-package-cache",
+        &scene.id,
+        path_arg(&cache_root),
+        "--revision",
+        &scene.revision().to_string(),
+    ]);
+    assert_success(&output);
+    fs::write(cache_root.join("pkg.bin"), b"configured-cache").expect("cache file");
+    let output = scene.run("system", &[], &shell("echo should-not-run"));
+    assert_error_code(&output, "run");
+    scene.close();
+}
+
+/// A Linux run can read only its workspace's package cache. The cache is
+/// read-only and its parent application directory stays invisible.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_linux_run_reads_only_its_package_cache() {
+    let scene = Scene::new();
+    assert_success(&scene.add_profile("system", &[]));
+    let cache = scene.data.join("package-cache").join(&scene.id);
+    fs::create_dir_all(&cache).expect("cache directory");
+    fs::write(cache.join("pkg.bin"), b"cached-package").expect("cache file");
+    let script = "printf '%s\\n' \"$OMGCODE_PACKAGE_CACHE\"; \
+        cat \"$OMGCODE_PACKAGE_CACHE/pkg.bin\" > seen.txt; \
+        echo x > \"$OMGCODE_PACKAGE_CACHE/out\" 2>/dev/null && echo writable || echo read-only; \
+        ls \"$OMGCODE_PACKAGE_CACHE/..\" >/dev/null 2>&1 && echo parent-listed || echo parent-denied";
+    let run = run_json(&scene.run("system", &[], &shell(script)));
+    let stdout = run["stdout"]["text"].as_str().expect("stdout");
+    assert!(
+        stdout.contains(&cache.display().to_string()),
+        "the cache path was not exposed: {run}"
+    );
+    assert!(stdout.contains("read-only"), "{run}");
+    assert!(stdout.contains("parent-denied"), "{run}");
+    assert_eq!(
+        fs::read_to_string(scene.workspace.join("seen.txt")).expect("read cache"),
+        "cached-package"
+    );
+    assert_eq!(run["start"]["package_cache"], true);
+    scene.close();
+}
+
+/// Windows does not expose the application-storage cache to the AppContainer.
+#[cfg(windows)]
+#[test]
+fn windows_runs_do_not_see_the_package_cache() {
+    let scene = Scene::new();
+    assert_success(&scene.add_profile("system", &[]));
+    let cache = scene.data.join("package-cache").join(&scene.id);
+    fs::create_dir_all(&cache).expect("cache directory");
+    fs::write(cache.join("pkg.bin"), b"cached-package").expect("cache file");
+    let run = run_json(&scene.run("system", &[], &shell("set")));
+    let stdout = run["stdout"]["text"].as_str().expect("stdout");
+    assert!(!stdout.contains("OMGCODE_PACKAGE_CACHE"), "{run}");
+    assert!(run["start"].get("package_cache").is_none(), "{run}");
+    scene.close();
+}
+
 /// A run writes in the workspace, cannot read host data, sees only the
 /// curated environment, and records its intent and outcome but not its
 /// argument text or output.
@@ -684,6 +832,8 @@ fn a_tree_limit_ends_the_run_and_is_recorded() {
         "512",
         "--max-processes",
         "64",
+        "--max-disk-mib",
+        "256",
     ];
     let run = run_json(&scene.run("system", &options, &shell(SPIN)));
     assert_eq!(run["start"]["limits"]["max_cpu_ms"], 1000);
@@ -692,6 +842,10 @@ fn a_tree_limit_ends_the_run_and_is_recorded() {
         512u64 * 1024 * 1024
     );
     assert_eq!(run["start"]["limits"]["max_processes"], 64);
+    assert_eq!(
+        run["start"]["limits"]["max_disk_bytes"],
+        256u64 * 1024 * 1024
+    );
     assert_eq!(run["finish"]["result"]["kind"], "limit_exceeded");
     assert_eq!(run["finish"]["result"]["limit"], "cpu_time");
     assert!(run["finish"]["usage"]["cpu_ms"].as_u64().expect("CPU time") >= 1000);
@@ -702,7 +856,71 @@ fn a_tree_limit_ends_the_run_and_is_recorded() {
     assert_eq!(run["finish"]["result"]["code"], 0);
     assert_eq!(run["start"]["limits"]["max_processes"], 1024);
     assert_eq!(run["start"]["limits"]["max_cpu_ms"], 7_200_000);
+    assert_eq!(
+        run["start"]["limits"]["max_disk_bytes"],
+        8u64 * 1024 * 1024 * 1024
+    );
     assert!(run["finish"]["usage"].is_object());
+    scene.close();
+}
+
+/// Growth in the writable workspace past the disk limit ends the whole run.
+/// The limit is recorded before the program starts, and the outcome reports
+/// the measured peak growth.
+#[test]
+fn a_disk_limit_ends_the_run_and_is_recorded() {
+    let scene = Scene::new();
+    assert_success(&scene.add_profile("system", &[]));
+    // The source exists before the run, so the baseline counts it. Growing the
+    // writable workspace adds bytes the disk limit must see; each command then
+    // waits to be stopped.
+    #[cfg(target_os = "linux")]
+    let source = scene.workspace.join("growth-source.bin");
+    #[cfg(target_os = "linux")]
+    fs::write(&source, vec![0u8; 32 * 1024 * 1024]).expect("growth source");
+    #[cfg(target_os = "linux")]
+    let script = "cp growth-source.bin growth.bin; while :; do :; done".to_owned();
+    // Build the growth with `cmd` built-ins and files the container creates.
+    // External tools and `copy` were denied in the CI container, but `echo`
+    // creation and `type` of a container-created file work. Append a 7 KiB
+    // chunk enough times to pass 16 MiB.
+    #[cfg(windows)]
+    let script = {
+        let chunk = "x".repeat(7000);
+        format!(
+            "echo {chunk}>chunk & (for /l %i in (1,1,2500) do @type chunk>>growth.bin) & for /l %i in (1,0,2) do @rem"
+        )
+    };
+    let options = [
+        "--max-disk-mib",
+        "16",
+        "--max-memory-mib",
+        "512",
+        // Creating 32 MiB and sampling once a second can outlast the normal
+        // 10-second CLI deadline on a loaded runner. Bound the run itself so
+        // a missed disk limit still records a deadline instead of leaving the
+        // run pending when the harness stops the CLI.
+        "--timeout-secs",
+        "45",
+    ];
+    let run =
+        run_json(&scene.run_for("system", &options, &shell(&script), Duration::from_secs(60)));
+    assert_eq!(
+        run["start"]["limits"]["max_disk_bytes"],
+        16u64 * 1024 * 1024,
+        "{run}"
+    );
+    assert_eq!(run["finish"]["result"]["kind"], "limit_exceeded", "{run}");
+    assert_eq!(run["finish"]["result"]["limit"], "disk", "{run}");
+    assert!(
+        run["finish"]["usage"]["peak_disk_bytes"]
+            .as_u64()
+            .expect("disk usage")
+            >= 16 * 1024 * 1024,
+        "{run}"
+    );
+    assert_eq!(last_result(&scene)["limit"], "disk");
+    assert_eq!(scene.audit()["pending"], Value::Array(Vec::new()));
     scene.close();
 }
 
@@ -718,6 +936,8 @@ fn out_of_range_tree_limits_are_refused_before_recording() {
         ["--max-processes", "65537"],
         ["--max-cpu-secs", "0"],
         ["--max-cpu-secs", "604801"],
+        ["--max-disk-mib", "15"],
+        ["--max-disk-mib", "1048577"],
     ] {
         let output = scene.run("system", &options, &shell("exit 0"));
         assert_error_code(&output, "configuration");

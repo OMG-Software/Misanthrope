@@ -30,7 +30,7 @@ Read and write preferences default to enabled; process execution, task
 network access, host services, and model tools default to disabled. Provider
 connections remain separate from task networking. No operation class executes
 a tool by itself. The separate `model_tools` and `host_services` preferences
-are described under [model read/list tools](#model-readlist-tools) and
+are described under [model tools](#model-readlist-and-command-tools) and
 [host services](#host-services).
 
 Registration stores the canonical native path, volume/filesystem ID, 128-bit
@@ -114,6 +114,19 @@ zero-based sequence, UTC timestamp, global revision, and tagged `action`:
 | `workspace_registered` | New ID, directory identity, default preferences; increment revision |
 | `permissions_changed` | Existing ID and complete preference set; increment revision |
 | `policy_checked` | Explicit diagnostic binding/request check and decision; preserve revision |
+| `profile_added` | New toolchain profile; increment revision |
+| `profile_removed` | Remove a toolchain profile; increment revision |
+| `package_profile_added` | New package-network profile; increment revision |
+| `package_profile_removed` | Remove a package-network profile; increment revision |
+| `package_fetch_started` | Trusted package-fetch intent; preserve revision |
+| `package_fetch_finished` | Trusted package-fetch outcome; preserve revision |
+| `package_cache_root_set` | Select one workspace's package cache root; increment revision |
+| `package_cache_root_cleared` | Clear one workspace's package cache root; increment revision |
+| `provider_profile_added` | New provider profile; increment revision |
+| `provider_profile_removed` | Remove a provider profile; increment revision |
+| `approval_requested` | Trusted approval request; preserve revision |
+| `approval_decided` | Approval granted or denied; preserve revision |
+| `approval_consumed` | Approval used once; preserve revision |
 
 Operational file checks do not append `policy_checked`. They use current
 settings and their separate [operation journal](file-access.md). This prevents
@@ -167,6 +180,70 @@ that records a profile. The
 [execution guide](execution.md#toolchain-profiles) owns the rules. Profile
 variables are stored here in plain text; never put secrets in them.
 
+## Package-network profiles
+
+`workspace package-profile-add`, `package-profile-show`, and
+`package-profile-remove` record operator-declared registry origins as
+configuration only. Adding and removing need the expected revision and
+increment it, through the `package_profile_added` and
+`package_profile_removed` events. `workspace status` lists profiles under
+`package_profiles` and omits the field until a profile exists. Each profile
+has a name and 1 to 8 origins; there are at most 32 profiles, and one origin
+text is at most 2,048 bytes. No run accepts a profile, and a profile never
+authorizes network access. Version 0.19.0 refuses a settings log that records
+one; a 0.20.0 control journal cannot be read by 0.19.0. The
+[execution guide](execution.md#package-network-profile-contract-only) owns the
+contract and the remaining enforcement gate.
+
+A trusted `packages fetch` appends `package_fetch_started` and
+`package_fetch_finished` events. They preserve the settings revision. They
+record the profile identity and revision, a SHA-256 of the request URL (never
+the URL text), the cache name, limits, HTTP status, byte count, and content
+digest. A failed fetch records a controlled reason; an abandoned fetch leaves
+its start event. A control journal written by 0.21.0 cannot be read by 0.20.0.
+
+## Package cache roots
+
+`workspace set-package-cache <workspace-id> <dir> --revision <n>` selects one
+workspace's fetched-package cache directory. It must exist, must not overlap
+application storage or the development root, and must not overlap another
+workspace's cache root. `workspace clear-package-cache <workspace-id>
+--revision <n>` removes the selection and leaves cached files in place. Both
+use the expected revision and increment it through `package_cache_root_set`
+and `package_cache_root_cleared`. `workspace status` lists selected roots under
+`package_cache_roots` and omits the field until one exists. A control journal
+written by 0.23.0 cannot be read by 0.22.0. The
+[execution guide](execution.md#trusted-package-fetch) owns the fetch, exposure,
+and grant rules.
+
+## Provider profiles
+
+`workspace provider-profile-add <name> --kind <kind> --auth <auth>
+--revision <n>`, `provider-profile-show <name>`, and
+`provider-profile-remove <name> --revision <n>` record provider connection
+shapes. They store no credential, endpoint, or account. Adding and removing
+use the expected revision and increment it through `provider_profile_added`
+and `provider_profile_removed`; `workspace status` lists them under
+`provider_profiles` and omits the field until one exists. The
+[provider authentication guide](provider-authentication.md) owns the kind and
+authentication matrix. A control journal written by 0.24.0 cannot be read by
+0.23.0.
+
+## Approval records
+
+`approvals request`, `list`, `show`, `approve`, `deny`, and `consume` manage
+trusted per-call approvals. A request records a session, workspace, operation,
+exact request digest, summary, settings revision, and expiry. The events
+`approval_requested`, `approval_decided`, and `approval_consumed` preserve the
+settings revision. A decision or consumption is refused after expiry,
+mismatch, reuse, or any settings change. The `workspace_run_command` model tool
+consumes an approval; the CLI consume command marks a record used but executes
+nothing. The
+[agent instructions guide](agent-instructions.md#approval-records) owns the
+tool-side contract. See
+[ADR-0039](adr/0039-gate-future-model-tools-with-bound-single-use-approval-records.md)
+and [ADR-0040](adr/0040-gate-the-model-command-tool-with-approvals-and-the-trusted-runner.md).
+
 ## Task network
 
 `workspace permissions <id> --revision <n> --task-network true` lets a
@@ -193,7 +270,7 @@ log. Host-service access exposes every Unix socket the user can reach,
 including the Docker daemon; see
 [Unix-domain sockets](execution.md#unix-domain-sockets).
 
-## Model read/list tools
+## Model read/list and command tools
 
 `workspace permissions <id> --revision <n> --model-tools true` lets `chat` offer
 the local model two tools for that workspace: `workspace_read_file` and
@@ -202,6 +279,15 @@ per-run flag or per-call confirmation. It is a trusted settings change like the
 other flags. It needs the expected revision, appends `permissions_changed`, and
 increments the revision. It is not an operation class, so `workspace check` and
 policy audit records do not mention it.
+
+When `model_tools`, `execute`, `read`, and `write` are all enabled, the runtime
+also offers `workspace_run_command`. Its first call records a pending approval
+and does not run; after `approvals approve <id>`, a second identical call
+consumes the approval and starts the trusted run. The model cannot approve.
+The tool uses fixed limits and no network or host services. See
+[model command tool](execution.md#model-command-tool) and
+[ADR-0040](adr/0040-gate-the-model-command-tool-with-approvals-and-the-trusted-runner.md).
+The tool schema version is 0.2.0.
 
 `workspace status` always reports `model_tools`. Persisted settings omit the
 field while it is `false`, so settings that never enable it keep their exact

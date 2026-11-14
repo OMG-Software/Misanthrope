@@ -100,6 +100,8 @@ pub enum LimitKind {
     Processes,
     /// CPU time summed over the tree.
     CpuTime,
+    /// Net allocated-byte growth of the writable roots.
+    Disk,
 }
 
 /// The tree limits a run started with.
@@ -112,6 +114,10 @@ pub struct LimitsRecord {
     pub max_processes: u32,
     /// CPU time for the whole tree, in milliseconds.
     pub max_cpu_ms: u64,
+    /// Allocated-byte and file-length growth budget for the writable roots,
+    /// in bytes. Runs recorded by 0.18.0 had no disk limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_disk_bytes: Option<u64>,
 }
 
 /// What a limited tree used.
@@ -123,6 +129,11 @@ pub struct UsageRecord {
     /// Peak memory, when the platform reported it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peak_memory_bytes: Option<u64>,
+    /// Highest net disk growth observed above the pre-run baseline, when a
+    /// disk limit applied. It is the larger of allocated-byte growth and
+    /// file-length growth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_disk_bytes: Option<u64>,
 }
 
 /// The network access a run selected.
@@ -169,6 +180,14 @@ pub struct RunStart {
     /// runs never had it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network: Option<NetworkRecord>,
+    /// Whether the run could read the workspace's fetched-package cache,
+    /// since 0.22.0. False and earlier runs omit it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub package_cache: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// The outcome recorded after a run.
@@ -700,6 +719,7 @@ impl RunJournal {
                         limits.max_memory_bytes == 0
                             || limits.max_processes == 0
                             || limits.max_cpu_ms == 0
+                            || limits.max_disk_bytes == Some(0)
                     })
                     || start.network.as_ref().is_some_and(|network| {
                         network.support_paths.len() > MAX_NETWORK_SUPPORT_PATHS

@@ -1,9 +1,11 @@
 //! Developer CLI for the first OMGCode core prototype.
 #![forbid(unsafe_code)]
 
+mod approvals_cli;
 mod control_cli;
 mod file_cli;
 mod model_tools;
+mod packages_cli;
 mod run_cli;
 
 use clap::{Args, Parser, Subcommand};
@@ -67,6 +69,16 @@ enum Command {
     Runs {
         #[command(subcommand)]
         action: run_cli::RunsCommand,
+    },
+    /// Fetch a package from a declared registry into a private cache.
+    Packages {
+        #[command(subcommand)]
+        action: packages_cli::PackagesCommand,
+    },
+    /// Inspect, decide, or consume trusted per-call approvals.
+    Approvals {
+        #[command(subcommand)]
+        action: approvals_cli::ApprovalsCommand,
     },
 }
 
@@ -225,9 +237,17 @@ fn run(cli: Cli) -> Result<(), CliError> {
             "checkpoint_deletion": cfg!(any(target_os = "linux", target_os = "windows")),
             "edit_previews": cfg!(any(target_os = "linux", target_os = "windows")),
             "model_read_list_tools": model_tools::MODEL_TOOLS_SUPPORTED,
+            "model_command_tool": "approval_required",
+            "model_write_tools": false,
             "workspace_container_grants": omgcode_core::control::CONTAINER_GRANTS_SUPPORTED,
             "workspace_file_tools": false,
             "toolchain_profiles": RUN_SUPPORTED,
+            "package_network_profiles": true,
+            "package_network_enforcement": false,
+            "package_fetch": true,
+            "provider_profiles": true,
+            "provider_adapters": false,
+            "approvals": true,
             "process_execution": if RUN_SUPPORTED {
                 serde_json::Value::from("trusted_cli_only")
             } else {
@@ -291,6 +311,8 @@ fn run(cli: Cli) -> Result<(), CliError> {
         Command::Chat(args) => chat(cli.data_dir, args),
         Command::Run(args) => run_cli::run(args, &data_root(cli.data_dir)?),
         Command::Runs { action } => run_cli::runs(action, &data_root(cli.data_dir)?),
+        Command::Packages { action } => packages_cli::run(action, &data_root(cli.data_dir)?),
+        Command::Approvals { action } => approvals_cli::run(action, &data_root(cli.data_dir)?),
     }
 }
 

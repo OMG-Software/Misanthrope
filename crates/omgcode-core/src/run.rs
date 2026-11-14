@@ -38,8 +38,8 @@ use crate::workspace::DirectoryRecord;
 pub use omgcode_platform::interrupt::{InterruptWatch, cancel_on_interrupt};
 pub use omgcode_platform::process::{CancelSignal, ProcessLimits, TreeLimits};
 pub use omgcode_platform::process::{
-    MAX_CAPTURE_BYTES, MAX_DEADLINE, MAX_TREE_CPU_TIME, MAX_TREE_MEMORY_BYTES, MAX_TREE_PROCESSES,
-    MIN_TREE_MEMORY_BYTES,
+    MAX_CAPTURE_BYTES, MAX_DEADLINE, MAX_TREE_CPU_TIME, MAX_TREE_DISK_BYTES, MAX_TREE_MEMORY_BYTES,
+    MAX_TREE_PROCESSES, MIN_TREE_DISK_BYTES, MIN_TREE_MEMORY_BYTES,
 };
 
 /// Default tree memory limit for a trusted run: 8 GiB.
@@ -48,6 +48,8 @@ pub const DEFAULT_TREE_MEMORY_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 pub const DEFAULT_TREE_PROCESSES: u32 = 1024;
 /// Default tree CPU-time limit for a trusted run: two CPU-hours.
 pub const DEFAULT_TREE_CPU_TIME: Duration = Duration::from_secs(2 * 60 * 60);
+/// Default tree disk limit for a trusted run: 8 GiB of growth.
+pub const DEFAULT_TREE_DISK_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
 /// How long to wait for another command's hold on the control journal.
 const CONTROL_WAIT: Duration = Duration::from_secs(10);
@@ -711,6 +713,7 @@ fn settle(
                             ResourceLimit::Memory => LimitKind::Memory,
                             ResourceLimit::Processes => LimitKind::Processes,
                             ResourceLimit::CpuTime => LimitKind::CpuTime,
+                            ResourceLimit::Disk => LimitKind::Disk,
                         },
                     },
                 },
@@ -721,6 +724,7 @@ fn settle(
                 usage: outcome.usage.map(|usage| UsageRecord {
                     cpu_ms: millis(usage.cpu_time),
                     peak_memory_bytes: usage.peak_memory_bytes,
+                    peak_disk_bytes: usage.peak_disk_bytes,
                 }),
             };
             (finish, Some(outcome), None)
@@ -792,6 +796,9 @@ fn prepare(
     let tree = limits.tree.ok_or(RunError::Refused(
         "a trusted run needs tree limits; none were given",
     ))?;
+    let disk = tree.max_disk_bytes.ok_or(RunError::Refused(
+        "a trusted run needs a disk limit; none was given",
+    ))?;
     let registration = control
         .workspace(request.workspace_id)
         .ok_or(ControlError::UnknownWorkspace)?;
@@ -841,7 +848,7 @@ fn prepare(
     let search_path = std::env::join_paths(&path_entries)
         .map_err(|_| RunError::Refused("a PATH entry contains the platform's list separator"))?;
     let mut environment = vec![(OsString::from("PATH"), search_path)];
-    let (confinement, scratch, support_paths) = platform_setup(
+    let (confinement, scratch, support_paths, package_cache) = platform_setup(
         control,
         request,
         &scope.workspace,
@@ -874,6 +881,7 @@ fn prepare(
             max_memory_bytes: tree.max_memory_bytes,
             max_processes: tree.max_processes,
             max_cpu_ms: millis(tree.max_cpu_time),
+            max_disk_bytes: Some(disk),
         }),
         network: if request.network {
             Some(NetworkRecord {
@@ -885,6 +893,7 @@ fn prepare(
         } else {
             None
         },
+        package_cache,
     };
     Ok(Prepared {
         start,
@@ -1016,7 +1025,7 @@ fn network_access(request: &RunRequest) -> NetworkAccess {
 #[cfg(target_os = "linux")]
 #[allow(clippy::too_many_arguments)]
 fn platform_setup(
-    _control: &ControlStore,
+    control: &ControlStore,
     request: &RunRequest,
     _workspace_record: &DirectoryRecord,
     workspace: &Path,
@@ -1024,7 +1033,7 @@ fn platform_setup(
     data_root: &Path,
     run_id: Uuid,
     environment: &mut Vec<(OsString, OsString)>,
-) -> Result<(Confinement, Option<Scratch>, Vec<PathBuf>), RunError> {
+) -> Result<(Confinement, Option<Scratch>, Vec<PathBuf>, bool), RunError> {
     let parent = data_root.join("run-scratch");
     crate::storage::create_private_directories(&parent)
         .map_err(|error| io::Error::other(error.to_string()))?;
@@ -1053,6 +1062,13 @@ fn platform_setup(
         Vec::new()
     };
     read_only.extend(support_paths.iter().cloned());
+    // Expose only this workspace's fetched-package cache. Application storage
+    // otherwise stays outside the run's view.
+    let package_cache = package_cache_path(control, data_root, request.workspace_id);
+    if let Some(cache) = &package_cache {
+        read_only.push(cache.clone());
+        environment.push(("OMGCODE_PACKAGE_CACHE".into(), cache.as_os_str().to_owned()));
+    }
     let confinement = Confinement {
         read_only,
         read_write: vec![workspace.to_path_buf(), path, PathBuf::from("/dev/null")],
@@ -1064,7 +1080,50 @@ fn platform_setup(
         network: network_access(request),
         container: None,
     };
-    Ok((confinement, Some(scratch), support_paths))
+    Ok((
+        confinement,
+        Some(scratch),
+        support_paths,
+        package_cache.is_some(),
+    ))
+}
+
+/// The private package cache for one workspace, when it exists as a plain
+/// directory. A configured root outside application storage takes precedence.
+/// Linux falls back to its application-storage cache; Windows has no fallback.
+/// A link or other entry is not exposed.
+fn package_cache_path(
+    control: &ControlStore,
+    data_root: &Path,
+    workspace_id: WorkspaceId,
+) -> Option<PathBuf> {
+    let path = match control.package_cache_root(workspace_id) {
+        Some(root) => {
+            if !root.is_current().ok()? {
+                return None;
+            }
+            root.live_path().ok()?
+        }
+        None => {
+            #[cfg(target_os = "linux")]
+            {
+                data_root
+                    .join("package-cache")
+                    .join(workspace_id.to_string())
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = data_root;
+                return None;
+            }
+        }
+    };
+    // Normalize a recorded Windows path to the drive-letter form tools accept.
+    let path = native_form(path).ok()?;
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => Some(path),
+        _ => None,
+    }
 }
 
 /// Build the platform confinement and the runner-owned variables. Windows
@@ -1083,10 +1142,10 @@ fn platform_setup(
     workspace_record: &DirectoryRecord,
     workspace: &Path,
     roots: Vec<PathBuf>,
-    _data_root: &Path,
+    data_root: &Path,
     _run_id: Uuid,
     environment: &mut Vec<(OsString, OsString)>,
-) -> Result<(Confinement, Option<Scratch>, Vec<PathBuf>), RunError> {
+) -> Result<(Confinement, Option<Scratch>, Vec<PathBuf>, bool), RunError> {
     use crate::control::container_name;
 
     workspace_access(control, request.workspace_id, workspace_record, false)
@@ -1104,14 +1163,20 @@ fn platform_setup(
     }
     environment.push(("HOME".into(), home.clone().into_os_string()));
     environment.push(("USERPROFILE".into(), home.into_os_string()));
+    let package_cache = package_cache_path(control, data_root, request.workspace_id);
+    let mut read_only = roots;
+    if let Some(cache) = &package_cache {
+        read_only.push(cache.clone());
+        environment.push(("OMGCODE_PACKAGE_CACHE".into(), cache.as_os_str().to_owned()));
+    }
     let confinement = Confinement {
-        read_only: roots,
+        read_only,
         read_write: vec![workspace.to_path_buf()],
         unix_sockets: UnixSocketAccess::PairsOnly,
         network: network_access(request),
         container: Some(name),
     };
-    Ok((confinement, None, Vec::new()))
+    Ok((confinement, None, Vec::new(), package_cache.is_some()))
 }
 
 #[cfg(not(any(target_os = "linux", windows)))]
@@ -1125,7 +1190,7 @@ fn platform_setup(
     _data_root: &Path,
     _run_id: Uuid,
     _environment: &mut Vec<(OsString, OsString)>,
-) -> Result<(Confinement, Option<Scratch>, Vec<PathBuf>), RunError> {
+) -> Result<(Confinement, Option<Scratch>, Vec<PathBuf>, bool), RunError> {
     Err(RunError::Refused(
         "trusted runs exist only on Linux and Windows",
     ))
@@ -1296,6 +1361,7 @@ mod tests {
             unix_sockets: SocketMode::PairsOnly,
             limits: None,
             network: None,
+            package_cache: false,
         }
     }
 
@@ -1345,6 +1411,7 @@ mod tests {
             max_memory_bytes: 1024 * 1024 * 1024,
             max_processes: 64,
             max_cpu_time: Duration::from_secs(60),
+            max_disk_bytes: Some(1024 * 1024 * 1024),
         };
         let cases = [
             process::TreeLimits {
@@ -1357,6 +1424,14 @@ mod tests {
             },
             process::TreeLimits {
                 max_cpu_time: Duration::ZERO,
+                ..roomy
+            },
+            process::TreeLimits {
+                max_disk_bytes: Some(1024),
+                ..roomy
+            },
+            process::TreeLimits {
+                max_disk_bytes: Some(MAX_TREE_DISK_BYTES + 1),
                 ..roomy
             },
         ];

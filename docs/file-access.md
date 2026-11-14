@@ -7,7 +7,7 @@ new-file creation, and exclusive single-directory creation. Trusted CLI input
 exercises these APIs. The 0.4.0 core turn runtime can also dispatch read and
 list through a caller-supplied model interface. Since 0.12.0, chat runs that
 runtime with the local LM Studio adapter when the workspace's
-[`model_tools` preference](workspace-permissions.md#model-readlist-tools) is
+[`model_tools` preference](workspace-permissions.md#model-readlist-and-command-tools) is
 enabled; otherwise chat advertises no tools. The 0.5.0 CLI adds
 a read-only `file diff` preview that reads through the broker and never writes,
 checkpoints, or replaces a workspace entry. The process runner,

@@ -22,8 +22,17 @@ use crate::policy::{
 use crate::storage::{self, StorageError};
 use crate::workspace::DirectoryRecord;
 
+mod approval;
 mod container;
+mod package;
 mod profile;
+mod provider;
+
+pub use approval::{
+    ApprovalBinding, ApprovalDecision, ApprovalDeclaration, ApprovalOperation, ApprovalRequest,
+    ApprovalState, ApprovalStatus, MAX_APPROVAL_SUMMARY_BYTES, MAX_APPROVAL_TTL_SECS,
+    MAX_APPROVALS, MAX_PENDING_APPROVALS, MIN_APPROVAL_TTL_SECS, now_unix,
+};
 
 pub use container::{
     ContainerGrant, ContainerGrantAccess, ContainerGrantState, ContainerGrantStatus,
@@ -31,11 +40,21 @@ pub use container::{
 };
 /// Whether this platform can record and apply container grants.
 pub use omgcode_platform::container::CONTAINER_GRANTS_SUPPORTED;
+pub use package::{
+    MAX_PACKAGE_ORIGIN_BYTES, MAX_PACKAGE_ORIGINS, MAX_PACKAGE_OUTPUT_BYTES, MAX_PACKAGE_PROFILES,
+    PackageFetchFailure, PackageFetchFinish, PackageFetchOutcome, PackageFetchStart, PackageOrigin,
+    PackageProfile, PackageProfileDeclaration, PackageProfileStatus, PackageScheme, parse_origin,
+    valid_output_name,
+};
 pub use profile::{
     MAX_PROFILE_NAME_CHARS, MAX_PROFILE_PATH_ENTRIES, MAX_PROFILE_ROOTS, MAX_PROFILE_VARIABLES,
     MAX_PROFILES, MAX_VARIABLE_NAME_BYTES, MAX_VARIABLE_VALUE_BYTES, ProfileDeclaration,
     ProfilePlatform, ProfileStatus, ProfileVariable, RESERVED_VARIABLES, ToolchainProfile,
     is_reserved_variable, valid_profile_name,
+};
+pub use provider::{
+    MAX_PROVIDER_PROFILES, ProviderAuth, ProviderKind, ProviderProfile, ProviderProfileDeclaration,
+    ProviderProfileStatus,
 };
 
 const FILE_NAME: &str = "control-v1.jsonl";
@@ -103,6 +122,27 @@ pub enum ControlError {
     /// The requested toolchain profile is invalid or outside the allowed scope.
     #[error("toolchain profile refused: {0}")]
     ProfileRefused(&'static str),
+    /// No recorded package-network profile has this name.
+    #[error("package-network profile is not recorded")]
+    UnknownPackageProfile,
+    /// The requested package-network profile is invalid.
+    #[error("package-network profile refused: {0}")]
+    PackageProfileRefused(&'static str),
+    /// The requested package cache root is invalid or overlaps protected data.
+    #[error("package cache root refused: {0}")]
+    PackageCacheRefused(&'static str),
+    /// No recorded provider profile has this name.
+    #[error("provider profile is not recorded")]
+    UnknownProvider,
+    /// The requested provider profile is invalid.
+    #[error("provider profile refused: {0}")]
+    ProviderRefused(&'static str),
+    /// No retained approval has this identifier.
+    #[error("approval is not recorded")]
+    UnknownApproval,
+    /// The approval request, decision, or consumption is not valid.
+    #[error("approval refused: {0}")]
+    ApprovalRefused(&'static str),
 }
 
 impl From<StorageError> for ControlError {
@@ -158,11 +198,30 @@ pub struct ControlSnapshot {
     container_grants: Vec<ContainerGrantStatus>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     profiles: Vec<ProfileStatus>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    package_profiles: Vec<PackageProfileStatus>,
+    /// Operator-selected fetched-package roots, one per workspace, outside
+    /// application storage and the development root.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    package_cache_roots: Vec<PackageCacheRootStatus>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    provider_profiles: Vec<ProviderProfileStatus>,
+    /// Trusted per-call approval records. Operational state, not settings.
+    #[serde(skip)]
+    approvals: Vec<approval::ApprovalRecord>,
     /// Container revocations requested per workspace since the journal was
     /// created. Derived on replay and never serialized; run watchers compare
     /// it with the count when their run started.
     #[serde(skip)]
     grant_revocations: BTreeMap<WorkspaceId, u64>,
+}
+
+/// One workspace's selected fetched-package cache root.
+#[derive(Clone, Debug, Serialize)]
+pub struct PackageCacheRootStatus {
+    workspace_id: WorkspaceId,
+    directory: DirectoryRecord,
+    revision: u64,
 }
 
 /// Operator-facing workspace view that reports every preference explicitly.
@@ -257,6 +316,43 @@ enum Action {
     },
     ProfileRemoved {
         profile_id: Uuid,
+    },
+    PackageProfileAdded {
+        profile: PackageProfile,
+    },
+    PackageProfileRemoved {
+        profile_id: Uuid,
+    },
+    PackageFetchStarted {
+        start: PackageFetchStart,
+    },
+    PackageFetchFinished {
+        finish: PackageFetchFinish,
+    },
+    PackageCacheRootSet {
+        #[serde(deserialize_with = "deserialize_workspace_id")]
+        workspace_id: WorkspaceId,
+        directory: DirectoryRecord,
+    },
+    PackageCacheRootCleared {
+        #[serde(deserialize_with = "deserialize_workspace_id")]
+        workspace_id: WorkspaceId,
+    },
+    ProviderProfileAdded {
+        profile: ProviderProfile,
+    },
+    ProviderProfileRemoved {
+        profile_id: Uuid,
+    },
+    ApprovalRequested {
+        request: ApprovalRequest,
+    },
+    ApprovalDecided {
+        approval_id: Uuid,
+        decision: ApprovalDecision,
+    },
+    ApprovalConsumed {
+        approval_id: Uuid,
     },
 }
 
@@ -423,6 +519,10 @@ impl ControlStore {
                 configuration_only: true,
                 container_grants: Vec::new(),
                 profiles: Vec::new(),
+                package_profiles: Vec::new(),
+                package_cache_roots: Vec::new(),
+                provider_profiles: Vec::new(),
+                approvals: Vec::new(),
                 grant_revocations: BTreeMap::new(),
             },
             entries: Vec::new(),
@@ -444,6 +544,91 @@ impl ControlStore {
     /// Whether the user has explicitly selected a development root.
     pub const fn has_development_root(&self) -> bool {
         self.snapshot.development_root.is_some()
+    }
+
+    /// Select the fetched-package cache directory for one workspace. It must
+    /// exist, must not overlap application storage, must not overlap the
+    /// development root, and must not overlap another workspace's cache root.
+    pub fn set_package_cache_root(
+        &mut self,
+        workspace_id: WorkspaceId,
+        path: &Path,
+        expected_revision: u64,
+    ) -> Result<(), ControlError> {
+        self.check_revision(expected_revision)?;
+        if self.workspace(workspace_id).is_none() {
+            return Err(ControlError::UnknownWorkspace);
+        }
+        let directory = DirectoryRecord::capture(path)?;
+        self.check_storage_overlap(&directory)?;
+        let development = self
+            .snapshot
+            .development_root
+            .as_ref()
+            .ok_or(ControlError::NoRoot)?;
+        if development.contains(&directory)? || directory.contains(development)? {
+            return Err(ControlError::PackageCacheRefused(
+                "the package cache root must not overlap the development root",
+            ));
+        }
+        for existing in &self.snapshot.package_cache_roots {
+            if existing.workspace_id != workspace_id
+                && (existing.directory.contains(&directory)?
+                    || directory.contains(&existing.directory)?)
+            {
+                return Err(ControlError::PackageCacheRefused(
+                    "package cache roots must not overlap another workspace's root",
+                ));
+            }
+        }
+        if self.snapshot.package_cache_roots.iter().any(|existing| {
+            existing.workspace_id == workspace_id && existing.directory.same_directory(&directory)
+        }) {
+            return Ok(());
+        }
+        self.append(
+            Action::PackageCacheRootSet {
+                workspace_id,
+                directory,
+            },
+            self.next_revision()?,
+        )?;
+        Ok(())
+    }
+
+    /// Clear one workspace's package cache root. This advances the settings
+    /// revision only when a root was recorded. Cached files are left in place.
+    pub fn clear_package_cache_root(
+        &mut self,
+        workspace_id: WorkspaceId,
+        expected_revision: u64,
+    ) -> Result<(), ControlError> {
+        self.check_revision(expected_revision)?;
+        if self.workspace(workspace_id).is_none() {
+            return Err(ControlError::UnknownWorkspace);
+        }
+        if !self
+            .snapshot
+            .package_cache_roots
+            .iter()
+            .any(|existing| existing.workspace_id == workspace_id)
+        {
+            return Ok(());
+        }
+        self.append(
+            Action::PackageCacheRootCleared { workspace_id },
+            self.next_revision()?,
+        )?;
+        Ok(())
+    }
+
+    /// The selected package cache root for one workspace, if any.
+    pub(crate) fn package_cache_root(&self, workspace_id: WorkspaceId) -> Option<&DirectoryRecord> {
+        self.snapshot
+            .package_cache_roots
+            .iter()
+            .find(|status| status.workspace_id == workspace_id)
+            .map(|status| &status.directory)
     }
     /// Look up descriptive workspace metadata by its stable identifier.
     pub fn workspace(&self, id: WorkspaceId) -> Option<&WorkspaceRegistration> {
@@ -827,6 +1012,11 @@ impl ControlStore {
                 | Action::ContainerGrantApplied { .. }
                 | Action::ContainerRevokeRequested { .. }
                 | Action::ContainerGrantRevoked { .. }
+                | Action::PackageFetchStarted { .. }
+                | Action::PackageFetchFinished { .. }
+                | Action::ApprovalRequested { .. }
+                | Action::ApprovalDecided { .. }
+                | Action::ApprovalConsumed { .. }
         );
         let revision = if configuration_change {
             state
@@ -912,6 +1102,57 @@ impl ControlStore {
             | Action::ContainerGrantRevoked { .. } => container::apply(state, &entry.action)?,
             Action::ProfileAdded { .. } | Action::ProfileRemoved { .. } => {
                 profile::apply(state, &entry.action, revision)?;
+            }
+            Action::PackageProfileAdded { .. }
+            | Action::PackageProfileRemoved { .. }
+            | Action::PackageFetchStarted { .. }
+            | Action::PackageFetchFinished { .. } => {
+                package::apply(state, &entry.action, revision)?;
+            }
+            Action::PackageCacheRootSet {
+                workspace_id,
+                directory,
+            } => {
+                if !directory.validate_shape()
+                    || !state
+                        .workspaces
+                        .iter()
+                        .any(|workspace| workspace.id == *workspace_id)
+                {
+                    return Err(ControlError::Invalid("invalid package cache root"));
+                }
+                if let Some(existing) = state
+                    .package_cache_roots
+                    .iter_mut()
+                    .find(|status| status.workspace_id == *workspace_id)
+                {
+                    existing.directory = directory.clone();
+                    existing.revision = revision;
+                } else {
+                    state.package_cache_roots.push(PackageCacheRootStatus {
+                        workspace_id: *workspace_id,
+                        directory: directory.clone(),
+                        revision,
+                    });
+                }
+            }
+            Action::PackageCacheRootCleared { workspace_id } => {
+                let index = state
+                    .package_cache_roots
+                    .iter()
+                    .position(|status| status.workspace_id == *workspace_id)
+                    .ok_or(ControlError::Invalid(
+                        "clearing an unknown package cache root",
+                    ))?;
+                state.package_cache_roots.remove(index);
+            }
+            Action::ProviderProfileAdded { .. } | Action::ProviderProfileRemoved { .. } => {
+                provider::apply(state, &entry.action, revision)?;
+            }
+            Action::ApprovalRequested { .. }
+            | Action::ApprovalDecided { .. }
+            | Action::ApprovalConsumed { .. } => {
+                approval::apply(state, &entry.action, revision)?;
             }
         }
         state.revision = revision;

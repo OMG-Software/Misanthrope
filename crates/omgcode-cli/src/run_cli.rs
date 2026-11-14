@@ -9,8 +9,9 @@ use std::time::Duration;
 use clap::{Args, Subcommand};
 use omgcode_core::policy::WorkspaceId;
 use omgcode_core::run::{
-    self, CancelSignal, DEFAULT_TREE_CPU_TIME, DEFAULT_TREE_MEMORY_BYTES, DEFAULT_TREE_PROCESSES,
-    MAX_CAPTURE_BYTES, MAX_DEADLINE, MAX_TREE_CPU_TIME, MAX_TREE_MEMORY_BYTES, MAX_TREE_PROCESSES,
+    self, CancelSignal, DEFAULT_TREE_CPU_TIME, DEFAULT_TREE_DISK_BYTES, DEFAULT_TREE_MEMORY_BYTES,
+    DEFAULT_TREE_PROCESSES, MAX_CAPTURE_BYTES, MAX_DEADLINE, MAX_TREE_CPU_TIME,
+    MAX_TREE_DISK_BYTES, MAX_TREE_MEMORY_BYTES, MAX_TREE_PROCESSES, MIN_TREE_DISK_BYTES,
     MIN_TREE_MEMORY_BYTES, ProcessLimits, RunError, RunRequest, TreeLimits, cancel_on_interrupt,
 };
 use serde_json::json;
@@ -46,6 +47,11 @@ pub(crate) struct RunArgs {
     /// 604800).
     #[arg(long, default_value_t = DEFAULT_TREE_CPU_TIME.as_secs())]
     max_cpu_secs: u64,
+    /// Bytes the run may add to its writable roots, in MiB (16 to 1048576).
+    /// Allocated bytes and file lengths are bounded separately. Sampled once a
+    /// second, not a filesystem quota. See ADR-0033.
+    #[arg(long, default_value_t = DEFAULT_TREE_DISK_BYTES / MIB)]
+    max_disk_mib: u64,
     /// Allow host Unix-domain sockets, such as the Docker daemon. Needs the
     /// workspace `host_services` preference. Refused on Windows.
     #[arg(long)]
@@ -102,7 +108,12 @@ pub(crate) fn run(args: RunArgs, data_root: &Path) -> Result<(), CliError> {
             "Output limit must be at most 16 MiB",
         ));
     }
-    let tree = tree_limits(args.max_memory_mib, args.max_processes, args.max_cpu_secs)?;
+    let tree = tree_limits(
+        args.max_memory_mib,
+        args.max_processes,
+        args.max_cpu_secs,
+        args.max_disk_mib,
+    )?;
     let mut command = args.command.into_iter();
     let program = command
         .next()
@@ -155,7 +166,12 @@ pub(crate) fn run(args: RunArgs, data_root: &Path) -> Result<(), CliError> {
 const MIB: u64 = 1024 * 1024;
 
 /// Check the tree-limit flags against the runner's ranges.
-fn tree_limits(memory_mib: u64, processes: u32, cpu_secs: u64) -> Result<TreeLimits, CliError> {
+fn tree_limits(
+    memory_mib: u64,
+    processes: u32,
+    cpu_secs: u64,
+    disk_mib: u64,
+) -> Result<TreeLimits, CliError> {
     let memory = memory_mib
         .checked_mul(MIB)
         .filter(|bytes| (MIN_TREE_MEMORY_BYTES..=MAX_TREE_MEMORY_BYTES).contains(bytes))
@@ -173,10 +189,15 @@ fn tree_limits(memory_mib: u64, processes: u32, cpu_secs: u64) -> Result<TreeLim
             "CPU-time limit must be 1 to 604800 seconds",
         ));
     }
+    let disk = disk_mib
+        .checked_mul(MIB)
+        .filter(|bytes| (MIN_TREE_DISK_BYTES..=MAX_TREE_DISK_BYTES).contains(bytes))
+        .ok_or_else(|| CliError::new("configuration", "Disk limit must be 16 to 1048576 MiB"))?;
     Ok(TreeLimits {
         max_memory_bytes: memory,
         max_processes: processes,
         max_cpu_time: cpu,
+        max_disk_bytes: Some(disk),
     })
 }
 

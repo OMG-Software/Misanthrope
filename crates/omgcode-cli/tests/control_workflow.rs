@@ -13,8 +13,8 @@ use uuid::Uuid;
 #[cfg(unix)]
 use support::CLI_DEADLINE;
 use support::{
-    HANG_FIXTURE_ENV, assert_control_error, assert_success, json_output, path_arg, run_cli,
-    run_with_deadline,
+    HANG_FIXTURE_ENV, assert_control_error, assert_error_code, assert_success, json_output,
+    path_arg, run_cli, run_with_deadline,
 };
 
 /// Park only when the timeout regression launches this test in a child process.
@@ -448,6 +448,14 @@ fn capabilities_report_configuration_only_policy_and_trusted_runs_only() {
     assert_eq!(capabilities["workspace_container_grants"], cfg!(windows));
     let runs = cfg!(any(target_os = "linux", windows));
     assert_eq!(capabilities["toolchain_profiles"], runs);
+    assert_eq!(capabilities["model_command_tool"], "approval_required");
+    assert_eq!(capabilities["model_write_tools"], false);
+    assert_eq!(capabilities["package_network_profiles"], true);
+    assert_eq!(capabilities["package_network_enforcement"], false);
+    assert_eq!(capabilities["package_fetch"], true);
+    assert_eq!(capabilities["provider_profiles"], true);
+    assert_eq!(capabilities["provider_adapters"], false);
+    assert_eq!(capabilities["approvals"], true);
     if runs {
         assert_eq!(capabilities["process_execution"], "trusted_cli_only");
     } else {
@@ -462,6 +470,388 @@ fn capabilities_report_configuration_only_policy_and_trusted_runs_only() {
     };
     assert_eq!(capabilities["sandbox_backend"], backend);
     assert!(!data_root.exists());
+}
+
+/// Package-network profiles are recorded with revisions but never authorize a
+/// run. Invalid origins and duplicates are refused without a revision change.
+#[test]
+fn package_profiles_are_configuration_only_and_revisioned() {
+    let temporary = TempDir::new().expect("temporary directory");
+    let data_root = temporary.path().join("application-data");
+    let development_root = temporary.path().join("development");
+    fs::create_dir_all(&development_root).expect("development root");
+    let snapshot = set_root(&data_root, &development_root);
+    let revision = snapshot["revision"].as_u64().expect("revision");
+
+    let output = run_cli(
+        &data_root,
+        &[
+            "workspace",
+            "package-profile-add",
+            "crates",
+            "--registry",
+            "https://registry.example.com/api/v4",
+            "--revision",
+            &revision.to_string(),
+        ],
+    );
+    assert_success(&output);
+    let added = json_output(&output);
+    assert!(added["package_profile_id"].as_str().is_some());
+    assert_eq!(added["snapshot"]["package_profiles"][0]["name"], "crates");
+    let revision = added["snapshot"]["revision"]
+        .as_u64()
+        .expect("revision after add");
+
+    let output = run_cli(&data_root, &["workspace", "package-profile-show", "CRATES"]);
+    assert_success(&output);
+    let shown = json_output(&output);
+    assert_eq!(shown["package_profile"]["name"], "crates");
+    assert_eq!(shown["package_profile"]["origins"][0]["scheme"], "https");
+    assert_eq!(
+        shown["package_profile"]["origins"][0]["host"],
+        "registry.example.com"
+    );
+    assert_eq!(shown["package_profile"]["origins"][0]["port"], 443);
+    assert_eq!(
+        shown["package_profile"]["origins"][0]["path_prefix"],
+        "/api/v4/"
+    );
+
+    let output = run_cli(&data_root, &["workspace", "status"]);
+    assert_success(&output);
+    assert_eq!(
+        json_output(&output)["package_profiles"][0]["name"],
+        "crates"
+    );
+
+    let output = run_cli(
+        &data_root,
+        &[
+            "workspace",
+            "package-profile-add",
+            "plain",
+            "--registry",
+            "http://registry.example.com/",
+            "--revision",
+            &revision.to_string(),
+        ],
+    );
+    assert_control_error(&output);
+    let output = run_cli(&data_root, &["workspace", "status"]);
+    assert_eq!(
+        json_output(&output)["revision"],
+        Value::from(revision),
+        "a refused profile changed the revision"
+    );
+
+    let output = run_cli(
+        &data_root,
+        &[
+            "workspace",
+            "package-profile-add",
+            "CRATES",
+            "--registry",
+            "https://other.example.com/",
+            "--revision",
+            &revision.to_string(),
+        ],
+    );
+    assert_control_error(&output);
+
+    let output = run_cli(
+        &data_root,
+        &[
+            "workspace",
+            "package-profile-remove",
+            "crates",
+            "--revision",
+            "0",
+        ],
+    );
+    assert_control_error(&output);
+
+    let output = run_cli(
+        &data_root,
+        &[
+            "workspace",
+            "package-profile-remove",
+            "crates",
+            "--revision",
+            &revision.to_string(),
+        ],
+    );
+    assert_success(&output);
+    assert!(
+        json_output(&output)["snapshot"]
+            .get("package_profiles")
+            .is_none()
+    );
+
+    let output = run_cli(&data_root, &["workspace", "package-profile-show", "crates"]);
+    assert_control_error(&output);
+}
+
+/// Provider profiles record only a connection shape and authentication mode;
+/// they hold no credential and enable no adapter.
+#[test]
+fn provider_profiles_are_configuration_only_and_revisioned() {
+    let temporary = TempDir::new().expect("temporary directory");
+    let data_root = temporary.path().join("application-data");
+    let development_root = temporary.path().join("development");
+    fs::create_dir_all(&development_root).expect("development root");
+    let revision = set_root(&data_root, &development_root)["revision"]
+        .as_u64()
+        .expect("revision");
+
+    let output = run_cli(
+        &data_root,
+        &[
+            "workspace",
+            "provider-profile-add",
+            "work",
+            "--kind",
+            "openai",
+            "--auth",
+            "subscription",
+            "--revision",
+            &revision.to_string(),
+        ],
+    );
+    assert_success(&output);
+    let added = json_output(&output);
+    assert!(added["provider_profile_id"].as_str().is_some());
+    assert_eq!(added["snapshot"]["provider_profiles"][0]["name"], "work");
+    assert_eq!(added["snapshot"]["provider_profiles"][0]["kind"], "openai");
+    assert_eq!(
+        added["snapshot"]["provider_profiles"][0]["auth"],
+        "subscription"
+    );
+    let revision = added["snapshot"]["revision"]
+        .as_u64()
+        .expect("revision after add");
+
+    let output = run_cli(&data_root, &["workspace", "provider-profile-show", "WORK"]);
+    assert_success(&output);
+    let shown = json_output(&output);
+    assert_eq!(shown["provider_profile"]["name"], "work");
+    assert_eq!(shown["provider_profile"]["kind"], "openai");
+    assert_eq!(shown["provider_profile"]["auth"], "subscription");
+
+    let output = run_cli(
+        &data_root,
+        &[
+            "workspace",
+            "provider-profile-add",
+            "invalid",
+            "--kind",
+            "ollama_local",
+            "--auth",
+            "api_key",
+            "--revision",
+            &revision.to_string(),
+        ],
+    );
+    assert_control_error(&output);
+    let output = run_cli(
+        &data_root,
+        &[
+            "workspace",
+            "provider-profile-add",
+            "WORK",
+            "--kind",
+            "anthropic",
+            "--auth",
+            "api_key",
+            "--revision",
+            &revision.to_string(),
+        ],
+    );
+    assert_control_error(&output);
+
+    let output = run_cli(
+        &data_root,
+        &[
+            "workspace",
+            "provider-profile-remove",
+            "work",
+            "--revision",
+            "0",
+        ],
+    );
+    assert_control_error(&output);
+    let output = run_cli(
+        &data_root,
+        &[
+            "workspace",
+            "provider-profile-remove",
+            "work",
+            "--revision",
+            &revision.to_string(),
+        ],
+    );
+    assert_success(&output);
+    assert!(
+        json_output(&output)["snapshot"]
+            .get("provider_profiles")
+            .is_none()
+    );
+    let output = run_cli(&data_root, &["workspace", "provider-profile-show", "work"]);
+    assert_control_error(&output);
+}
+
+/// Approvals are requested, decided, and consumed once; a denied or replayed
+/// request is refused. No operation executes.
+#[test]
+fn approvals_are_requested_decided_and_consumed_once() {
+    let temporary = TempDir::new().expect("temporary directory");
+    let data_root = temporary.path().join("application-data");
+    let development_root = temporary.path().join("development");
+    let workspace = development_root.join("workspace");
+    fs::create_dir_all(&workspace).expect("workspace");
+    let revision = set_root(&data_root, &development_root)["revision"]
+        .as_u64()
+        .expect("revision");
+    let workspace_id = register(&data_root, &workspace, revision);
+    let session = Uuid::new_v4().to_string();
+    let digest = "a".repeat(64);
+
+    let output = run_cli(
+        &data_root,
+        &[
+            "approvals",
+            "request",
+            "--session",
+            &session,
+            "--workspace",
+            &workspace_id,
+            "--operation",
+            "command",
+            "--digest",
+            &digest,
+            "--summary",
+            "Run the project build",
+            "--ttl-secs",
+            "900",
+        ],
+    );
+    assert_success(&output);
+    let approval = json_output(&output)["approval"].clone();
+    let approval_id = approval["id"].as_str().expect("approval id").to_owned();
+    assert_eq!(approval["state"], "pending");
+
+    let output = run_cli(&data_root, &["approvals", "list"]);
+    assert_success(&output);
+    assert_eq!(json_output(&output)["approvals"][0]["id"], approval_id);
+
+    let output = run_cli(&data_root, &["approvals", "approve", &approval_id]);
+    assert_success(&output);
+    assert_eq!(json_output(&output)["decision"], "approved");
+    assert_eq!(json_output(&output)["approval"]["state"], "approved");
+
+    let output = run_cli(
+        &data_root,
+        &[
+            "approvals",
+            "consume",
+            &approval_id,
+            "--session",
+            &session,
+            "--workspace",
+            &workspace_id,
+            "--operation",
+            "command",
+            "--digest",
+            &digest,
+        ],
+    );
+    assert_success(&output);
+    assert_eq!(json_output(&output)["approval"]["state"], "consumed");
+    let output = run_cli(
+        &data_root,
+        &[
+            "approvals",
+            "consume",
+            &approval_id,
+            "--session",
+            &session,
+            "--workspace",
+            &workspace_id,
+            "--operation",
+            "command",
+            "--digest",
+            &digest,
+        ],
+    );
+    assert_error_code(&output, "approval");
+
+    let denied_digest = "b".repeat(64);
+    let output = run_cli(
+        &data_root,
+        &[
+            "approvals",
+            "request",
+            "--session",
+            &session,
+            "--workspace",
+            &workspace_id,
+            "--operation",
+            "command",
+            "--digest",
+            &denied_digest,
+            "--summary",
+            "Second request",
+            "--ttl-secs",
+            "900",
+        ],
+    );
+    assert_success(&output);
+    let denied_id = json_output(&output)["approval"]["id"]
+        .as_str()
+        .expect("denied id")
+        .to_owned();
+    let output = run_cli(&data_root, &["approvals", "deny", &denied_id]);
+    assert_success(&output);
+    assert_eq!(json_output(&output)["decision"], "denied");
+    let output = run_cli(
+        &data_root,
+        &[
+            "approvals",
+            "consume",
+            &denied_id,
+            "--session",
+            &session,
+            "--workspace",
+            &workspace_id,
+            "--operation",
+            "command",
+            "--digest",
+            &denied_digest,
+        ],
+    );
+    assert_error_code(&output, "approval");
+
+    let output = run_cli(
+        &data_root,
+        &[
+            "approvals",
+            "request",
+            "--session",
+            &session,
+            "--workspace",
+            &workspace_id,
+            "--operation",
+            "command",
+            "--digest",
+            "not-a-digest",
+            "--summary",
+            "Invalid",
+        ],
+    );
+    assert_error_code(&output, "approval");
+    let missing = Uuid::new_v4();
+    let output = run_cli(&data_root, &["approvals", "show", &missing.to_string()]);
+    assert_error_code(&output, "approval");
 }
 
 fn register(data_root: &Path, workspace: &Path, revision: u64) -> String {

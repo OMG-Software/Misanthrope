@@ -281,6 +281,7 @@ impl RunCgroup {
         Ok(TreeUsage {
             cpu_time: Duration::from_micros(self.cpu_micros()?),
             peak_memory_bytes,
+            peak_disk_bytes: None,
         })
     }
 

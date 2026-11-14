@@ -239,7 +239,8 @@ impl Scene {
         self.run_for(profile, options, command, super::CLI_DEADLINE)
     }
 
-    /// Run a command with a longer CLI deadline, for real builds.
+    /// Run a command with a longer CLI deadline, for real builds and
+    /// I/O-heavy cases.
     pub(crate) fn run_for(
         &self,
         profile: &str,

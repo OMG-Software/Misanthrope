@@ -23,8 +23,11 @@ operator-declared [toolchain profile](execution.md#toolchain-profiles).
 Version 0.17.0 limits each run's memory, live processes, and CPU time; raise
 the [tree limits](execution.md#tree-limits) for large builds. On Linux the
 process limit counts threads, so a parallel compiler needs a higher limit
-than its process count. No
-model tool runs project tools. Tool support must be qualified on the actual
+than its process count. Version 0.19.0 adds a sampled limit on net disk growth
+for the writable roots; it is not a filesystem quota. No
+model tool runs project tools. A model command tool can request one only
+through the trusted `run` path and a consumed approval. Tool support must be
+qualified on the actual
 platform; the [execution guide](execution.md#known-limits) lists the
 toolchains and versions that passed acceptance.
 
@@ -65,9 +68,8 @@ Version 0.16.0 profiles record:
 - extra variables.
 
 The runner owns the scratch and home locations. The run deadline and output
-limits are per-run options. Network destinations, loader search paths,
-recorded versions, and memory, process-count, and disk limits are not
-implemented.
+limits are per-run options. Network destinations, loader search paths, and
+recorded versions are not implemented.
 
 Each selected toolchain profile must eventually define:
 
@@ -125,9 +127,19 @@ Package downloads use task-network permission, never the model connection's
 permission. Since 0.18.0 a trusted run gets outbound networking only with the
 workspace `task_network` preference and its `--network` flag; see
 [network access](execution.md#network-access). There is no destination
-allowlist yet. Registry credentials require a narrow reviewed
-credential path. Offline tasks must work with available dependencies or explain
-which download is needed.
+allowlist. The
+[package-network profile](execution.md#package-network-profile-contract-only)
+is recorded as configuration only (ADR-0034): `workspace
+package-profile-add/show/remove` store registry origins, but no run accepts a
+profile, and a proxy or proxy environment variables are not a boundary. The
+trusted `packages fetch` command contacts only declared origins and writes
+into the selected per-workspace cache root. A run can read only that root
+through `OMGCODE_PACKAGE_CACHE`; Windows needs a read-execute container grant,
+and Linux falls back to application storage when no root is selected.
+Tool-specific
+configuration to use that directory is operator work. Registry credentials
+require a narrow reviewed credential path. Offline tasks
+must work with available dependencies or explain which download is needed.
 
 Development servers, debuggers, license servers, hardware access, and other
 services can need extra resources. Treat each as an explicit capability rather
@@ -154,9 +166,14 @@ cancellation, denied host-data access, and disabled networking. Include missing
 dependencies, spaces and native path forms, stale tool profiles, concurrent
 builds, disk exhaustion, and hostile build/package scripts.
 
-Also prove the allowed case: an approved package-network profile can reach its
-declared registry destinations and rejects other destinations. Model-provider
-connectivity alone must not enable that package or general task traffic.
+The trusted `packages fetch` command is covered by core and CLI tests. The
+run-side package-network acceptance case still cannot run: no run accepts a
+profile. A run can read the selected cache root, but run-side destination
+scoping is still missing. A future implementation must prove
+that an approved profile reaches its declared registry destinations and
+rejects every other destination, including direct IP, IPv6, UDP, DNS, and
+proxy-bypass paths. Model-provider connectivity alone must not enable package
+or general task traffic.
 
 Record the selected profile with task results so failures are reproducible.
 Do not claim general support from locating an executable or printing its version.
@@ -174,9 +191,13 @@ The 0.16.0 acceptance tests cover these on both platforms:
 They are listed in the [execution guide](execution.md#acceptance). Not covered
 yet:
 
-- disk exhaustion;
-- package downloads through `--network`, and rejection of undeclared
-  destinations, because there is no destination allowlist;
+- disk exhaustion under concurrent writers, and inode, directory-entry, or
+  metadata exhaustion; the sampled disk limit is tested with ordinary file
+  growth;
+- package downloads through a run's `--network`, and rejection of undeclared
+  destinations, because there is no destination allowlist; the trusted
+  `packages fetch` path is separate and the run can read only the selected
+  cache root, not use run-side package networking;
 - hostile package scripts beyond the hostile programs.
 
 The Java case has not run on either host. The registry case also remains open.

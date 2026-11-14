@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use super::{
     AppliedConfinement, CancelSignal, Confinement, MAX_CAPTURE_BYTES, MAX_CLEANUP_TIMEOUT,
     MAX_CONFINEMENT_PATHS, MAX_DEADLINE, ProcessError, ProcessLimits, ProcessSpec, Termination,
-    run, run_confined,
+    TreeLimits, run, run_confined,
 };
 
 #[cfg(target_os = "linux")]
@@ -25,6 +25,7 @@ mod windows_confinement;
 
 const FIXTURE_ENV: &str = "OMGCODE_PROCESS_FIXTURE";
 const RECORD_ENV: &str = "OMGCODE_PROCESS_FIXTURE_RECORD";
+const GROW_PATH_ENV: &str = "OMGCODE_PROCESS_GROW_PATH";
 const FIXTURE_NAME: &str = "process::tests::fixture";
 const HARNESS_ARGS: [&str; 5] = [
     "--exact",
@@ -34,6 +35,8 @@ const HARNESS_ARGS: [&str; 5] = [
     "-q",
 ];
 const FLOOD_BYTES: usize = 1024 * 1024;
+/// Bytes the `grow-disk` fixture writes before it waits to be stopped.
+const GROW_BYTES: usize = 64 * 1024 * 1024;
 
 /// Child entry point. It does nothing unless the runner selected a mode.
 #[test]
@@ -94,6 +97,7 @@ fn fixture() {
         "hog-memory" => tree_limits::hog_memory(),
         "spawn-many" => tree_limits::spawn_many(),
         "spin" => tree_limits::spin(),
+        "grow-disk" => grow_disk(),
         #[cfg(windows)]
         "nested-job" => tree_limits::nested_job(),
         #[cfg(target_os = "linux")]
@@ -115,6 +119,20 @@ fn write_record(text: &str) {
     let temporary = path.with_extension("tmp");
     fs::write(&temporary, text).expect("write record");
     fs::rename(&temporary, &path).expect("publish record");
+}
+
+/// Write allocated bytes to the path named by `GROW_PATH_ENV`, sync them, and
+/// wait to be stopped. The sync makes the allocation visible to the sampler.
+fn grow_disk() -> i32 {
+    let path = PathBuf::from(env::var_os(GROW_PATH_ENV).expect("growth path"));
+    let chunk = vec![b'x'; 1024 * 1024];
+    let mut file = fs::File::create(&path).expect("create growth file");
+    for _ in 0..GROW_BYTES / chunk.len() {
+        file.write_all(&chunk).expect("write growth file");
+    }
+    file.sync_all().expect("sync growth file");
+    thread::sleep(Duration::from_secs(120));
+    0
 }
 
 /// Start a grandchild that tries to leave the tree, wait for its record, exit.
@@ -196,8 +214,57 @@ fn limits() -> ProcessLimits {
     }
 }
 
+/// Limits that apply a disk bound to an otherwise roomy tree.
+fn disk_limits(bytes: u64) -> ProcessLimits {
+    ProcessLimits {
+        deadline: Duration::from_secs(30),
+        tree: Some(TreeLimits {
+            max_memory_bytes: 1024 * 1024 * 1024,
+            max_processes: 128,
+            max_cpu_time: Duration::from_secs(60),
+            max_disk_bytes: Some(bytes),
+        }),
+        ..ProcessLimits::default()
+    }
+}
+
+/// Select the fixture mode that writes allocated bytes to `path`, then waits.
+fn grow_spec(mut spec: ProcessSpec, path: &Path) -> ProcessSpec {
+    spec.environment.retain(|(name, _)| name != FIXTURE_ENV);
+    spec.environment
+        .push((OsString::from(FIXTURE_ENV), OsString::from("grow-disk")));
+    spec.environment
+        .push((OsString::from(GROW_PATH_ENV), path.as_os_str().to_owned()));
+    spec
+}
+
 fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// Marks a test process that already runs in its own delegated scope.
+#[cfg(target_os = "linux")]
+const DELEGATED_ENV: &str = "OMGCODE_DELEGATED_TEST";
+
+/// Run `body` where tree limits can apply. On Linux, limits need a delegated
+/// cgroup; unless this process already runs in one, the test re-runs itself
+/// under `systemd-run --user --scope -p Delegate=yes`. It needs a user service
+/// manager, and a missing manager fails the test rather than skipping it.
+fn in_limit_scope(test: &str, body: impl FnOnce()) {
+    #[cfg(target_os = "linux")]
+    if env::var_os(DELEGATED_ENV).is_none() {
+        let status = Command::new("systemd-run")
+            .args(["--user", "--scope", "--quiet", "-p", "Delegate=yes", "--"])
+            .arg(env::current_exe().expect("test executable"))
+            .args(["--exact", test, "--nocapture", "--test-threads=1", "-q"])
+            .env(DELEGATED_ENV, "1")
+            .status()
+            .expect("start systemd-run; tree-limit tests need a user service manager");
+        assert!(status.success(), "{test} failed in its delegated scope");
+        return;
+    }
+    let _ = test;
+    body();
 }
 
 #[test]

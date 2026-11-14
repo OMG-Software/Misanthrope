@@ -8,16 +8,28 @@ preferences, a bounded native file broker exposed through trusted CLI commands,
 and native identity checks. Follow [workspace settings](docs/workspace-permissions.md)
 and [workspace file access](docs/file-access.md) for their contracts. Enabled
 preferences never authorize execution. The prototype is not a desktop app.
-Chat offers the local LM Studio model only read and list tools, and only for a
+Chat offers the local LM Studio model read and list tools, and, when the
+workspace also enables `execute`, `read`, and `write`, one command tool that
+requires a trusted single-use approval. No model write, network, Git, or MCP
+tool exists. Chat offers tools only for a
 workspace whose `model_tools` preference is enabled. There are no model write
-tools, other provider adapters, or model-callable process execution. The
+tools, other provider adapters, or unreviewed model-callable process execution. The
 trusted CLI `run` command starts one program for a workspace whose `execute`
 preference is enabled. It uses an operator-declared toolchain profile, records
 intent and outcome in a run journal, and applies Landlock and a seccomp socket
 filter on Linux or a per-workspace AppContainer on Windows. It never falls back
-to the unconfined runner. Every run has tree-wide memory, process, and CPU-time
-limits; on Linux the CLI must run in a delegated cgroup v2. Trusted CLI commands record, apply, and revoke
-Windows container ACL grants. Follow the [execution contract](docs/execution.md).
+to the unconfined runner. Every run has tree-wide memory, process-count,
+CPU-time, and sampled net disk-growth limits; on Linux the CLI must run in a
+delegated cgroup v2. The disk limit measures writable roots and is not a
+filesystem quota. Package-network profiles are recorded as configuration only;
+no run uses them. The trusted `packages fetch` command downloads from declared
+origins into a per-workspace cache. A selected root is exposed read-only on
+Linux and Windows; Windows needs a read-execute container grant, and Linux
+falls back to application storage. Provider profiles and trusted single-use
+approval records are configuration and authorization records only; no adapter
+or model tool uses them. Trusted CLI
+commands record, apply, and revoke Windows container ACL grants. Follow the
+[execution contract](docs/execution.md).
 The bundled web interface and most planned features are not implemented.
 The core validates replacement records and can prepare protected checkpoints on
 Linux and Windows through a live authorized binding. The CLI provides

@@ -17,9 +17,11 @@ use std::time::Duration;
 
 use super::super::{
     AppliedConfinement, CancelSignal, Confinement, NetworkAccess, ProcessError, ProcessSpec,
-    Termination, UnixSocketAccess, network_support_paths, run_confined,
+    ResourceLimit, Termination, UnixSocketAccess, network_support_paths, run_confined,
 };
-use super::{FIXTURE_ENV, HARNESS_ARGS, limits, spec, text};
+use super::{
+    FIXTURE_ENV, HARNESS_ARGS, disk_limits, grow_spec, in_limit_scope, limits, spec, text,
+};
 
 const READ_ONLY_FILE: &str = "OMGCODE_PROBE_READ_ONLY_FILE";
 const SECRET_FILE: &str = "OMGCODE_PROBE_SECRET_FILE";
@@ -618,6 +620,39 @@ fn a_networked_run_reaches_the_internet() {
     );
     let (_, allowed) = scene.run_spec(&spec, UnixSocketAccess::PairsOnly, NetworkAccess::Internet);
     assert_results(&allowed, &[("internet-connect", "ok")]);
+}
+
+/// Growth in the writable workspace past the disk limit ends the whole
+/// confined tree, and the outcome reports the measured peak.
+#[test]
+fn the_disk_limit_ends_a_confined_run() {
+    in_limit_scope(
+        "process::tests::confinement::the_disk_limit_ends_a_confined_run",
+        || {
+            let scene = Scene::new();
+            let growth = scene.workspace.join("growth.bin");
+            let spec = grow_spec(scene.spec(), &growth);
+            let confinement = scene.confinement(UnixSocketAccess::PairsOnly, NetworkAccess::Denied);
+            let outcome = run_confined(
+                &spec,
+                &confinement,
+                &disk_limits(16 * 1024 * 1024),
+                &CancelSignal::new(),
+            )
+            .expect("confined run");
+            assert_eq!(
+                outcome.termination,
+                Termination::LimitExceeded {
+                    limit: ResourceLimit::Disk
+                }
+            );
+            let usage = outcome.usage.expect("a limited run reports usage");
+            assert!(
+                usage.peak_disk_bytes.expect("disk usage") >= 16 * 1024 * 1024,
+                "{usage:?}"
+            );
+        },
+    );
 }
 
 #[test]

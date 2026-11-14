@@ -32,18 +32,21 @@ skill/tool/memory selections, or an account profile.
 
 The core turn/tool runtime records the exact tool schema version and tool names
 in a schema-version-2 request manifest. Its read/list results are appended as
-source-labelled user-level tool messages and are never system messages. Chat
-runs this runtime only for a workspace that enables `model_tools`; otherwise it
-sends no tool definitions and rejects any provider tool call.
+source-labelled user-level tool messages and are never system messages. A
+command result follows the same rule and remains untrusted. Chat runs this
+runtime when the workspace enables `model_tools`; the command tool also needs
+`execute`, `read`, and `write`, and it runs only after a trusted approval.
+Otherwise chat sends no tool definitions and rejects any provider tool call.
 
 Prompt assembly limits custom instruction text and each history message to 16
 KiB, history to 128 messages, and the assembled UTF-8 text to 256 KiB. The
 adapter applies a caller-supplied context budget using a byte-based estimate and
 fixed overhead. This is not an exact tokenizer or model-capacity check. The
 prototype has no settings UI, application/workspace/session preference store,
-preview UI, token-count display, compaction, skills, memories, tools other
-than chat's read/list workspace tools, or provider-specific subscription
-routes. The current `--instructions` value is
+preview UI, token-count display, compaction, skills, memories, model write,
+network, Git, or MCP tools, or provider-specific subscription routes. Its only
+model tools are read, list, and the approval-gated command tool. The current
+`--instructions` value is
 per invocation, not a saved preference with scope or revision history.
 
 These statements describe implemented prototype behavior. The sections below
@@ -155,6 +158,27 @@ routes. Public roles do not establish a fixed count of internal ChatGPT or
 Claude Code prompts.
 [OpenAI request mapping](https://developers.openai.com/api/docs/guides/migrate-to-responses),
 [Claude Messages](https://platform.claude.com/docs/en/api/messages/create)
+
+## Approval records
+
+A model tool that changes host state must obtain a trusted, single-use
+approval record. `approvals request` records a pending request;
+`approvals list`, `show`, `approve`, and `deny` inspect or decide it; and
+`approvals consume` marks an approved record used. The record binds the
+session, workspace, operation, exact request SHA-256, and the settings revision
+at request time. It stores no argument text. The summary is at most 256 bytes,
+must contain no secrets or control characters, and is for the operator.
+
+The `workspace_run_command` tool creates the request and consumes an approved
+record immediately before calling the trusted runner. Its first call returns
+`approval_required`; the operator approves between turns, and the model retries
+the same call. An approval lives 60 to 3600 seconds and is consumed at most
+once. Consumption checks the binding and refuses if the settings revision
+changed. The CLI consume command executes nothing. The tool must fail closed
+when the record is missing, denied, expired, consumed, or bound differently.
+Approval events preserve the settings revision. See
+[ADR-0039](adr/0039-gate-future-model-tools-with-bound-single-use-approval-records.md)
+and [ADR-0040](adr/0040-gate-the-model-command-tool-with-approvals-and-the-trusted-runner.md).
 
 ## Release request records
 

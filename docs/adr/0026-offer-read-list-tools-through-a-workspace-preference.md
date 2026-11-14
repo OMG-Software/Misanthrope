@@ -137,7 +137,7 @@ Limits and gaps:
 
 ## References
 
-- [Workspace settings](../workspace-permissions.md#model-readlist-tools)
+- [Workspace settings](../workspace-permissions.md#model-readlist-and-command-tools)
 - [ADR-0012](0012-separate-workspace-settings-from-execution-authority.md)
 - [ADR-0013](0013-enforce-file-access-with-native-handles-and-exclusive-creation.md)
 - [ADR-0016](0016-add-a-session-owned-tool-runtime-with-schema-v2.md)

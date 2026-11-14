@@ -26,11 +26,12 @@ Version 0.16.0 adds [trusted runs](#trusted-runs). `omgcode run` starts one
 program through `run_confined` under a recorded
 [toolchain profile](#toolchain-profiles), behind the workspace `execute`
 preference, and records it in the [run journal](#run-journal). It is a
-trusted operator command only. No model tool starts a process, and nothing
-calls the unconfined `run`. Settings diagnostics keep
-`execution_allowed: false`, because a diagnostic never authorizes a run. Do
-not describe either confinement as qualified beyond the tested kernel and
-Windows build.
+trusted operator command. A model command tool can request one, but only a
+trusted approval record lets it call the same runner; no model tool starts a
+process without that record, and nothing calls the unconfined `run`. Settings
+diagnostics keep `execution_allowed: false`, because a diagnostic never
+authorizes a run. Do not describe either confinement as qualified beyond the
+tested kernel and Windows build.
 
 Version 0.17.0 adds [tree limits](#tree-limits): every trusted run is bounded
 in memory, live processes, and CPU time for its whole tree. Windows applies
@@ -40,6 +41,17 @@ delegated cgroup v2, and refuses a run when the runner is not in one.
 Version 0.18.0 adds [network access](#network-access). A trusted run passes
 `--network` to get outbound IP networking, and the workspace `task_network`
 preference must allow it. Runs without the flag keep no IP networking.
+
+Version 0.19.0 adds a sampled [disk-growth limit](#tree-limits). Every trusted
+run bounds the allocated bytes it may add to its writable roots. No portable
+per-run disk quota exists, so the supervisor measures growth on a separate
+thread rather than the kernel enforcing a quota.
+
+Version 0.23.0 adds a per-workspace package cache root. A configured root is
+exposed read-only on Linux and Windows; Windows requires a read-execute
+container grant on that root. Without a configured root, Linux keeps the
+application-storage fallback and Windows exposes nothing. See
+[ADR-0037](adr/0037-use-a-per-workspace-cache-root-and-a-scoped-windows-grant.md).
 
 ## Accepted decisions
 
@@ -198,6 +210,113 @@ as `nscd` or `systemd-resolved` through a Unix socket, need host services too.
 Windows resolves names and checks certificates through system services, so it
 adds no paths.
 
+### Package-network profile (contract only)
+
+The user selected a package-network profile as the next increment.
+[ADR-0034](adr/0034-gate-package-networking-behind-enforceable-destination-control.md)
+defines its contract, and version 0.20.0 records operator-declared profiles as
+configuration. No run accepts a profile, the runtime has no destination
+allowlist, and `--network` remains all-or-nothing.
+
+A profile is an operator-declared, revisioned list of registry origins:
+scheme, host, optional port, and an optional path prefix. Normal use is
+`https`; `http` is allowed only for a loopback test fixture. A profile has no
+credentials, wildcards, user information, or redirects to another origin. It
+is configuration only and never authorizes a run. At most 32 profiles are
+recorded, each with 1 to 8 origins.
+
+`workspace package-profile-add <name> --registry <origin>... --revision <n>`,
+`package-profile-show <name>`, and
+`package-profile-remove <name> --revision <n>` manage the records. Each
+mutation needs the expected settings revision and increments it.
+
+Any implementation must pass these gates before it can be described as
+implemented:
+
+- the confined tree cannot reach any destination other than the declared
+  origins or a trusted proxy, including direct IP, IPv6, UDP, DNS, loopback,
+  alternate socket families, and paths that bypass the proxy;
+- the mechanism fails closed, and a platform that cannot enforce it refuses
+  the profile rather than falling back to general network access;
+- its exact limits and bypass analysis are documented and qualified on both
+  supported hosts;
+- registry credentials remain a separate reviewed design and never enter a
+  profile, run environment, journal, or model context;
+- acceptance tests prove allowed-origin success, undeclared-origin refusal,
+  redirect refusal, credential refusal, offline fallback, and platform refusal.
+
+The current primitives cannot meet that gate. Landlock ABI 4 and later filters
+TCP bind and connect by port, not address. Classic seccomp cannot read the
+`sockaddr` contents. Windows AppContainer capabilities cannot name
+destinations, and granting none blocks loopback too. Proxy environment
+variables and an advisory loopback proxy can be bypassed by a hostile tree.
+Candidate mechanisms for a later decision are a trusted host-side fetch into a
+private cache with an offline run, an OS destination filter, or a Linux-only
+network-namespace relay.
+
+### Trusted package fetch
+
+Version 0.21.0 adds a trusted operator fetch for declared origins; see
+[ADR-0035](adr/0035-fetch-packages-through-a-trusted-allowlisted-cache.md).
+It is never a model tool, and the confined run still has no network access.
+
+```text
+omgcode packages fetch <workspace-id> --profile <name> --url <url>
+    --name <cache-file> [--max-bytes <1-1073741824>]
+    [--timeout-secs <1-600>]
+omgcode workspace set-package-cache <workspace-id> <dir> --revision <n>
+omgcode workspace clear-package-cache <workspace-id> --revision <n>
+```
+
+`set-package-cache` selects one workspace's cache directory. It must exist,
+must not overlap application storage or the development root, and must not
+overlap another workspace's root. `clear-package-cache` removes the selection
+and leaves cached files in place. Without a selected root, Linux uses the
+application-storage fallback and Windows has none. A 0.23.0 control journal
+cannot be read by 0.22.0.
+
+Before the request it checks:
+
+1. The workspace is registered and its live `task_network` preference is
+   enabled.
+2. The named package-network profile exists.
+3. The URL is absolute and matches a declared origin's scheme, host, port, and
+   path prefix. It has no credentials, query, or fragment. Normal use is
+   `https`; `http` is accepted only for a loopback test fixture.
+4. The cache name is one safe file name and the file does not already exist.
+5. The byte limit is 1 byte to 1 GiB and the deadline is 1 to 600 seconds.
+
+The request is one GET. Redirects are not followed, proxy environment
+variables are ignored, no credentials are sent, and nothing is retried. TLS
+uses the operating-system trust store through `reqwest`'s `native-tls`
+feature; certificate validation is never disabled. The response must be 2xx
+and its body is streamed, hashed with SHA-256, and stopped if it passes the
+byte limit.
+
+The file is written as a private `.partial-<fetch-id>` entry, synced, and
+renamed into the selected workspace cache root, or into
+`<data-dir>/package-cache/<workspace-id>/` when no root is selected. Existing
+names are never overwritten. The cache makes no power-loss claim. The control
+journal records `package_fetch_started` before the request and
+`package_fetch_finished` after it; both preserve the settings revision. They
+record the profile identity and revision, a SHA-256 of the URL (never its
+text), the cache name, limits, HTTP status, byte count, and content digest. A
+failure records a controlled reason. An abandoned fetch leaves its start
+record without a finish; nothing retries automatically.
+
+The run does not contact the registry itself. When the workspace cache exists
+as a plain directory, the run adds only that directory to its read-only rules
+and sets `OMGCODE_PACKAGE_CACHE` to it. The parent, application storage,
+journals, settings, and other workspaces' roots stay outside the run's view,
+and the run cannot write the cache. On Windows the selected root requires a
+read-execute container grant on that directory; without it the run fails
+before the program starts. Without a selected root, Linux uses the
+application-storage fallback and Windows exposes nothing. The root's ancestors
+must be traversable by the container, so use a dedicated top-level directory
+rather than a user's private temporary tree. Tool-specific use of the
+directory is operator configuration. Registry credentials remain unsupported.
+`workspace status` lists selected roots under `package_cache_roots`.
+
 ## Container grants
 
 A grant gives one workspace's container access to one directory and everything
@@ -235,6 +354,11 @@ Rules:
 - The granted directory must still be the recorded one, by volume and file
   identity. A moved or replaced directory cannot be revoked through OMGCode
   until it is back at its recorded path.
+- A per-workspace package cache root outside the development root and
+  application storage is a valid read-execute grant target. Grant that root,
+  not a shared parent. The grant is container-wide, so use separate roots for
+  workspaces that must stay isolated. The container must be able to traverse
+  the root's ancestors; a dedicated top-level directory is recommended.
 - Grants work only on Windows. Elsewhere `container-grant` fails and records
   nothing.
 
@@ -250,6 +374,7 @@ omgcode run <workspace-id> --profile <name> [--cwd <relative dir>]
     [--max-memory-mib <16-1048576, default 8192>]
     [--max-processes <1-65536, default 1024>]
     [--max-cpu-secs <1-604800, default 7200>]
+    [--max-disk-mib <16-1048576, default 8192>]
     [--host-services] [--network] -- <program> [arguments...]
 omgcode runs audit [--limit <n>] [--archive <file>]
 omgcode runs acknowledge <run-id>
@@ -263,6 +388,10 @@ omgcode runs archive --archive-dir <existing dir>
   `truncated`;
 - on Linux, `scratch_removed`;
 - for a `revoked` run, `revoked_because`.
+
+`finish.usage` gives the tree's CPU time and, where the platform reports it,
+peak memory. Since 0.19.0 it also gives `peak_disk_bytes`, the highest net
+growth of the writable roots above the pre-run baseline.
 
 The command succeeds whenever the run was supervised and its outcome recorded,
 whatever the program's exit code. Read `run.finish.result`. A failure prints a
@@ -355,8 +484,8 @@ entries, the runner-owned variables below, and the profile's variables.
 
 | Platform | Runner-owned variables | Read-only | Read-write |
 | --- | --- | --- | --- |
-| Linux | `HOME`, `TMPDIR`, and `XDG_CACHE_HOME`, all set to `<data-dir>/run-scratch/<run id>` (mode 0700, removed after the run) | Profile roots, `/dev/zero`, `/dev/random`, `/dev/urandom`, and, with `--network`, the [network support paths](#network-access) | The workspace, the scratch directory, `/dev/null` |
-| Windows | `LOCALAPPDATA`, `SystemRoot`, `windir`, and `HOME` and `USERPROFILE` set to the container's `AC` folder. Windows then sets `TEMP` and `TMP` inside it | Profile roots, checked against their live ACLs | The workspace, through its grant |
+| Linux | `HOME`, `TMPDIR`, and `XDG_CACHE_HOME`, all set to `<data-dir>/run-scratch/<run id>` (mode 0700, removed after the run), and, when the workspace cache exists, `OMGCODE_PACKAGE_CACHE` set to the selected root or the application-storage fallback | Profile roots, `/dev/zero`, `/dev/random`, `/dev/urandom`, the workspace's [package cache](#trusted-package-fetch) when it exists, and, with `--network`, the [network support paths](#network-access) | The workspace, the scratch directory, `/dev/null` |
+| Windows | `LOCALAPPDATA`, `SystemRoot`, `windir`, and `HOME` and `USERPROFILE` set to the container's `AC` folder. Windows then sets `TEMP` and `TMP` inside it. When a granted package cache root exists, `OMGCODE_PACKAGE_CACHE` is set to it | Profile roots, checked against their live ACLs; the package cache root, checked against its grant | The workspace, through its grant |
 
 Linux runs use `PairsOnly` sockets unless host services were selected. Runs
 have no IP networking unless `--network` was passed. Windows
@@ -370,19 +499,22 @@ ends.
 
 ### Tree limits
 
-The user chose the C5 options on 2026-11-12; see
-[ADR-0031](adr/0031-limit-whole-run-trees-with-job-objects-and-delegated-cgroups.md).
-Every trusted run has all three limits. There is no unlimited run.
+The user chose the C5 options on 2026-11-12 and the C7 option on 2026-11-13;
+see [ADR-0031](adr/0031-limit-whole-run-trees-with-job-objects-and-delegated-cgroups.md)
+and [ADR-0033](adr/0033-bound-run-disk-growth-by-sampling-writable-roots.md).
+Every trusted run has all four limits. There is no unlimited run.
 
 | Limit | Flag and default | Windows | Linux |
 | --- | --- | --- | --- |
 | Memory | `--max-memory-mib`, 8192 | `JobMemoryLimit`: committed private memory of the whole job | `memory.max`, with `memory.swap.max` 0 where swap is accounted and `memory.oom.group` 1 |
 | Processes | `--max-processes`, 1024 | `ActiveProcessLimit`: processes alive at once | `pids.max`: tasks alive at once, so threads count |
 | CPU time | `--max-cpu-secs`, 7200 | Job accounting: user plus kernel time of every process the job held | `cpu.stat` `usage_usec` of the run's cgroup |
+| Disk growth | `--max-disk-mib`, 8192 | Sampled allocated bytes under the workspace and the container profile folder | Sampled allocated bytes under the workspace and the per-run scratch directory |
 
-The kernel enforces memory and processes. When the tree reaches a limit, the
-runner terminates the whole tree and records `limit_exceeded` with the limit,
-even if the program then exited by itself:
+The kernel enforces memory and processes. The supervisor enforces CPU time by
+polling and disk growth by sampling. When the tree reaches a limit, the runner
+terminates the whole tree and records `limit_exceeded` with the limit, even if
+the program then exited by itself:
 
 - **Memory:** on Linux the kernel kills the whole cgroup when it runs out of
   memory, and the runner sees `oom_kill` in `memory.events`. On Windows an
@@ -393,14 +525,22 @@ even if the program then exited by itself:
 - **CPU time:** the supervisor compares the tree's accounting with the limit
   at each 10 ms poll. A tree with many busy threads can pass it by up to one
   poll's worth of CPU time per thread before it is stopped.
+- **Disk growth:** the supervisor measures the writable roots before the
+  program starts and once a second while it runs, on a separate thread. Either
+  the allocated-byte total or the file-length total passing its baseline plus
+  the limit ends the tree. A final measurement runs after the tree is empty,
+  so a short run that wrote past the limit and exited is still recorded as
+  `limit_exceeded`. See [disk growth](#disk-growth).
 
 The report and the `run_finished` record give the tree's CPU time and, where
 the platform reports it, its peak memory: the job's peak commit on Windows, or
-`memory.peak` on Linux 5.19 or later.
+`memory.peak` on Linux 5.19 or later. They also give the highest net disk
+growth observed above the pre-run baseline.
 
 Windows does not guarantee delivery of job messages. If one is lost, the job
 still enforces the limit, but the run ends as the program decides and is not
-recorded as `limit_exceeded`. CPU time does not depend on messages.
+recorded as `limit_exceeded`. CPU time and disk growth do not depend on
+messages.
 
 Windows also sends the limit messages of a job nested in the run's job, such
 as a tool's own stricter job, to the run's port. So the runner counts a
@@ -427,6 +567,45 @@ limit was reached. It still stops the tree, then records `supervision_failed`
 rather than a normal exit. On Windows 11 build 26300, a
 nested job's limit messages did not reach the run's port in testing; the
 check follows the documented behaviour.
+
+#### Disk growth
+
+No portable per-run disk quota exists for an unprivileged runner: Job Objects
+have no disk accounting, a cgroup v2 has no disk controller, and filesystem
+quotas need administrative setup. The limit is therefore sampled by the
+supervisor; it is not a kernel quota. See
+[ADR-0033](adr/0033-bound-run-disk-growth-by-sampling-writable-roots.md).
+
+- **Measured roots:** the confinement's read-write directories and regular
+  files, except character devices such as `/dev/null`. On Windows the
+  container profile folder (`%LOCALAPPDATA%\Packages\<name>\AC`) is also
+  measured, because the container writes there without a grant. A root inside
+  another root counts once.
+- **Baseline and growth:** the allocated-byte and file-length totals are
+  measured immediately before the program starts. Each budget is that baseline
+  plus the limit. Deletions reduce the totals, so the recorded
+  `peak_disk_bytes` is net growth.
+- **Allocation and length:** Linux uses `st_blocks * 512` for allocation,
+  Windows uses the allocated (compressed) size, and both use the file length.
+  Each file contributes to both totals, and the limit applies to each. Length
+  catches writes that a filesystem has not written back yet; allocation
+  catches a pre-existing sparse file being filled in. A sparse file is
+  therefore counted conservatively at both its length and its allocation.
+- **Sampling:** a dedicated thread measures every second. The supervisor
+  checks its result at the normal 10 ms poll, and a final measurement runs
+  after the tree is empty. A tree can pass the limit between samples; the
+  overshoot depends on the write rate.
+- **Fail closed:** a baseline that cannot be measured records `not_started`.
+  An unreadable root or more than 4,000,000 entries while the run lives stops
+  it as `supervision_failed` rather than claiming a limit that was not
+  measured. Symlinks and other reparse points are not followed. A run that
+  makes a writable path unreadable to the supervisor is stopped for the same
+  reason.
+- **Not counted:** directory entries, inode or MFT use, and filesystem
+  metadata. A hard-linked file is counted once per name, so several names
+  overcount it. Other writers to the same roots are counted as the run's
+  growth. A tree that deletes and rewrites the same bytes can churn more than
+  the limit without adding total use.
 
 #### Linux delegated cgroup
 
@@ -464,6 +643,38 @@ its cgroup. Do not place a development root under `/sys/fs/cgroup`. Other
 programs of the same user, outside the run, can still change the delegated
 cgroup.
 
+### Model command tool
+
+Version 0.25.0 adds `workspace_run_command` to the core turn runtime. The
+runtime advertises it only when the session workspace's live `model_tools`,
+`execute`, `read`, and `write` preferences are enabled. Each call rechecks
+them, and the trusted run checks them again.
+
+Arguments are a recorded toolchain `profile`, a `program`, at most 64
+`arguments`, and an optional workspace-relative `cwd`. There is no shell.
+The tool fixes its limits: a 20-second deadline, 4 KiB retained from each
+output stream, 1 GiB memory, 64 processes, 20 seconds of CPU, and 256 MiB of
+disk growth. It selects no network or host services.
+
+The first call matches no approval, records a pending approval with a bounded
+summary that contains no argument text, and returns `approval_required` with
+the approval identifier. Nothing runs. The operator runs
+`approvals approve <id>`; the model must call again with the same arguments.
+The runtime checks the exact digest, session, workspace, operation, and
+settings revision, consumes the approval once, drops the settings lock, and
+calls the trusted `run` path. A denial returns `approval_denied` and is not
+re-requested. An expired or consumed record causes a new pending request. A
+run that fails after consumption uses the approval.
+
+Output is untrusted and bounded. The session journal records the tool intent
+and result; the run journal records the run. No replay executes a recorded
+call. The model can request but cannot approve; the CLI approval commands are
+the operator surface, and there is no approval UI. A CLI acceptance test runs
+one approved command through the real chat process, a mock provider, and the
+trusted runner on both Linux and Windows, and asserts a successful exit, the
+bounded output, and the consumed approval. On Linux the chat process starts in
+a delegated cgroup; on Windows the test scene grants the workspace.
+
 ### Toolchain profiles
 
 Profiles are declared by the operator. Nothing is discovered automatically.
@@ -489,8 +700,8 @@ Rules:
   - A name starts with a letter or `_`, continues with letters, digits, or
     `_`, and is unique case-insensitively.
   - `PATH`, `HOME`, `TMPDIR`, `TEMP`, `TMP`, `USERPROFILE`, `LOCALAPPDATA`,
-    `SYSTEMROOT`, `WINDIR`, and `XDG_CACHE_HOME` are reserved for the runner,
-    in any case.
+    `SYSTEMROOT`, `WINDIR`, `XDG_CACHE_HOME`, and `OMGCODE_PACKAGE_CACHE` are
+    reserved for the runner, in any case.
   - Values are stored in the private settings journal and shown by `status`.
     Never put secrets in them.
 - **Limit:** at most 32 profiles.
@@ -510,8 +721,8 @@ sequence, a UTC timestamp, and a tagged `action`:
 | Action | Meaning |
 | --- | --- |
 | `created` | Header |
-| `run_started` | Synced before the program starts. Records the run ID, workspace, settings revision, profile ID, name, and revision, program path, argument count, `arguments_sha256`, working directory, socket mode, since 0.17.0 `limits` (`max_memory_bytes`, `max_processes`, `max_cpu_ms`), and, since 0.18.0 and only for a networked run, `network` with the `support_paths` it could read (at most 32). |
-| `run_finished` | Records the result (`exited`, `signalled`, `deadline_exceeded`, `cancelled`, `revoked`, `limit_exceeded` with its `limit`, `not_started`, `supervision_failed`, or `cleanup_unconfirmed`), the applied confinement, the elapsed time, the output byte counts, and, for a started run, `usage` (`cpu_ms` and, where reported, `peak_memory_bytes`) |
+| `run_started` | Synced before the program starts. Records the run ID, workspace, settings revision, profile ID, name, and revision, program path, argument count, `arguments_sha256`, working directory, socket mode, since 0.17.0 `limits` (`max_memory_bytes`, `max_processes`, `max_cpu_ms`, and since 0.19.0 `max_disk_bytes`), since 0.18.0 and only for a networked run `network` with the `support_paths` it could read (at most 32), and, since 0.22.0 and only when true, `package_cache` for read access to the workspace cache. |
+| `run_finished` | Records the result (`exited`, `signalled`, `deadline_exceeded`, `cancelled`, `revoked`, `limit_exceeded` with its `limit`, `not_started`, `supervision_failed`, or `cleanup_unconfirmed`), the applied confinement, the elapsed time, the output byte counts, and, for a started run, `usage` (`cpu_ms`, where reported `peak_memory_bytes`, and since 0.19.0 `peak_disk_bytes`) |
 | `run_acknowledged` | The operator cleared a pending run |
 
 How it works:
@@ -528,7 +739,8 @@ How it works:
     That process holds `<data-dir>/run-owners/<run id>.lock` from before the
     intent is recorded until the outcome is recorded.
 - **Limits:** at most 16 pending runs; 8 MiB, 4,096 events, and 64 KiB per
-  event.
+  event. A journal that records the 0.19.0 fields cannot be read by 0.18.0.
+  A 0.22.0 journal that records `package_cache` cannot be read by 0.21.0.
 - **Reserve:** a new run must leave room for every pending run's remaining
   events, 1 KiB each: two for a run in progress, one for a run that needs
   acknowledgement.
@@ -552,6 +764,7 @@ tools on both platforms:
 - host-service selection;
 - stale profiles;
 - deadlines, concurrency, and abandoned runs;
+- every tree limit, including disk growth;
 - interrupts, on Linux.
 
 `crates/omgcode-cli/tests/toolchain_acceptance.rs` runs real Rust, Python,
@@ -756,6 +969,33 @@ These remain true after C6:
   `listen` on an unbound socket, which takes a port the kernel chooses. UDP
   bind is never limited. See
   [network access](#network-access).
+- **No run destination enforcement.** Package-network profiles are recorded,
+  and the trusted [`packages fetch`](#trusted-package-fetch) command contacts
+  only declared origins. No run accepts a profile, and `--network` remains
+  all-or-nothing. On Linux a run can read only its workspace's cache; Windows
+  does not expose the cache. A proxy or proxy environment variables are not a
+  boundary: a hostile tree can connect directly.
+- **Package fetch limits.** The fetch is trusted-CLI only. It sends no
+  credentials, follows no redirects, ignores proxy variables, and uses the
+  system TLS store. The cache is the selected per-workspace root or, on Linux,
+  the application-storage fallback. It makes no power-loss claim. Tests use
+  loopback HTTP; a live HTTPS registry is not qualified.
+- **Package cache exposure.** A run receives `OMGCODE_PACKAGE_CACHE` when the
+  workspace cache exists as a plain directory, and may read only that
+  directory. On Windows the selected root needs a read-execute container grant
+  and traversable ancestors, or the run fails before it starts. Linux falls
+  back to application storage when no root is selected; Windows exposes
+  nothing. There is no invalidation, eviction, or freshness check, and
+  configuring a toolchain to use the directory is operator work.
+- **Model command limits.** The model command tool accepts no model-selected
+  limits, network, or host services. It uses a 20-second deadline and 4 KiB
+  per output stream. The operator flow spans two turns, and no approval UI
+  exists. A denied exact request stays denied for the current settings
+  revision; a failed run consumes the approval. A CLI acceptance test runs one
+  approved command through the real chat process and the trusted runner on
+  both hosts; it needs a delegated cgroup on Linux and a workspace container
+  grant on Windows. Confinement correctness remains the platform suites'
+  responsibility.
 - **Network coverage.** Network access was tested on Windows 11 build 26300
   and WSL 6.6 (Landlock ABI 3) only, including a TLS fetch with the system
   `curl` on both. The ABI 4 TCP-bind denial has not run on a live kernel.
@@ -763,7 +1003,20 @@ These remain true after C6:
   Linux limits cgroup memory, which includes page cache and kernel memory
   charged to the tree. Linux counts threads against the process limit. CPU
   time is checked by polling and can overshoot; see [tree limits](#tree-limits).
-- **No disk limit.** A run can fill any volume its rules let it write.
+- **Disk growth is sampled, not a quota.** The supervisor measures the
+  writable roots once a second, so a tree can pass the limit between samples.
+  Growth is net and applies to allocated bytes and file lengths separately, so
+  a write is seen before writeback and a sparse file is counted
+  conservatively. Directory entries, inode or MFT use, and filesystem metadata
+  are not counted; a hard-linked file is counted once per name. Other writers
+  are counted as the run's growth. A run that
+  makes a writable path unreadable to the supervisor, or whose roots hold more
+  than 4,000,000 entries, fails as `supervision_failed`. See
+  [disk growth](#disk-growth).
+- **Disk-limit coverage.** The limit was tested on Windows 11 build 26300 and
+  WSL 6.6 only. The tests write 16 MiB or more and observe `limit_exceeded`;
+  they do not establish behaviour under a full volume, concurrent writers, or
+  inode exhaustion.
 - **Linux needs a user service manager.** Every Linux run needs a delegated
   cgroup, normally a `systemd-run --user` scope. Hosts without a user systemd
   instance, or with cgroup v1 or a hybrid hierarchy, cannot run. Tree limits
@@ -792,12 +1045,18 @@ These remain true after C6:
 | C4 (0.16.0) | Trusted CLI `run` and the `execute` preference | Done: see [trusted runs](#trusted-runs) and ADR-0030 |
 | C5 (0.17.0) | Tree-wide memory, process, and CPU-time limits | Done: see [tree limits](#tree-limits) and ADR-0031 |
 | C6 (0.18.0) | Outbound network access behind `task_network` and `--network` | Done: see [network access](#network-access) and ADR-0032 |
+| C7 (0.19.0) | Sampled disk-growth limit for every trusted run | Done: see [disk growth](#disk-growth) and ADR-0033 |
+| C8 (contract only, 0.19.0) | Package-network profile contract and implementation gate | Done as a contract: see [package-network profile](#package-network-profile-contract-only) and ADR-0034. No destination enforcement. |
+| C9 (0.20.0) | Package-network profile records | Done as configuration: `workspace package-profile-add/show/remove` and the control journal events. No run accepts a profile. |
+| C10 (0.21.0) | Trusted allowlisted package fetch | Done: see [trusted package fetch](#trusted-package-fetch) and ADR-0035. The run remains offline. |
+| C11 (0.22.0) | Read-only package cache for Linux runs | Superseded by C12: Linux exposure moved to the per-workspace root, with an application-storage fallback. |
+| C12 (0.23.0) | Per-workspace package cache root and scoped Windows grant | Done: see [trusted package fetch](#trusted-package-fetch) and ADR-0037. Windows needs a read-execute grant on the workspace root. |
+| C13 (0.24.0) | Provider profiles and trusted approval records | Done: see the [provider authentication guide](provider-authentication.md#recorded-provider-profiles-0240) and [approval records](agent-instructions.md#approval-records). No adapter or model tool executed. |
+| C14 (0.25.0) | Approval-gated model command tool | Done: see [model command tool](#model-command-tool) and ADR-0040. A CLI acceptance test qualifies one successful approved command on both hosts; confinement correctness remains the platform suites' responsibility. |
 
 Later work needs its own decisions:
 
-- a network destination allowlist, registry credentials, and
-  development-server networking;
-- a disk limit;
-- a model-callable command tool.
+- registry credentials and development-server networking;
+- model write, network, Git, and MCP tools;
 
 Live qualification on each supported OS remains a separate gate.

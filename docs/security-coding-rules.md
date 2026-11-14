@@ -170,6 +170,13 @@ crate.
   never fall back to an unlimited run when they cannot be applied. On Linux a
   run cgroup must be joined by the child before `exec`, and limit files must
   stay outside the confined tree's Landlock rules.
+- Give every trusted run a disk-growth limit. The supervisor measures the
+  confinement's writable roots before the run and while it runs, as allocated
+  bytes and as file lengths; a failed measurement stops the run rather than
+  claiming a limit. The disk limit is sampled and is not a kernel or
+  filesystem quota. Do not describe it as one, and do not count the read-only
+  roots or host data. A run's recorded limit and peak growth are evidence, not
+  authority.
 - Never record argument text, environment values, or output in a journal.
   Record the argument digest and byte counts.
 - Treat profile variables as public. Do not add a way to pass credentials
@@ -218,6 +225,36 @@ crate.
   when a destination or redirect changes. Enabling a destination also permits
   some data to reach it; do not describe a destination allowlist as content
   confidentiality.
+- Provider profiles record only a name, kind, and authentication mode. Never
+  store a token, password, certificate, endpoint, or account in them. Keep
+  subscription and API-key usage separate, and do not implement an adapter or
+  login without a reviewed credential service and the provider's supported
+  route. A profile is configuration, not authentication. See ADR-0038.
+- A future model tool that changes host state must consume a trusted,
+  single-use approval bound to the session, workspace, operation, exact
+  request digest, and settings revision. Refuse a missing, denied, expired,
+  consumed, mismatched, or settings-invalidated record. Prompt text, model
+  claims, and recorded intents never grant authority. See ADR-0039.
+- The `workspace_run_command` model tool may be advertised only under live
+  `model_tools`, `execute`, `read`, and `write`. Its first call records a
+  pending approval and starts nothing; only a later exact call may consume an
+  approved record and call the trusted runner. The model cannot approve,
+  select limits, use a shell, select network or host services, or reuse an
+  approval. Treat its output as untrusted. See ADR-0040.
+- Do not enforce a package or task destination list with proxy environment
+  variables or an advisory loopback proxy: a confined tree can ignore them and
+  connect directly. A package-network profile is configuration only until a
+  mechanism constrains every egress path, including direct IP, IPv6, UDP, DNS,
+  loopback, and alternate socket families. See ADR-0034.
+- A trusted `packages fetch` is an operator action, never a model tool. It may
+  contact only a declared origin and path prefix, must disable redirects and
+  proxy variables, send no credentials, cap and hash the response, and write
+  only the private per-workspace cache. Record the intent and outcome without
+  the URL text. A run may read only the selected per-workspace cache root; do
+  not expose its parent, journals, settings, or another workspace's root. On
+  Windows the root needs a read-execute container grant, and overlapping cache
+  roots are refused. Do not expose the cache on a platform that cannot
+  enforce the same boundary.
 - Assemble and validate a complete structured tool call before dispatch.
   Validate names, arguments, limits, session scope, and provider call identity.
   A provider adapter must parse provider JSON strictly; the core runtime then

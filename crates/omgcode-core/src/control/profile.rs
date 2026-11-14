@@ -31,7 +31,7 @@ pub const MAX_VARIABLE_VALUE_BYTES: usize = 4096;
 pub const MAX_PROFILE_NAME_CHARS: usize = 64;
 
 /// Variables that `run` sets itself. A profile may not set them, in any case.
-pub const RESERVED_VARIABLES: [&str; 10] = [
+pub const RESERVED_VARIABLES: [&str; 11] = [
     "PATH",
     "HOME",
     "TMPDIR",
@@ -42,6 +42,7 @@ pub const RESERVED_VARIABLES: [&str; 10] = [
     "SYSTEMROOT",
     "WINDIR",
     "XDG_CACHE_HOME",
+    "OMGCODE_PACKAGE_CACHE",
 ];
 
 /// The native platform a profile was declared on. A profile runs only there.

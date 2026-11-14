@@ -7,6 +7,7 @@
 //! advertise or dispatch model tools, and no process or network tool exists.
 
 use std::collections::HashSet;
+use std::ffi::OsString;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -18,9 +19,12 @@ use serde_json::{Value, json};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::control::{ControlError, ControlStore};
+use crate::control::{
+    ApprovalBinding, ApprovalDeclaration, ApprovalOperation, ApprovalState, ControlError,
+    ControlStore, now_unix, valid_profile_name,
+};
 use crate::files::{FileBroker, FileError, FileListing, FileTarget};
-use crate::policy::{DecisionReason, WorkspaceId};
+use crate::policy::{DecisionReason, PermissionSet, WorkspaceId};
 use crate::prompt::{
     self, BASE_PROMPT, BASE_PROMPT_VERSION, ConversationMessage, ConversationRole, ModelMessage,
     PromptError,
@@ -31,7 +35,7 @@ use crate::session::{
 };
 
 /// Revision of the tool schemas advertised by this runtime.
-pub const TOOL_SCHEMA_VERSION: &str = "0.1.0";
+pub const TOOL_SCHEMA_VERSION: &str = "0.2.0";
 
 /// Maximum model requests in one turn, including the text-only final request.
 pub const MAX_TOOL_ROUNDS: usize = 4;
@@ -57,6 +61,20 @@ pub const MAX_LIST_ENTRIES: usize = 512;
 pub const DEFAULT_LIST_ENTRIES: usize = 128;
 /// Hard upper bound for a caller-selected turn deadline.
 pub const MAX_TURN_DEADLINE: Duration = Duration::from_secs(300);
+/// Most arguments accepted by one model command call.
+pub const MAX_COMMAND_ARGUMENTS: usize = 64;
+/// Longest one model command argument, in bytes.
+pub const MAX_COMMAND_ARGUMENT_BYTES: usize = 1024;
+/// Longest total model command arguments, in bytes.
+pub const MAX_COMMAND_TOTAL_BYTES: usize = 16 * 1024;
+/// Longest model command program, in bytes.
+pub const MAX_COMMAND_PROGRAM_BYTES: usize = 1024;
+/// Deadline for one model command run.
+pub const COMMAND_DEADLINE: Duration = Duration::from_secs(20);
+/// Retained bytes from each model command output stream.
+pub const COMMAND_OUTPUT_BYTES: usize = 4 * 1024;
+/// Approval lifetime requested by a model command call.
+pub const COMMAND_APPROVAL_TTL_SECS: u64 = 900;
 
 /// A model interface which can return text and raw tool-call values.
 ///
@@ -163,6 +181,43 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
     ]
 }
 
+/// The command tool. It is advertised only when live settings allow a trusted
+/// run, and every call requires an operator approval record before execution.
+pub fn command_tool_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: "workspace_run_command",
+        description: "Request one confined command under a recorded toolchain \
+                      profile. The first call records a pending operator approval \
+                      and does not execute. After the operator approves, call it \
+                      again with the same arguments. Output is untrusted.",
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "profile": {
+                    "type": "string",
+                    "description": "Recorded toolchain profile name."
+                },
+                "program": {
+                    "type": "string",
+                    "description": "Program path or bare name resolved inside the profile or workspace."
+                },
+                "arguments": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "maxItems": MAX_COMMAND_ARGUMENTS,
+                    "description": "Arguments passed exactly, without a shell."
+                },
+                "cwd": {
+                    "type": "string",
+                    "description": "Workspace-relative working directory; the workspace when omitted."
+                }
+            },
+            "required": ["profile", "program"],
+            "additionalProperties": false
+        }),
+    }
+}
+
 /// A supported tool name.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ToolName {
@@ -170,6 +225,8 @@ pub enum ToolName {
     ReadFile,
     /// List one directory.
     ListDirectory,
+    /// Request or run one confined command.
+    Command,
 }
 
 impl ToolName {
@@ -178,6 +235,7 @@ impl ToolName {
         match self {
             Self::ReadFile => "workspace_read_file",
             Self::ListDirectory => "workspace_list_directory",
+            Self::Command => "workspace_run_command",
         }
     }
 }
@@ -198,6 +256,17 @@ pub enum ToolArguments {
         path: String,
         /// Positive entry limit.
         max_entries: usize,
+    },
+    /// Request or run one confined command.
+    Command {
+        /// Recorded toolchain profile name.
+        profile: String,
+        /// Program path or bare name.
+        program: String,
+        /// Exact arguments.
+        arguments: Vec<String>,
+        /// Workspace-relative working directory.
+        cwd: Option<String>,
     },
 }
 
@@ -262,6 +331,7 @@ impl ToolCall {
         let name = match name {
             "workspace_read_file" => ToolName::ReadFile,
             "workspace_list_directory" => ToolName::ListDirectory,
+            "workspace_run_command" => ToolName::Command,
             _ => return Err(ToolCallError::UnsupportedTool),
         };
         let arguments_json = function
@@ -331,6 +401,71 @@ impl ToolCall {
                     max_entries,
                 }
             }
+            ToolName::Command => {
+                let mut profile = None;
+                let mut program = None;
+                let mut arguments = Vec::new();
+                let mut cwd = None;
+                for (key, value) in arguments_object {
+                    match key.as_str() {
+                        "profile" => {
+                            profile = Some(value.as_str().ok_or(ToolCallError::InvalidArguments)?);
+                        }
+                        "program" => {
+                            program = Some(value.as_str().ok_or(ToolCallError::InvalidArguments)?);
+                        }
+                        "arguments" => {
+                            let values = value.as_array().ok_or(ToolCallError::InvalidArguments)?;
+                            if values.len() > MAX_COMMAND_ARGUMENTS {
+                                return Err(ToolCallError::InvalidArguments);
+                            }
+                            let mut total = 0usize;
+                            for argument in values {
+                                let argument =
+                                    argument.as_str().ok_or(ToolCallError::InvalidArguments)?;
+                                if argument.len() > MAX_COMMAND_ARGUMENT_BYTES
+                                    || argument.contains('\0')
+                                {
+                                    return Err(ToolCallError::InvalidArguments);
+                                }
+                                total = total
+                                    .checked_add(argument.len())
+                                    .filter(|total| *total <= MAX_COMMAND_TOTAL_BYTES)
+                                    .ok_or(ToolCallError::InvalidArguments)?;
+                                arguments.push(argument.to_owned());
+                            }
+                        }
+                        "cwd" => {
+                            cwd = Some(value.as_str().ok_or(ToolCallError::InvalidArguments)?);
+                        }
+                        _ => return Err(ToolCallError::InvalidArguments),
+                    }
+                }
+                let profile = profile.ok_or(ToolCallError::InvalidArguments)?;
+                let program = program.ok_or(ToolCallError::InvalidArguments)?;
+                if !valid_profile_name(profile)
+                    || program.is_empty()
+                    || program.len() > MAX_COMMAND_PROGRAM_BYTES
+                    || program.contains('\0')
+                    || program.chars().any(char::is_control)
+                {
+                    return Err(ToolCallError::InvalidArguments);
+                }
+                let cwd = match cwd {
+                    Some("") => None,
+                    Some(path) => {
+                        validate_relative_path(path, true)?;
+                        Some(path.to_owned())
+                    }
+                    None => None,
+                };
+                ToolArguments::Command {
+                    profile: profile.to_owned(),
+                    program: program.to_owned(),
+                    arguments,
+                    cwd,
+                }
+            }
         };
         Ok(Self {
             call_id: call_id.to_owned(),
@@ -341,11 +476,15 @@ impl ToolCall {
     }
 
     /// Return the validated workspace-relative path used for dispatch.
+    ///
+    /// A command call has no single path; it returns an empty string and the
+    /// dispatcher uses its typed arguments.
     pub fn path(&self) -> &str {
         match &self.arguments {
             ToolArguments::ReadFile { path, .. } | ToolArguments::ListDirectory { path, .. } => {
                 path
             }
+            ToolArguments::Command { .. } => "",
         }
     }
 
@@ -697,7 +836,10 @@ impl<'a> TurnRuntime<'a> {
             .ok_or(TurnError::Timeout)?;
         self.check_checkpoints(deadline)?;
 
-        let tools = tool_definitions();
+        let mut tools = tool_definitions();
+        if self.command_tool_allowed() {
+            tools.push(command_tool_definition());
+        }
         // The runtime owns the exact instruction and tool metadata it sends.
         manifest.custom_instructions = custom_instructions.to_owned();
         manifest.tool_schema_version = Some(TOOL_SCHEMA_VERSION.to_owned());
@@ -884,6 +1026,7 @@ impl<'a> TurnRuntime<'a> {
                     data_directory: self.data_directory,
                     session_id: self.journal.snapshot().session_id,
                     workspace_id: self.workspace_id,
+                    cancel: self.cancel.clone(),
                 }
                 .dispatch(call, self.limits.max_result_bytes);
                 if let Some(filter) = self.tool_text_filter {
@@ -971,14 +1114,25 @@ impl<'a> TurnRuntime<'a> {
     /// Any settings failure withholds them. The settings lock is released
     /// before the first model request.
     fn tool_replay_allowed(&self) -> bool {
+        self.workspace_permissions()
+            .is_some_and(|permissions| permissions.model_tools && permissions.read)
+    }
+
+    /// Report whether the command tool may be advertised. It needs live
+    /// `model_tools`, `execute`, `read`, and `write`; each call rechecks them.
+    fn command_tool_allowed(&self) -> bool {
+        self.workspace_permissions().is_some_and(|permissions| {
+            permissions.model_tools && permissions.execute && permissions.read && permissions.write
+        })
+    }
+
+    /// Read the workspace's current preferences, releasing the settings lock.
+    fn workspace_permissions(&self) -> Option<PermissionSet> {
         match ControlStore::open_existing(self.data_directory) {
             Ok(Some(control)) => control
                 .workspace(self.workspace_id)
-                .is_some_and(|workspace| {
-                    let permissions = workspace.permissions();
-                    permissions.model_tools && permissions.read
-                }),
-            Ok(None) | Err(_) => false,
+                .map(|workspace| workspace.permissions()),
+            Ok(None) | Err(_) => None,
         }
     }
 
@@ -1079,6 +1233,7 @@ struct WorkspaceToolDispatcher<'a> {
     data_directory: &'a Path,
     session_id: Uuid,
     workspace_id: WorkspaceId,
+    cancel: CancelToken,
 }
 
 impl WorkspaceToolDispatcher<'_> {
@@ -1102,6 +1257,35 @@ impl WorkspaceToolDispatcher<'_> {
                 );
             }
         };
+        // The persisted model-tool preference is rechecked on every call, so a
+        // change made during model I/O stops the next operation.
+        let permissions = match control.workspace(self.workspace_id) {
+            Some(workspace) => workspace.permissions(),
+            None => {
+                return ToolExecution::denied(
+                    "policy_unavailable",
+                    call,
+                    FileError::Denied(DecisionReason::PermissionDisabled),
+                );
+            }
+        };
+        if !permissions.model_tools {
+            return ToolExecution::denied(
+                "model_tools_disabled",
+                call,
+                FileError::Denied(DecisionReason::PermissionDisabled),
+            );
+        }
+        if matches!(call.arguments, ToolArguments::Command { .. }) {
+            if !(permissions.execute && permissions.read && permissions.write) {
+                return ToolExecution::denied(
+                    "command_disabled",
+                    call,
+                    FileError::Denied(DecisionReason::PermissionDisabled),
+                );
+            }
+            return self.dispatch_command(control, call, max_result_bytes);
+        }
         let binding = match control.bind_session(self.session_id, self.workspace_id) {
             Ok(binding) => binding,
             Err(error) => {
@@ -1112,18 +1296,6 @@ impl WorkspaceToolDispatcher<'_> {
                 );
             }
         };
-        // The persisted model-tool preference is rechecked on every call, so a
-        // change made during model I/O stops the next operation.
-        let model_tools = control
-            .workspace(self.workspace_id)
-            .is_some_and(|workspace| workspace.permissions().model_tools);
-        if !model_tools {
-            return ToolExecution::denied(
-                "model_tools_disabled",
-                call,
-                FileError::Denied(DecisionReason::PermissionDisabled),
-            );
-        }
         let target = FileTarget {
             session_id: self.session_id,
             workspace_id: self.workspace_id,
@@ -1147,7 +1319,284 @@ impl WorkspaceToolDispatcher<'_> {
                     Err(error) => classify_file_error(call, error),
                 }
             }
+            ToolArguments::Command { .. } => ToolExecution::recoverable("invalid_command", call),
         }
+    }
+
+    /// Request or execute one command. The control store is dropped before the
+    /// run starts so the runner can take its own settings lock.
+    fn dispatch_command(
+        &self,
+        mut control: ControlStore,
+        call: &ToolCall,
+        max_result_bytes: usize,
+    ) -> ToolExecution {
+        let ToolArguments::Command {
+            profile,
+            program,
+            arguments,
+            cwd,
+        } = &call.arguments
+        else {
+            return ToolExecution::recoverable("invalid_command", call);
+        };
+        let request = crate::run::RunRequest {
+            workspace_id: self.workspace_id,
+            profile: profile.clone(),
+            program: PathBuf::from(program),
+            arguments: arguments.iter().map(OsString::from).collect(),
+            working_directory: cwd.as_ref().map(PathBuf::from),
+            host_services: false,
+            network: false,
+            limits: command_limits(),
+        };
+        let digest = command_digest(self.session_id, &request);
+        let now = now_unix();
+        let revision = control.revision();
+        let statuses = control.approval_statuses(now);
+        let matching = |state| {
+            statuses.iter().find(|status| {
+                status.session_id == self.session_id
+                    && status.workspace_id == self.workspace_id
+                    && status.operation == ApprovalOperation::Command
+                    && status.request_sha256 == digest
+                    && status.settings_revision == revision
+                    && status.state == state
+            })
+        };
+        if let Some(approved) = matching(ApprovalState::Approved) {
+            let binding = ApprovalBinding {
+                session_id: self.session_id,
+                workspace_id: self.workspace_id,
+                operation: ApprovalOperation::Command,
+                request_sha256: digest,
+            };
+            if let Err(error) = control.consume_approval(approved.id, &binding, now) {
+                return command_result(
+                    call,
+                    ToolOutcome::Failed,
+                    "approval_failed",
+                    json!({"error": error.to_string()}),
+                    max_result_bytes,
+                );
+            }
+            drop(control);
+            return self.execute_command(call, &request, max_result_bytes);
+        }
+        if let Some(pending) = matching(ApprovalState::Pending) {
+            return command_result(
+                call,
+                ToolOutcome::Failed,
+                "approval_required",
+                json!({
+                    "approval_id": pending.id,
+                    "message": "The operator must approve this command before it can run.",
+                }),
+                max_result_bytes,
+            );
+        }
+        if matching(ApprovalState::Denied).is_some() {
+            return command_result(
+                call,
+                ToolOutcome::Denied,
+                "approval_denied",
+                json!({"message": "The operator denied this command."}),
+                max_result_bytes,
+            );
+        }
+        let summary = command_summary(profile, program, arguments.len());
+        let status = match control.request_approval(
+            &ApprovalDeclaration {
+                session_id: self.session_id,
+                workspace_id: self.workspace_id,
+                operation: ApprovalOperation::Command,
+                request_sha256: digest,
+                summary,
+                ttl_secs: COMMAND_APPROVAL_TTL_SECS,
+            },
+            now,
+        ) {
+            Ok(status) => status,
+            Err(error) => {
+                return command_result(
+                    call,
+                    ToolOutcome::Failed,
+                    "approval_failed",
+                    json!({"error": error.to_string()}),
+                    max_result_bytes,
+                );
+            }
+        };
+        drop(control);
+        command_result(
+            call,
+            ToolOutcome::Failed,
+            "approval_required",
+            json!({
+                "approval_id": status.id,
+                "message": "The operator must approve this command before it can run.",
+            }),
+            max_result_bytes,
+        )
+    }
+
+    /// Run one approved command with a fixed, bounded request.
+    fn execute_command(
+        &self,
+        call: &ToolCall,
+        request: &crate::run::RunRequest,
+        max_result_bytes: usize,
+    ) -> ToolExecution {
+        let cancel = crate::run::CancelSignal::new();
+        let stop = Arc::new(AtomicBool::new(false));
+        let token = self.cancel.clone();
+        let watcher = {
+            let cancel = cancel.clone();
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    if token.is_cancelled() {
+                        cancel.cancel();
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            })
+        };
+        let result = crate::run::run(self.data_directory, request, &cancel);
+        stop.store(true, Ordering::SeqCst);
+        let _unreportable = watcher.join();
+        match result {
+            Ok(report) => {
+                let body = json!({
+                    "tool": call.name.as_str(),
+                    "status": "executed",
+                    "result": report.finish.result,
+                    "elapsed_ms": report.finish.elapsed_ms,
+                    "stdout": report.stdout.text,
+                    "stderr": report.stderr.text,
+                    "stdout_truncated": report.stdout.truncated,
+                    "stderr_truncated": report.stderr.truncated,
+                });
+                let message = labelled_result(call, &body.to_string());
+                if message.len() > max_result_bytes.min(MAX_MESSAGE_BYTES) {
+                    return ToolExecution::recoverable("output_too_large", call);
+                }
+                ToolExecution::success(message)
+            }
+            Err(error) => command_result(
+                call,
+                ToolOutcome::Failed,
+                "command_failed",
+                json!({"error": error.to_string()}),
+                max_result_bytes,
+            ),
+        }
+    }
+}
+
+/// Fixed limits for one model command run.
+fn command_limits() -> crate::run::ProcessLimits {
+    crate::run::ProcessLimits {
+        deadline: COMMAND_DEADLINE,
+        max_stdout_bytes: COMMAND_OUTPUT_BYTES,
+        max_stderr_bytes: COMMAND_OUTPUT_BYTES,
+        tree: Some(crate::run::TreeLimits {
+            max_memory_bytes: 1024 * 1024 * 1024,
+            max_processes: 64,
+            max_cpu_time: Duration::from_secs(20),
+            max_disk_bytes: Some(256 * 1024 * 1024),
+        }),
+        ..crate::run::ProcessLimits::default()
+    }
+}
+
+/// Bind one model command call to the exact run request.
+fn command_digest(session_id: Uuid, request: &crate::run::RunRequest) -> String {
+    let mut bytes = Vec::new();
+    push_field(&mut bytes, b"omgcode-command-v1");
+    push_field(&mut bytes, session_id.as_bytes());
+    push_field(&mut bytes, request.workspace_id.as_uuid().as_bytes());
+    push_field(&mut bytes, request.profile.as_bytes());
+    push_field(&mut bytes, request.program.as_os_str().as_encoded_bytes());
+    push_field(
+        &mut bytes,
+        &u64::try_from(request.arguments.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    for argument in &request.arguments {
+        push_field(&mut bytes, argument.as_encoded_bytes());
+    }
+    match &request.working_directory {
+        Some(directory) => push_field(&mut bytes, directory.as_os_str().as_encoded_bytes()),
+        None => push_field(&mut bytes, b""),
+    }
+    push_field(
+        &mut bytes,
+        &[u8::from(request.host_services), u8::from(request.network)],
+    );
+    let tree = request.limits.tree;
+    let numbers = [
+        u64::try_from(request.limits.deadline.as_millis()).unwrap_or(u64::MAX),
+        u64::try_from(request.limits.max_stdout_bytes).unwrap_or(u64::MAX),
+        u64::try_from(request.limits.max_stderr_bytes).unwrap_or(u64::MAX),
+        tree.map_or(0, |tree| tree.max_memory_bytes),
+        tree.map_or(0, |tree| u64::from(tree.max_processes)),
+        tree.map_or(0, |tree| {
+            u64::try_from(tree.max_cpu_time.as_millis()).unwrap_or(u64::MAX)
+        }),
+        tree.and_then(|tree| tree.max_disk_bytes).unwrap_or(0),
+    ];
+    for number in numbers {
+        push_field(&mut bytes, &number.to_le_bytes());
+    }
+    sha256_hex(&bytes)
+}
+
+fn push_field(bytes: &mut Vec<u8>, value: &[u8]) {
+    bytes.extend(u64::try_from(value.len()).unwrap_or(u64::MAX).to_le_bytes());
+    bytes.extend(value);
+}
+
+/// A bounded operator-facing label for an approval request.
+fn command_summary(profile: &str, program: &str, arguments: usize) -> String {
+    let label = Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(program);
+    let mut summary = format!("run {profile}/{label} ({arguments} arguments)");
+    if summary.len() > 180 {
+        summary.truncate(180);
+        while !summary.is_char_boundary(summary.len()) {
+            summary.pop();
+        }
+    }
+    summary
+}
+
+/// Render a command status as a bounded, source-labelled tool result.
+fn command_result(
+    call: &ToolCall,
+    outcome: ToolOutcome,
+    code: &'static str,
+    detail: Value,
+    max_result_bytes: usize,
+) -> ToolExecution {
+    let body = json!({
+        "tool": call.name.as_str(),
+        "status": code,
+        "detail": detail,
+    });
+    let message = labelled_result(call, &body.to_string());
+    if message.len() > max_result_bytes.min(MAX_MESSAGE_BYTES) {
+        return ToolExecution::recoverable("output_too_large", call);
+    }
+    ToolExecution {
+        outcome,
+        code: Some(code),
+        text: message,
+        terminal: None,
     }
 }
 

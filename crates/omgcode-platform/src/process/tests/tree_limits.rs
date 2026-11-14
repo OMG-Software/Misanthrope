@@ -10,15 +10,11 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::{FIXTURE_ENV, HARNESS_ARGS, limits, spec};
+use super::{FIXTURE_ENV, HARNESS_ARGS, in_limit_scope, limits, spec};
 use crate::process::{
     CancelSignal, ProcessError, ProcessLimits, ResourceLimit, Termination, TreeLimits,
     check_tree_limits, run,
 };
-
-/// Marks a test process that already runs in its own delegated scope.
-#[cfg(target_os = "linux")]
-const DELEGATED_ENV: &str = "OMGCODE_DELEGATED_TEST";
 
 /// Generous limits that an ordinary fixture never reaches.
 fn roomy() -> TreeLimits {
@@ -26,6 +22,7 @@ fn roomy() -> TreeLimits {
         max_memory_bytes: 1024 * 1024 * 1024,
         max_processes: 256,
         max_cpu_time: Duration::from_secs(60),
+        max_disk_bytes: None,
     }
 }
 
@@ -34,24 +31,6 @@ fn limited(tree: TreeLimits) -> ProcessLimits {
         tree: Some(tree),
         ..limits()
     }
-}
-
-/// Run `body` where tree limits can apply. See the module documentation.
-fn in_limit_scope(test: &str, body: impl FnOnce()) {
-    #[cfg(target_os = "linux")]
-    if env::var_os(DELEGATED_ENV).is_none() {
-        let status = Command::new("systemd-run")
-            .args(["--user", "--scope", "--quiet", "-p", "Delegate=yes", "--"])
-            .arg(env::current_exe().expect("test executable"))
-            .args(["--exact", test, "--nocapture", "--test-threads=1", "-q"])
-            .env(DELEGATED_ENV, "1")
-            .status()
-            .expect("start systemd-run; tree-limit tests need a user service manager");
-        assert!(status.success(), "{test} failed in its delegated scope");
-        return;
-    }
-    let _ = test;
-    body();
 }
 
 /// Allocate and touch memory in 1 MiB steps, up to `limit` MiB or the first
@@ -91,6 +70,7 @@ pub(super) fn nested_job() -> i32 {
         max_memory_bytes: 32 * 1024 * 1024,
         max_processes: 2,
         max_cpu_time: Duration::from_secs(60),
+        max_disk_bytes: None,
     })
     .expect("join a nested job");
     let held = fill_memory(4096);

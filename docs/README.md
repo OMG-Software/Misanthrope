@@ -3,7 +3,8 @@
 OMGCode has a Rust CLI prototype for local chat, JSONL sessions, and a
 bounded native workspace file broker. The broker is available only through
 trusted operator commands and, when a workspace enables `model_tools`, to the
-local model's read and list tools. Other model tools are not implemented. The
+local model's read, list, and approval-gated command tools. Model write,
+network, Git, and MCP tools are not implemented. The
 trusted CLI `run` command runs one program under Linux Landlock or Windows
 AppContainer confinement with an operator-declared toolchain profile. No model
 tool starts a process. The guides distinguish implemented behaviour from the
@@ -84,7 +85,16 @@ The Rust workflow adds formatting, strict Clippy, unit/integration tests, and
 separate documentation tests on Windows and Linux. The development guide owns
 the current commands and limits. There is no frontend yet. The trusted `run`
 command uses native confinement that was tested on one Windows build and one
-Linux kernel only. The limited file broker and the core read/list turn runtime
+Linux kernel only. Every trusted run has memory, process-count, CPU-time, and
+sampled net disk-growth limits; the disk limit is not a filesystem quota.
+Package-network profiles are recorded as configuration only (ADR-0034); no run
+uses them, and network access remains all-or-nothing. The trusted
+`packages fetch` command downloads from declared origins into a per-workspace
+cache. A selected root is exposed read-only on Linux and Windows; Windows
+needs a read-execute grant, and Linux falls back to application storage.
+Provider profiles record connection shapes, and approval records prepare
+per-call model-tool consent; neither enables an adapter or model tool. The
+limited file broker and the core read/list turn runtime
 do not provide general model tools. Chat dispatches only the read and
 list tools, and only for a workspace that enables `model_tools`. A read-only CLI preview compares a workspace file with trusted proposed
 content without writing to the workspace or creating a checkpoint.

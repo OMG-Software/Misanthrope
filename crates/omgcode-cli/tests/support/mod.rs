@@ -2,7 +2,7 @@
 
 #[allow(
     dead_code,
-    reason = "only run workflow test binaries use the run scene"
+    reason = "only the run workflow and model command test binaries use the run scene"
 )]
 pub(crate) mod run_scene;
 pub(crate) mod spawn_gate;

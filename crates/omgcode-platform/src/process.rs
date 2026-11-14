@@ -2,11 +2,14 @@
 //!
 //! This module starts one program with an explicit environment and supervises
 //! its whole descendant tree: bounded output, a deadline, cooperative
-//! cancellation, and observed tree cleanup. [`run`] applies no filesystem or
-//! network confinement. [`run_confined`] adds a Landlock filesystem allowlist
-//! and a seccomp socket filter on Linux, and an AppContainer with recorded
-//! directory grants on Windows. No CLI command or model tool calls either
-//! yet. See `docs/execution.md`, ADR-0027, ADR-0028, and ADR-0029.
+//! cancellation, observed tree cleanup, and tree-wide memory, process, CPU-time,
+//! and disk limits. [`run`] applies no filesystem or network confinement.
+//! [`run_confined`] adds a Landlock filesystem allowlist and a seccomp socket
+//! filter on Linux, and an AppContainer with recorded directory grants on
+//! Windows. The disk limit samples the bytes allocated under the writable
+//! roots on a separate thread; neither platform offers a per-run disk quota.
+//! See `docs/execution.md`, ADR-0027, ADR-0028, ADR-0029, ADR-0031, and
+//! ADR-0033.
 
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -19,10 +22,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 mod confinement;
+mod disk;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(windows)]
 mod windows;
+
+use disk::DiskMonitor;
 
 #[cfg(test)]
 mod tests;
@@ -53,6 +59,10 @@ pub const MAX_TREE_MEMORY_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
 pub const MAX_TREE_PROCESSES: u32 = 65_536;
 /// Largest accepted tree CPU-time limit.
 pub const MAX_TREE_CPU_TIME: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+/// Smallest accepted tree disk limit.
+pub const MIN_TREE_DISK_BYTES: u64 = 16 * 1024 * 1024;
+/// Largest accepted tree disk limit.
+pub const MAX_TREE_DISK_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
 
 /// Poll interval for exit, deadline, and cancellation checks.
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -104,8 +114,9 @@ impl Default for ProcessLimits {
 ///
 /// The kernel enforces memory and process counts: on Windows through Job
 /// Object limits, on Linux through a child of the runner's delegated cgroup
-/// v2. The supervisor enforces CPU time by polling the tree's accounting. When
-/// any limit is reached, the runner terminates the whole tree and reports
+/// v2. The supervisor enforces CPU time by polling the tree's accounting and
+/// disk growth by sampling the writable roots. When any limit is reached, the
+/// runner terminates the whole tree and reports
 /// [`Termination::LimitExceeded`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TreeLimits {
@@ -117,6 +128,12 @@ pub struct TreeLimits {
     pub max_processes: u32,
     /// User and kernel CPU time summed over every process the tree started.
     pub max_cpu_time: Duration,
+    /// Greatest net growth the tree may add to its writable roots, measured
+    /// as allocated bytes and as file lengths; passing either budget ends the
+    /// run. `None` applies no disk limit; a confined run with a limit must
+    /// name at least one writable path. This is sampled, not a filesystem
+    /// quota; see [`run_confined`] and `docs/execution.md`.
+    pub max_disk_bytes: Option<u64>,
 }
 
 impl TreeLimits {
@@ -136,6 +153,13 @@ impl TreeLimits {
                 "tree CPU-time limit is out of range",
             ));
         }
+        if let Some(disk) = self.max_disk_bytes
+            && !(MIN_TREE_DISK_BYTES..=MAX_TREE_DISK_BYTES).contains(&disk)
+        {
+            return Err(ProcessError::InvalidLimits(
+                "tree disk limit is out of range",
+            ));
+        }
         Ok(self)
     }
 }
@@ -149,6 +173,8 @@ pub enum ResourceLimit {
     Processes,
     /// The tree used its CPU time.
     CpuTime,
+    /// The tree's writable roots grew past the disk limit.
+    Disk,
 }
 
 /// Resources a limited tree used, read after it was observed empty.
@@ -159,6 +185,10 @@ pub struct TreeUsage {
     /// Peak memory, when the platform reports it: the Windows job's peak
     /// commit, or Linux `memory.peak` (Linux 5.19 or later).
     pub peak_memory_bytes: Option<u64>,
+    /// Highest net growth of the writable roots above the pre-run baseline,
+    /// when a disk limit applied. It is the larger of allocated-byte growth
+    /// and file-length growth.
+    pub peak_disk_bytes: Option<u64>,
 }
 
 impl ProcessLimits {
@@ -278,6 +308,9 @@ pub enum ProcessError {
     /// The runner could not observe the tree empty, or its output closed,
     /// within the cleanup timeout. Processes may remain.
     CleanupUnconfirmed(&'static str),
+    /// A disk limit could not be prepared or its sampler could not start.
+    /// Nothing was started.
+    DiskMeasurement(io::Error),
 }
 
 impl fmt::Display for ProcessError {
@@ -302,6 +335,9 @@ impl fmt::Display for ProcessError {
                     "process tree cleanup was not confirmed: {reason}"
                 )
             }
+            Self::DiskMeasurement(error) => {
+                write!(formatter, "the disk limit could not be applied: {error}")
+            }
         }
     }
 }
@@ -309,7 +345,10 @@ impl fmt::Display for ProcessError {
 impl std::error::Error for ProcessError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Spawn(error) | Self::Supervision(error) | Self::Confinement(error) => Some(error),
+            Self::Spawn(error)
+            | Self::Supervision(error)
+            | Self::Confinement(error)
+            | Self::DiskMeasurement(error) => Some(error),
             _ => None,
         }
     }
@@ -327,7 +366,15 @@ pub fn run(
 ) -> Result<ProcessOutcome, ProcessError> {
     let limits = limits.validate()?;
     validate_spec(spec)?;
-    run_native(spec, None, limits, cancel)
+    if limits
+        .tree
+        .is_some_and(|tree| tree.max_disk_bytes.is_some())
+    {
+        return Err(ProcessError::InvalidLimits(
+            "a disk limit needs a confined run",
+        ));
+    }
+    run_native(spec, None, limits, cancel, None)
 }
 
 /// Start one program under filesystem and network confinement and supervise
@@ -353,7 +400,11 @@ pub fn run_confined(
     let limits = limits.validate()?;
     validate_spec(spec)?;
     confinement.validate()?;
-    run_native(spec, Some(confinement), limits, cancel)
+    let disk = DiskMonitor::prepare(
+        Some(confinement),
+        limits.tree.and_then(|tree| tree.max_disk_bytes),
+    )?;
+    run_native(spec, Some(confinement), limits, cancel, disk)
 }
 
 /// Check that [`TreeLimits`] can be applied here, so a caller can refuse a
@@ -386,8 +437,9 @@ fn run_native(
     confinement: Option<&Confinement>,
     limits: ProcessLimits,
     cancel: &CancelSignal,
+    disk: Option<DiskMonitor>,
 ) -> Result<ProcessOutcome, ProcessError> {
-    linux::run(spec, confinement, limits, cancel)
+    linux::run(spec, confinement, limits, cancel, disk)
 }
 
 #[cfg(windows)]
@@ -396,8 +448,9 @@ fn run_native(
     confinement: Option<&Confinement>,
     limits: ProcessLimits,
     cancel: &CancelSignal,
+    disk: Option<DiskMonitor>,
 ) -> Result<ProcessOutcome, ProcessError> {
-    windows::run(spec, confinement, limits, cancel)
+    windows::run(spec, confinement, limits, cancel, disk)
 }
 
 #[cfg(not(any(target_os = "linux", windows)))]
@@ -406,6 +459,7 @@ fn run_native(
     _confinement: Option<&Confinement>,
     _limits: ProcessLimits,
     _cancel: &CancelSignal,
+    _disk: Option<DiskMonitor>,
 ) -> Result<ProcessOutcome, ProcessError> {
     Err(ProcessError::Unsupported(
         "process supervision is implemented only on Linux and Windows",
@@ -618,11 +672,12 @@ fn supervise(
     limits: ProcessLimits,
     cancel: &CancelSignal,
     confinement: AppliedConfinement,
+    mut disk: Option<DiskMonitor>,
 ) -> Result<ProcessOutcome, ProcessError> {
-    let watched = watch(tree, started, limits.deadline, cancel);
+    let watched = watch(tree, started, limits.deadline, cancel, disk.as_ref());
     // Descendants never outlive the run, including after a normal exit.
     let stopped = stop_tree(tree, limits.cleanup_timeout);
-    let termination = match (watched, stopped) {
+    let mut termination = match (watched, stopped) {
         (Ok(termination), Ok(())) => termination,
         (_, Err(error)) => return Err(error),
         (Err(error), Ok(())) => return Err(ProcessError::Supervision(error)),
@@ -632,7 +687,20 @@ fn supervise(
     // failed release is unconfirmed cleanup and is reported first.
     let usage = tree.usage();
     tree.release()?;
-    let usage = usage.map_err(ProcessError::Supervision)?;
+    let mut usage = usage.map_err(ProcessError::Supervision)?;
+    // The final sample runs after the tree is empty. It catches a program
+    // that wrote past the limit and exited before the next scheduled sample.
+    if let Some(disk) = &mut disk {
+        disk.finish().map_err(ProcessError::Supervision)?;
+        if disk.exceeded() && !matches!(termination, Termination::LimitExceeded { .. }) {
+            termination = Termination::LimitExceeded {
+                limit: ResourceLimit::Disk,
+            };
+        }
+        if let Some(usage) = &mut usage {
+            usage.peak_disk_bytes = Some(disk.peak_growth());
+        }
+    }
     let (stdout, stderr) = capture.finish(Instant::now() + limits.cleanup_timeout)?;
     Ok(ProcessOutcome {
         termination,
@@ -649,6 +717,7 @@ fn watch(
     started: Instant,
     deadline: Duration,
     cancel: &CancelSignal,
+    disk: Option<&DiskMonitor>,
 ) -> io::Result<Termination> {
     loop {
         let exited = tree.try_exit()?;
@@ -661,6 +730,16 @@ fn watch(
         };
         if let Some(limit) = reached {
             return Ok(Termination::LimitExceeded { limit });
+        }
+        // Disk growth is sampled off this thread; checking the result is
+        // cheap. A measurement error fails the run rather than claiming a
+        // limit that could not be checked.
+        if let Some(disk) = disk
+            && disk.check()?
+        {
+            return Ok(Termination::LimitExceeded {
+                limit: ResourceLimit::Disk,
+            });
         }
         if let Some(termination) = exited {
             return Ok(termination);

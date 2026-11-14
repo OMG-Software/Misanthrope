@@ -1,6 +1,6 @@
 # OMGCode implementation plan
 
-Last verified: 2026-11-11.
+Last verified: 2026-11-14.
 
 This guide is part of `main` after PR #9. Read it before selecting the next
 increment. Checkpoint preparation does not mean native replacement exists.
@@ -52,10 +52,28 @@ This is a resume guide, not a replacement for the owning contracts in
 - **PR #25 and PR #26** merged at `4eeb12f`: **Phase C4**, version
   **0.16.0**, with the trusted CLI `run`, toolchain profiles, the run journal,
   and the `host_services` preference.
-- This branch, `codex/resource-limits`: **Phase C5**, version **0.17.0**, with
-  tree-wide memory, process, and CPU-time limits for every trusted run, and
-  fixes for the unaddressed PR #26 review comments. It started from `main` at
-  `4eeb12f`.
+- **PR #27** merged at `ac01a74`: **Phase C5**, version **0.17.0**, with
+  tree-wide memory, process, and CPU-time limits.
+- **PR #29** merged at `4c2a561`: **Phase C6**, version **0.18.0**, with
+  outbound network access behind `task_network` and `--network`.
+- `codex/disk-limit` (local commit `0426e42`): **Phase C7**, version
+  **0.19.0**, with a sampled net disk-growth limit for every trusted run.
+- This branch, `codex/package-network-profile`: **Phase C8** at `16d8945`,
+  the contract-only package-network profile and implementation gate
+  (ADR-0034), **Phase C9**, version **0.20.0**, with operator-declared
+  package-network profile records, **Phase C10**, version **0.21.0**, with
+  the trusted allowlisted package fetch and private cache (ADR-0035), and
+  **Phase C11**, version **0.22.0**, with read-only Linux run access to that
+  cache (ADR-0036), **Phase C12**, version **0.23.0**, with per-workspace
+  cache roots and scoped Windows access (ADR-0037), **Phase C13**, version
+  **0.24.0**, with provider-profile records and trusted per-call approvals
+  (ADR-0038, ADR-0039), and **Phase C14**, version **0.25.0**, with the
+  approval-gated model command tool (ADR-0040), qualified by **Phase C15**, a
+  native end-to-end acceptance test of one approved successful command on both
+  hosts. It is stacked on C7 at
+  `0426e42`. No run accepts a profile or has destination-scoped networking;
+  no provider adapter is enabled, and the command tool is the only model tool
+  that can request a process.
 
 Implemented today:
 
@@ -79,9 +97,11 @@ Implemented today:
   complete proposed UTF-8 content. Exact digests, bounded one-hunk diff, no
   workspace mutation, no checkpoint, no replacement.
 - LM Studio Chat Completions chat with non-streaming requests. It is text-only
-  unless the session's workspace enables `model_tools`; then it offers only the
-  read and list tools. See
-  [ADR-0026](docs/adr/0026-offer-read-list-tools-through-a-workspace-preference.md).
+  unless the session's workspace enables `model_tools`; then it offers the read
+  and list tools and, when `execute`, `read`, and `write` also allow it, the
+  approval-gated command tool. See
+  [ADR-0026](docs/adr/0026-offer-read-list-tools-through-a-workspace-preference.md)
+  and [ADR-0040](docs/adr/0040-gate-the-model-command-tool-with-approvals-and-the-trusted-runner.md).
 - Read-only core initialization/ledger record inspectors with bounded strict
   JSON, lifecycle validation, manifest references, and unresolved-state retention.
   The pure inspectors open no files and execute no recorded work.
@@ -114,9 +134,40 @@ Implemented today:
     `archive`;
   - a `host_services` preference that a run's `--host-services` flag also
     needs (Linux only);
+  - `--network` behind the live `task_network` preference;
+  - memory, process, CPU-time, and sampled net disk-growth limits, recorded in
+    the run journal;
   - interrupt-to-cancel handling.
 
-  See [ADR-0030](docs/adr/0030-run-trusted-commands-through-recorded-toolchain-profiles.md).
+  See [ADR-0030](docs/adr/0030-run-trusted-commands-through-recorded-toolchain-profiles.md),
+  [ADR-0031](docs/adr/0031-limit-whole-run-trees-with-job-objects-and-delegated-cgroups.md),
+  [ADR-0032](docs/adr/0032-allow-outbound-network-for-trusted-runs-through-task-network.md),
+  and [ADR-0033](docs/adr/0033-bound-run-disk-growth-by-sampling-writable-roots.md).
+- A [package-network profile](docs/execution.md#package-network-profile-contract-only)
+  contract and implementation gate (ADR-0034). Version 0.20.0 records
+  operator-declared profiles as configuration only. No run accepts a profile,
+  no destination filter exists, and `--network` remains all-or-nothing.
+- A trusted [`packages fetch`](docs/execution.md#trusted-package-fetch)
+  command (ADR-0035). It contacts only declared origins, refuses redirects and
+  credentials, bounds and hashes the response, writes a private per-workspace
+  cache, and records the intent and outcome. The run remains offline and does
+  not yet read the cache.
+- Read-only run access to a per-workspace fetched-package cache root
+  (ADR-0037, superseding ADR-0036). The root is selected with
+  `workspace set-package-cache`, exposed read-only on Linux and Windows, and
+  named by `OMGCODE_PACKAGE_CACHE`. Windows requires a read-execute container
+  grant on the root; Linux falls back to application storage when no root is
+  selected. Overlapping roots are refused.
+- Provider profiles record connection shapes without credentials or adapters
+  (ADR-0038). Trusted approval records bind a future model-tool call to a
+  session, workspace, operation, request digest, and settings revision, expire,
+  and are consumed once (ADR-0039). Provider profiles enable no connection; the
+  command tool is the only model tool that consumes an approval record.
+- The `workspace_run_command` model tool (ADR-0040) is offered only with live
+  `model_tools`, `execute`, `read`, and `write`. Its first call records a
+  pending approval and starts nothing; an approved exact call consumes the
+  approval and uses the trusted runner with fixed limits. No write, network,
+  Git, or MCP model tool exists.
 - Trusted `file restore` through a new checkpoint and
   `file delete-checkpoint --permanent` for one resolved checkpoint, on the same
   filesystems as apply. Neither is power-loss qualified. See
@@ -126,11 +177,12 @@ Not implemented:
 
 - Apply or restore on other filesystems, workspace file deletion, ledger
   compaction, and standalone CLI checkpoint preparation.
-- Model write, process, network, Git, or MCP tools; per-call tool approval;
-  and live provider tool-call qualification.
-- Model-callable process execution, disk limits, task and package networking, Git, MCP, runtime skills, memories, desktop/UI panels,
-  compaction, or caches. Nothing calls the unconfined process runner.
-- Subscription/API-key provider profiles beyond the local LM Studio route.
+- Model write, network, Git, and MCP tools; live provider tool-call
+  qualification; and streaming, discovery, and cancellation in a live provider.
+- A run network destination allowlist, runtime skills, memories, desktop/UI
+  panels, compaction, and caches. Nothing calls the unconfined process runner.
+- Provider adapters and subscription/API-key login; the recorded provider
+  profiles are configuration only.
 
 ## Resume steps
 
@@ -447,8 +499,8 @@ on Windows, and trusted CLI commands as the first caller. See
 
   Java has not run, because no JDK was installed. See
   [ADR-0030](docs/adr/0030-run-trusted-commands-through-recorded-toolchain-profiles.md).
-- **C5 (this branch, `codex/resource-limits`):** tree-wide limits for every
-  trusted run. The user chose:
+- **C5 (merged as PR #27):** tree-wide limits for every trusted run. The user
+  chose:
   - a delegated cgroup v2 on Linux, with OMGCode started in its own
     `systemd-run --user --scope -p Delegate=yes` scope;
   - limits always applied, failing closed where they cannot be;
@@ -457,12 +509,64 @@ on Windows, and trusted CLI commands as the first caller. See
 
   See
   [ADR-0031](docs/adr/0031-limit-whole-run-trees-with-job-objects-and-delegated-cgroups.md).
+- **C6 (merged as PR #29):** outbound network access behind `task_network` and
+  `--network`, with resolver and public certificate paths on Linux. See
+  [ADR-0032](docs/adr/0032-allow-outbound-network-for-trusted-runs-through-task-network.md).
+- **C7 (local commit `0426e42` on `codex/disk-limit`):** a sampled net
+  disk-growth limit for every trusted run. The user chose a disk limit as the
+  next increment. The supervisor measures the writable roots before the run
+  and once a second on a separate thread, fails closed when it cannot measure,
+  and records the limit and peak growth. See
+  [ADR-0033](docs/adr/0033-bound-run-disk-growth-by-sampling-writable-roots.md).
+- **C8 (this branch, `codex/package-network-profile`):** the package-network
+  profile contract and implementation gate. The user chose a package-network
+  profile, then chose contract-only after the primitive review. No run accepts
+  a profile; an advisory proxy is rejected because the tree can bypass it.
+  See [ADR-0034](docs/adr/0034-gate-package-networking-behind-enforceable-destination-control.md).
+- **C9 (this branch, version 0.20.0):** operator-declared package-network
+  profile records. Profiles are stored through the control journal, with
+  revisions and strict origin validation. They are configuration only; no run
+  accepts one and no destination filter exists.
+- **C10 (this branch, version 0.21.0):** the trusted allowlisted package
+  fetch. The user selected a trusted host-side fetch into a private cache. The
+  command contacts only declared origins, refuses redirects and credentials,
+  bounds and hashes the body, and audits the intent and outcome. The run
+  remains offline and does not read the cache. See
+  [ADR-0035](docs/adr/0035-fetch-packages-through-a-trusted-allowlisted-cache.md).
+- **C11 (this branch, version 0.22.0):** read-only Linux run access to the
+  workspace package cache. Superseded by C12, which moves exposure to a
+  per-workspace root and adds Windows access.
+- **C12 (this branch, version 0.23.0):** per-workspace cache roots and a
+  scoped Windows grant. The operator selects a root outside application
+  storage and the development root; fetch and run use it; Windows needs a
+  read-execute grant on that root. See
+  [ADR-0037](docs/adr/0037-use-a-per-workspace-cache-root-and-a-scoped-windows-grant.md).
+- **C13 (this branch, version 0.24.0):** provider-profile records and trusted
+  per-call approval records. Profiles store only a name, kind, and
+  authentication mode; no credential, endpoint, adapter, or login exists.
+  Approvals are bound, expiring, single-use records; the first consumer is the
+  command tool in C14. See
+  [ADR-0038](docs/adr/0038-record-provider-profiles-without-credentials.md) and
+  [ADR-0039](docs/adr/0039-gate-future-model-tools-with-bound-single-use-approval-records.md).
+- **C14 (this branch, version 0.25.0):** the `workspace_run_command` model
+  tool. It is offered only with live model-tools/execute/read/write, records a
+  pending approval on the first call, and consumes an approved exact record
+  before calling the trusted runner. It uses fixed limits and no network or
+  host services. See
+  [ADR-0040](docs/adr/0040-gate-the-model-command-tool-with-approvals-and-the-trusted-runner.md).
+- **C15 (this branch, version 0.25.0 qualification):** native end-to-end
+  acceptance for the model command tool. The real chat CLI, a mock provider,
+  two turns, an operator approval, and the trusted runner run one successful
+  confined command on Linux and Windows. Linux needs a delegated cgroup;
+  Windows needs a workspace container grant. The case fails, rather than
+  skips, when the host cannot provide them. Confinement correctness remains
+  the platform suites' responsibility.
 
 Next decisions, not yet scheduled:
 
-- a package-network profile;
-- a disk limit;
-- a model-callable command tool with per-call approval.
+- a credential service, provider adapters, and subscription/API-key login;
+- model write, network, Git, and MCP tools;
+- registry credentials and development-server networking.
 
 ### Phase D: additional providers, streaming, and account lifecycle
 
@@ -498,9 +602,13 @@ release readiness remain separate gates.
   [testing standards](docs/testing-standards.md#isolation-and-concurrency) covers
   the CLI suites. `omgcode-core`'s `file_broker` FIFO test still spawns one child
   beside in-process stores; it did not fail in 60 parallel runs and is not gated.
-- Local Windows all-target runs intermittently timed out in pre-existing
-  multi-fixture provider tests under host load. The tests pass individually and
-  CI passed on `987a5aa`; recheck on a clean host rather than weakening a test.
+- Windows runs under host load can outlast the default 10-second CLI test
+  deadline. The disk-limit case now gives the run an explicit 45-second
+  deadline and the CLI 60 seconds, so a missed sampler ends as a recorded
+  deadline instead of a killed CLI with a pending run. The pre-existing
+  multi-fixture provider tests also timed out locally under host load; they
+  pass individually and passed CI on `987a5aa`. Recheck timeouts on a clean
+  host rather than weakening an assertion.
 - `.serena/` is untracked and unrelated. Do not commit or delete it without
   deciding what it is.
 - The turn runtime is library/test infrastructure until a provider adapter and

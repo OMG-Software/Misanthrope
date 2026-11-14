@@ -39,8 +39,11 @@ system tools. Since 0.17.0, on Linux they start the CLI through
 `systemd-run --user --scope -p Delegate=yes`, and the platform tree-limit
 tests rerun themselves the same way. They need a user service manager and fail
 without one; they must not be skipped. Each limit test must show that the
-limit ends the whole run as `LimitExceeded`. Windows scenes grant the workspace and revoke every grant when
-dropped. The `toolchain_acceptance` tests run real toolchains. They are
+limit ends the whole run as `LimitExceeded`. Since 0.19.0 the disk test writes
+past a 16 MiB limit and expects the `disk` result; the platform tests also
+exercise the sampler directly, including, on Unix, a link that must not be
+followed and a ceiling reached during a measured scan. Windows scenes grant
+the workspace and revoke every grant when dropped. The `toolchain_acceptance` tests run real toolchains. They are
 `#[ignore]` because they need host toolchains named by `OMGCODE_ACCEPT_*`
 variables. Run them explicitly with `--ignored` on both platforms and report
 each language that did not run. A missing variable fails the case rather than
@@ -138,8 +141,12 @@ As the relevant components are implemented, include:
 | Workspace identity | Native paths, stable directory IDs after child writes, ancestor/sibling checks, missing creation-time metadata failure |
 | Files | Bounded read/list/create/mkdir, policy scope, traversal, native paths, symlinks/junctions, hard links, special files, collisions, uncertain creation, audit privacy, path-swap races, and read-only edit-preview bounds/no-mutation |
 | Processes | Descendant escape attempts, limits, cleanup, startup failure |
+| Disk limits | Sampled growth ends the whole run as `disk`, baseline excludes prior content, links and reparse points are not followed, the ceiling stops a scan early, unreadable or oversized roots fail closed |
 | Networking | Disabled egress, host-local access, redirects, provider routing |
+| Package network | Profile storage and the trusted fetch: recording, replay, revision, origin normalization, duplicate and invalid-origin refusal, removal, task-network gating, undeclared-origin and path refusal before a request, redirect refusal, size limits, cache-name validation, existing-cache refusal, private cache content, and start/finish audit without the URL text. Cache roots cover per-workspace set/clear/replay, overlap refusals, the configured fetch location, Linux read/write/parent denial, Windows access with a scoped grant, and Windows refusal without one. No run accepts a profile. A future run-side mechanism must add allowed-origin success, undeclared-origin refusal, redirect and credential refusal, offline fallback, and platform refusal ([ADR-0034](adr/0034-gate-package-networking-behind-enforceable-destination-control.md), [ADR-0035](adr/0035-fetch-packages-through-a-trusted-allowlisted-cache.md), [ADR-0037](adr/0037-use-a-per-workspace-cache-root-and-a-scoped-windows-grant.md)) |
 | Providers | Partial/malformed streams, duplicate calls, interruption, retries |
+| Provider profiles | Kind/authentication pairing, duplicate and invalid names, case-insensitive lookup, revisioned add/remove, replay, no credential or endpoint storage, and capability reporting. No adapter or login is exercised |
+| Approvals | Request validation, pending/list/show, approve/deny, single-use consume, expiry, binding mismatch, settings-revision invalidation, replay, unknown IDs, and limits. No operation executes |
 | Authentication | Callback binding, consent, subscription entitlement, refresh, revocation, account/billing isolation |
 | Toolchains | Native compiler/SDK dependencies, interpreters, formatter/build/test flows, caches, helper processes, denied host access |
 | Git | Hostile config/hooks/helpers, metadata paths, changed push approvals |
@@ -152,6 +159,7 @@ As the relevant components are implemented, include:
 | Windows confinement | Granted read-only and read-write paths, denied host files, directories, named pipe, and loopback TCP, a writable container temporary directory, inheritance by descendants, the same probes unconfined, missing, weaker, and foreign grants, a missing profile, `LOCALAPPDATA`, or container name, refused `HostServices`, an ungranted program |
 | Container grants | SID derivation, propagation to existing and new children, exact read-back, protection state kept, junctions not followed, hard-link reach, refused replaced/junction/file/relative paths, profile creation and deletion, journal intent and outcome order, replay validation, revision rules, scope refusals, pending and revoking recovery, the revocation reserve, CLI grant/list/revoke, refusal off Windows |
 | Model tool chat | Preference off by default and rechecked per call, settings compatibility, confinement against parent, absolute, rooted, UNC, link, junction, and hard-link paths, strict provider tool-call parsing, token removal before journal and model, refusal of token-bearing calls, withheld replay after revocation, finish reason, one call per turn in escape cases |
+| Model command tool | Strict profile/program/argument/cwd parsing, tool advertised only with live model-tools/execute/read/write, first call records a pending approval and starts nothing, denial, approval consumption, exact digest and binding, settings-revision invalidation, run hand-off failure, output bounds, and no replay. An end-to-end CLI case drives the real chat process, a mock provider, an operator approval, and the trusted runner to a successful confined command on both hosts |
 | MCP | Version/transport compatibility, authorization, untrusted content, local confinement, OAuth/redirects, cancellation |
 | LM Studio | Model discovery, token/no-token profiles, streamed tools, context limits, unavailable models, no hosted-tool bypass |
 | Instructions | Compiled base/UI/request match, runtime replacement denial, role-injection attempts, preference/task precedence, revisions, safe rendering |
@@ -170,7 +178,15 @@ Completions request and rejects any tool call in the reply. It requires the
 compiled base prompt and accepts only a literal loopback HTTP endpoint. The
 adapter is not a permission boundary: the CLI selects tool mode from the live
 `model_tools` preference, and the runtime rechecks that preference before each
-call. The turn-runtime tests use a scripted model interface. The tool-enabled chat tests
+call. An end-to-end acceptance case starts the real chat CLI under a delegated
+cgroup on Linux, has the mock provider request the platform shell's `echo`,
+approves the recorded call between turns, and asserts that the second identical
+turn consumes the approval and runs the command through the trusted runner to
+an `exited` result with code 0 and the expected output. On Windows the scene
+grants the workspace. The case needs those host facilities and fails without
+them; it does not qualify confinement correctness, which the platform suites
+own. It passed on Windows 11 build 26300 and WSL 6.6 (Ubuntu 24.04) on
+2026-11-14. The turn-runtime tests use a scripted model interface. The tool-enabled chat tests
 use a mock that returns the documented OpenAI-compatible tool-call shape; they
 do not establish live LM Studio tool-call compatibility. A single opt-in spot-check
 with LM Studio 0.4.28 and `google/gemma-4-e4b` on Windows is recorded in the implementation plan. Model discovery, streaming, cancellation, and
