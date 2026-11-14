@@ -3,7 +3,8 @@
 OMGCode has a Rust CLI prototype for local chat, JSONL sessions, and a
 bounded native workspace file broker. The broker is available only through
 trusted operator commands and, when a workspace enables `model_tools`, to the
-local model's read and list tools. Other model tools are not implemented. The
+local model's read, list, and approval-gated command tools. Model write,
+network, Git, and MCP tools are not implemented. The
 trusted CLI `run` command runs one program under Linux Landlock or Windows
 AppContainer confinement with an operator-declared toolchain profile. No model
 tool starts a process. The guides distinguish implemented behaviour from the

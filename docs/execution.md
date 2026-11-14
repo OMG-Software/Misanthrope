@@ -26,11 +26,12 @@ Version 0.16.0 adds [trusted runs](#trusted-runs). `omgcode run` starts one
 program through `run_confined` under a recorded
 [toolchain profile](#toolchain-profiles), behind the workspace `execute`
 preference, and records it in the [run journal](#run-journal). It is a
-trusted operator command only. No model tool starts a process, and nothing
-calls the unconfined `run`. Settings diagnostics keep
-`execution_allowed: false`, because a diagnostic never authorizes a run. Do
-not describe either confinement as qualified beyond the tested kernel and
-Windows build.
+trusted operator command. A model command tool can request one, but only a
+trusted approval record lets it call the same runner; no model tool starts a
+process without that record, and nothing calls the unconfined `run`. Settings
+diagnostics keep `execution_allowed: false`, because a diagnostic never
+authorizes a run. Do not describe either confinement as qualified beyond the
+tested kernel and Windows build.
 
 Version 0.17.0 adds [tree limits](#tree-limits): every trusted run is bounded
 in memory, live processes, and CPU time for its whole tree. Windows applies
@@ -642,6 +643,35 @@ its cgroup. Do not place a development root under `/sys/fs/cgroup`. Other
 programs of the same user, outside the run, can still change the delegated
 cgroup.
 
+### Model command tool
+
+Version 0.25.0 adds `workspace_run_command` to the core turn runtime. The
+runtime advertises it only when the session workspace's live `model_tools`,
+`execute`, `read`, and `write` preferences are enabled. Each call rechecks
+them, and the trusted run checks them again.
+
+Arguments are a recorded toolchain `profile`, a `program`, at most 64
+`arguments`, and an optional workspace-relative `cwd`. There is no shell.
+The tool fixes its limits: a 20-second deadline, 32 KiB retained from each
+output stream, 1 GiB memory, 64 processes, 20 seconds of CPU, and 256 MiB of
+disk growth. It selects no network or host services.
+
+The first call matches no approval, records a pending approval with a bounded
+summary that contains no argument text, and returns `approval_required` with
+the approval identifier. Nothing runs. The operator runs
+`approvals approve <id>`; the model must call again with the same arguments.
+The runtime checks the exact digest, session, workspace, operation, and
+settings revision, consumes the approval once, drops the settings lock, and
+calls the trusted `run` path. A denial returns `approval_denied` and is not
+re-requested. An expired or consumed record causes a new pending request. A
+run that fails after consumption uses the approval.
+
+Output is untrusted and bounded. The session journal records the tool intent
+and result; the run journal records the run. No replay executes a recorded
+call. The model can request but cannot approve; the CLI approval commands are
+the operator surface, and there is no approval UI. A successful native command
+on both hosts remains a separate qualification.
+
 ### Toolchain profiles
 
 Profiles are declared by the operator. Nothing is discovered automatically.
@@ -954,6 +984,13 @@ These remain true after C6:
   back to application storage when no root is selected; Windows exposes
   nothing. There is no invalidation, eviction, or freshness check, and
   configuring a toolchain to use the directory is operator work.
+- **Model command limits.** The model command tool accepts no model-selected
+  limits, network, or host services. It uses a 20-second deadline and 32 KiB
+  per output stream. The operator flow spans two turns, and no approval UI
+  exists. A denied exact request stays denied for the current settings
+  revision; a failed run consumes the approval. The gate and hand-off are
+  tested, but a successful native command on both hosts is not yet qualified
+  as a model-tool acceptance case.
 - **Network coverage.** Network access was tested on Windows 11 build 26300
   and WSL 6.6 (Landlock ABI 3) only, including a TLS fetch with the system
   `curl` on both. The ABI 4 TCP-bind denial has not run on a live kernel.
@@ -1009,10 +1046,13 @@ These remain true after C6:
 | C10 (0.21.0) | Trusted allowlisted package fetch | Done: see [trusted package fetch](#trusted-package-fetch) and ADR-0035. The run remains offline. |
 | C11 (0.22.0) | Read-only package cache for Linux runs | Superseded by C12: Linux exposure moved to the per-workspace root, with an application-storage fallback. |
 | C12 (0.23.0) | Per-workspace package cache root and scoped Windows grant | Done: see [trusted package fetch](#trusted-package-fetch) and ADR-0037. Windows needs a read-execute grant on the workspace root. |
+| C13 (0.24.0) | Provider profiles and trusted approval records | Done: see the [provider authentication guide](provider-authentication.md#recorded-provider-profiles-0240) and [approval records](agent-instructions.md#approval-records). No adapter or model tool executed. |
+| C14 (0.25.0) | Approval-gated model command tool | Done: see [model command tool](#model-command-tool) and ADR-0040. A successful native command still needs its own qualification. |
 
 Later work needs its own decisions:
 
 - registry credentials and development-server networking;
-- a model-callable command tool.
+- model write, network, Git, and MCP tools;
+- native successful-command qualification for the model tool.
 
 Live qualification on each supported OS remains a separate gate.

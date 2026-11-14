@@ -67,8 +67,8 @@ Rules:
 
 ## Consequences
 
-- A future model tool has a real per-call gate to call. No model tool, UI, or
-  execution path exists yet.
+- ADR-0040 later added the command tool that consumes an approval. Until then,
+  no model tool, UI, or execution path existed.
 - The operator uses CLI commands until an approval UI exists. The CLI request
   command is a testing and manual-flow surface; a model tool would create the
   request through the same core method.

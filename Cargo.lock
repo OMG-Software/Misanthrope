@@ -672,7 +672,7 @@ checksum = "521739c6d2bac4aa25192232afe6841231376b2b26d4d9fae5ecf8ca5772e441"
 
 [[package]]
 name = "omgcode-cli"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "clap",
  "directories",
@@ -685,7 +685,7 @@ dependencies = [
 
 [[package]]
 name = "omgcode-core"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "libc",
  "omgcode-platform",
@@ -701,7 +701,7 @@ dependencies = [
 
 [[package]]
 name = "omgcode-platform"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "libc",
  "rustix",

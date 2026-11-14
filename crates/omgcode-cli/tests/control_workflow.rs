@@ -448,6 +448,8 @@ fn capabilities_report_configuration_only_policy_and_trusted_runs_only() {
     assert_eq!(capabilities["workspace_container_grants"], cfg!(windows));
     let runs = cfg!(any(target_os = "linux", windows));
     assert_eq!(capabilities["toolchain_profiles"], runs);
+    assert_eq!(capabilities["model_command_tool"], "approval_required");
+    assert_eq!(capabilities["model_write_tools"], false);
     assert_eq!(capabilities["package_network_profiles"], true);
     assert_eq!(capabilities["package_network_enforcement"], false);
     assert_eq!(capabilities["package_fetch"], true);

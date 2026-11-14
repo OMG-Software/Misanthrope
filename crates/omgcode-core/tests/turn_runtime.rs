@@ -3,14 +3,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use omgcode_core::control::ControlStore;
+use omgcode_core::control::{ApprovalOperation, ApprovalState, ControlStore, now_unix};
 use omgcode_core::policy::{PermissionSet, WorkspaceId};
 use omgcode_core::prompt::{self, BASE_PROMPT, BASE_PROMPT_VERSION, ModelMessage, ModelRole};
 use omgcode_core::session::{MessageRole, RequestManifest, SessionJournal};
 use omgcode_core::turn::{
-    CancelToken, ModelError, TOOL_SCHEMA_VERSION, ToolCallError, ToolModel, ToolModelReply,
-    ToolModelRequest, TurnError, TurnLimit, TurnLimits, TurnReport, TurnRuntime,
-    WITHHELD_TOOL_RESULT,
+    CancelToken, ModelError, TOOL_SCHEMA_VERSION, ToolArguments, ToolCall, ToolCallError,
+    ToolModel, ToolModelReply, ToolModelRequest, TurnError, TurnLimit, TurnLimits, TurnReport,
+    TurnRuntime, WITHHELD_TOOL_RESULT,
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -257,6 +257,224 @@ fn read_events(path: &Path) -> Vec<Value> {
         .filter(|line| !line.is_empty())
         .map(|line| serde_json::from_slice(line).expect("bounded JSONL event"))
         .collect()
+}
+
+#[test]
+fn command_tool_arguments_are_strictly_validated() {
+    let parsed = ToolCall::parse(&call(
+        "cmd-1",
+        "workspace_run_command",
+        json!({
+            "profile": "system",
+            "program": "cargo",
+            "arguments": ["test", "--all"],
+            "cwd": "sub"
+        }),
+    ))
+    .expect("valid command");
+    match parsed.arguments {
+        ToolArguments::Command {
+            profile,
+            program,
+            arguments,
+            cwd,
+        } => {
+            assert_eq!(profile, "system");
+            assert_eq!(program, "cargo");
+            assert_eq!(arguments, vec!["test", "--all"]);
+            assert_eq!(cwd.as_deref(), Some("sub"));
+        }
+        other => panic!("unexpected arguments: {other:?}"),
+    }
+
+    let too_many: Vec<String> = (0..=64).map(|_| "x".to_owned()).collect();
+    let oversized: Vec<String> = (0..17).map(|_| "x".repeat(1024)).collect();
+    for arguments in [
+        json!({"profile": "system", "program": "cargo", "unknown": true}),
+        json!({"profile": "", "program": "cargo"}),
+        json!({"profile": "system", "program": "bad\nprogram"}),
+        json!({"profile": "system", "program": "cargo", "arguments": too_many}),
+        json!({"profile": "system", "program": "cargo", "arguments": oversized}),
+    ] {
+        assert!(
+            matches!(
+                ToolCall::parse(&call("cmd-1", "workspace_run_command", arguments)),
+                Err(ToolCallError::InvalidArguments)
+            ),
+            "arguments were accepted"
+        );
+    }
+    assert!(matches!(
+        ToolCall::parse(&call(
+            "cmd-1",
+            "workspace_run_command",
+            json!({"profile": "system", "program": "cargo", "cwd": "../outside"})
+        )),
+        Err(ToolCallError::InvalidPath)
+    ));
+}
+
+/// A command call without an approval records a pending approval and does not
+/// start a run.
+#[test]
+fn a_command_tool_call_requires_an_operator_approval() {
+    let mut fixture = Fixture::new();
+    let workspace_id = fixture.workspace_id;
+    let session_id = fixture.snapshot().session_id;
+    let control = fixture.control_mut();
+    control
+        .set_permissions(
+            workspace_id,
+            PermissionSet {
+                model_tools: true,
+                execute: true,
+                read: true,
+                write: true,
+                ..PermissionSet::default()
+            },
+            control.revision(),
+        )
+        .expect("enable command tools");
+    let mut model = ScriptedModel::new(vec![
+        tool_reply(vec![call(
+            "cmd-1",
+            "workspace_run_command",
+            json!({"profile": "system", "program": "echo", "arguments": ["hello"]}),
+        )]),
+        text_reply("approval requested"),
+    ]);
+    let report = fixture
+        .run(&mut model, TurnLimits::default())
+        .expect("turn with a pending approval");
+    assert_eq!(report.tool_calls, 1);
+    assert!(
+        model.requests[0]
+            .tools
+            .iter()
+            .any(|name| name == "workspace_run_command"),
+        "the command tool was not advertised"
+    );
+    assert!(
+        fixture
+            .snapshot()
+            .messages
+            .iter()
+            .any(|message| message.text.contains("approval_required")),
+        "the tool result did not request an approval"
+    );
+    fixture.close_journal();
+    assert_eq!(
+        fixture.last_tool_code().as_deref(),
+        Some("approval_required")
+    );
+
+    let control = ControlStore::open_existing(&fixture.data)
+        .expect("open control")
+        .expect("control store");
+    let statuses = control.approval_statuses(now_unix());
+    let pending = statuses
+        .iter()
+        .find(|status| {
+            status.state == ApprovalState::Pending && status.operation == ApprovalOperation::Command
+        })
+        .expect("a pending command approval");
+    assert_eq!(pending.session_id, session_id);
+    assert_eq!(pending.workspace_id, workspace_id);
+    assert!(!fixture.data.join("runs-v1.jsonl").exists());
+}
+
+/// An approved command is consumed before the run is attempted. The fixture's
+/// profile has no PATH entry, so the run is refused after consumption; this
+/// proves the gate and the run hand-off without qualifying native execution.
+#[test]
+fn an_approved_command_consumes_the_approval_and_attempts_the_run() {
+    let mut fixture = Fixture::new();
+    let workspace_id = fixture.workspace_id;
+    let tools = fixture._temporary.path().join("tools");
+    fs::create_dir(&tools).expect("toolchain root");
+    let control = fixture.control_mut();
+    control
+        .set_permissions(
+            workspace_id,
+            PermissionSet {
+                model_tools: true,
+                execute: true,
+                read: true,
+                write: true,
+                ..PermissionSet::default()
+            },
+            control.revision(),
+        )
+        .expect("enable command tools");
+    control
+        .add_profile(
+            &omgcode_core::control::ProfileDeclaration {
+                name: "system".into(),
+                read_only_roots: vec![tools],
+                path_entries: Vec::new(),
+                environment: Vec::new(),
+            },
+            control.revision(),
+        )
+        .expect("profile");
+
+    let command = || {
+        tool_reply(vec![call(
+            "cmd-1",
+            "workspace_run_command",
+            json!({"profile": "system", "program": "echo", "arguments": ["hello"]}),
+        )])
+    };
+    let mut first = ScriptedModel::new(vec![command(), text_reply("waiting")]);
+    fixture
+        .run(&mut first, TurnLimits::default())
+        .expect("approval-request turn");
+    fixture.release_control();
+
+    let mut control = ControlStore::open_existing(&fixture.data)
+        .expect("open control")
+        .expect("control store");
+    let pending = control
+        .approval_statuses(now_unix())
+        .into_iter()
+        .find(|status| status.state == ApprovalState::Pending)
+        .expect("pending approval");
+    control
+        .decide_approval(pending.id, true, now_unix())
+        .expect("approve");
+    drop(control);
+
+    let mut second = ScriptedModel::new(vec![command(), text_reply("attempted")]);
+    fixture
+        .run(&mut second, TurnLimits::default())
+        .expect("approved turn");
+    fixture.close_journal();
+    assert_eq!(fixture.last_tool_code().as_deref(), Some("command_failed"));
+
+    let control = ControlStore::open_existing(&fixture.data)
+        .expect("open control")
+        .expect("control store");
+    let status = control
+        .approval_status(pending.id, now_unix())
+        .expect("approval status");
+    assert_eq!(status.state, ApprovalState::Consumed);
+}
+
+/// The command tool is not advertised without the execute preference.
+#[test]
+fn the_command_tool_requires_execute() {
+    let mut fixture = Fixture::new();
+    let mut model = ScriptedModel::new(vec![text_reply("text only")]);
+    fixture
+        .run(&mut model, TurnLimits::default())
+        .expect("text turn");
+    assert!(
+        !model.requests[0]
+            .tools
+            .iter()
+            .any(|name| name == "workspace_run_command"),
+        "the command tool was advertised without execute"
+    );
 }
 
 #[test]

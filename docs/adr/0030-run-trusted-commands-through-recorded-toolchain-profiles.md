@@ -130,7 +130,8 @@ Facts observed during the work, on Windows 11 build 26300 and WSL 6.6:
 - **Capabilities:** `capabilities` reports `process_execution:
   "trusted_cli_only"` and `toolchain_profiles: true` on Linux and Windows.
   Settings diagnostics keep `execution_allowed: false`, because they do not
-  authorize a run. No model tool can start a process.
+  authorize a run. At that time, no model tool could start a process; ADR-0040
+  later added an approval-gated command tool that calls the same runner.
 
 ## Alternatives considered
 

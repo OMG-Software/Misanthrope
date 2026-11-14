@@ -54,3 +54,4 @@ meaningful alternative does not need an ADR.
 | [0037: Use a per-workspace cache root and a scoped Windows grant](0037-use-a-per-workspace-cache-root-and-a-scoped-windows-grant.md) | Accepted | 2026-11-14 |
 | [0038: Record provider profiles without credentials](0038-record-provider-profiles-without-credentials.md) | Accepted | 2026-11-14 |
 | [0039: Gate future model tools with bound, single-use approval records](0039-gate-future-model-tools-with-bound-single-use-approval-records.md) | Accepted | 2026-11-14 |
+| [0040: Gate the model command tool with approvals and the trusted runner](0040-gate-the-model-command-tool-with-approvals-and-the-trusted-runner.md) | Accepted | 2026-11-14 |

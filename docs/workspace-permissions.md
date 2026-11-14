@@ -30,7 +30,7 @@ Read and write preferences default to enabled; process execution, task
 network access, host services, and model tools default to disabled. Provider
 connections remain separate from task networking. No operation class executes
 a tool by itself. The separate `model_tools` and `host_services` preferences
-are described under [model read/list tools](#model-readlist-tools) and
+are described under [model tools](#model-readlist-and-command-tools) and
 [host services](#host-services).
 
 Registration stores the canonical native path, volume/filesystem ID, 128-bit
@@ -236,11 +236,13 @@ trusted per-call approvals. A request records a session, workspace, operation,
 exact request digest, summary, settings revision, and expiry. The events
 `approval_requested`, `approval_decided`, and `approval_consumed` preserve the
 settings revision. A decision or consumption is refused after expiry,
-mismatch, reuse, or any settings change. No model tool consumes an approval
-yet, and the CLI consume command executes nothing. The
+mismatch, reuse, or any settings change. The `workspace_run_command` model tool
+consumes an approval; the CLI consume command marks a record used but executes
+nothing. The
 [agent instructions guide](agent-instructions.md#approval-records) owns the
 tool-side contract. See
-[ADR-0039](adr/0039-gate-future-model-tools-with-bound-single-use-approval-records.md).
+[ADR-0039](adr/0039-gate-future-model-tools-with-bound-single-use-approval-records.md)
+and [ADR-0040](adr/0040-gate-the-model-command-tool-with-approvals-and-the-trusted-runner.md).
 
 ## Task network
 
@@ -268,7 +270,7 @@ log. Host-service access exposes every Unix socket the user can reach,
 including the Docker daemon; see
 [Unix-domain sockets](execution.md#unix-domain-sockets).
 
-## Model read/list tools
+## Model read/list and command tools
 
 `workspace permissions <id> --revision <n> --model-tools true` lets `chat` offer
 the local model two tools for that workspace: `workspace_read_file` and
@@ -277,6 +279,15 @@ per-run flag or per-call confirmation. It is a trusted settings change like the
 other flags. It needs the expected revision, appends `permissions_changed`, and
 increments the revision. It is not an operation class, so `workspace check` and
 policy audit records do not mention it.
+
+When `model_tools`, `execute`, `read`, and `write` are all enabled, the runtime
+also offers `workspace_run_command`. Its first call records a pending approval
+and does not run; after `approvals approve <id>`, a second identical call
+consumes the approval and starts the trusted run. The model cannot approve.
+The tool uses fixed limits and no network or host services. See
+[model command tool](execution.md#model-command-tool) and
+[ADR-0040](adr/0040-gate-the-model-command-tool-with-approvals-and-the-trusted-runner.md).
+The tool schema version is 0.2.0.
 
 `workspace status` always reports `model_tools`. Persisted settings omit the
 field while it is `false`, so settings that never enable it keep their exact

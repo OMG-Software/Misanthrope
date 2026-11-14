@@ -6,6 +6,24 @@ Changes are recorded here before a release version is assigned.
 
 ### Added
 
+- Version 0.25.0 adds an approval-gated model command tool. See ADR-0040.
+  - **Offering:** `workspace_run_command` is advertised only when the
+    workspace's live `model_tools`, `execute`, `read`, and `write`
+    preferences are enabled. Every call rechecks them; the trusted run checks
+    them again.
+  - **Arguments:** a recorded toolchain profile, program, at most 64
+    arguments, and an optional workspace-relative `cwd`. There is no shell.
+  - **Approval:** the first call records a pending approval and returns
+    `approval_required`; it starts nothing. After `approvals approve <id>`, a
+    second identical call consumes the approval and calls the trusted runner.
+    The model cannot approve, select limits, or select network/host services.
+  - **Limits:** 20-second deadline, 32 KiB per output stream, 1 GiB memory,
+    64 processes, 20 seconds of CPU, and 256 MiB of disk growth.
+  - **Records:** the session journal records the tool intent/result; the run
+    journal records the run. A failed run consumes the approval; no replay
+    executes a recorded call.
+  - **Not qualified:** a successful native command on both hosts as a
+    model-tool acceptance case; the gate and run hand-off are tested.
 - Version 0.24.0 records provider profiles and trusted per-call approvals.
   See ADR-0038 and ADR-0039.
   - **Provider profiles:** `workspace provider-profile-add/show/remove` record

@@ -8,9 +8,12 @@ preferences, a bounded native file broker exposed through trusted CLI commands,
 and native identity checks. Follow [workspace settings](docs/workspace-permissions.md)
 and [workspace file access](docs/file-access.md) for their contracts. Enabled
 preferences never authorize execution. The prototype is not a desktop app.
-Chat offers the local LM Studio model only read and list tools, and only for a
+Chat offers the local LM Studio model read and list tools, and, when the
+workspace also enables `execute`, `read`, and `write`, one command tool that
+requires a trusted single-use approval. No model write, network, Git, or MCP
+tool exists. Chat offers tools only for a
 workspace whose `model_tools` preference is enabled. There are no model write
-tools, other provider adapters, or model-callable process execution. The
+tools, other provider adapters, or unreviewed model-callable process execution. The
 trusted CLI `run` command starts one program for a workspace whose `execute`
 preference is enabled. It uses an operator-declared toolchain profile, records
 intent and outcome in a run journal, and applies Landlock and a seccomp socket

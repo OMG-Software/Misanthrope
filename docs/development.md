@@ -7,7 +7,8 @@ and save that conversation. It can read/list files, exclusively create new
 files/directories, and preview a bounded diff against trusted proposed content
 in a registered workspace. When a workspace enables `model_tools`, chat runs
 the core's bounded turn/tool runtime so the model can read and list files in
-that workspace. Trusted CLI apply can
+that workspace; with `execute`, `read`, and `write` enabled it can request an
+approval-gated command. Trusted CLI apply can
 replace an existing file on Linux ext4 or Windows NTFS. Trusted restore puts a
 retained checkpoint's original bytes back through apply, and trusted checkpoint
 deletion removes one resolved private entry. The trusted `run` command starts
@@ -19,7 +20,8 @@ time. A program started by `run` can create, change, and
 delete workspace files without a checkpoint. The CLI's `file` commands cannot
 delete workspace files, and the CLI cannot use Git or connect to MCP servers.
 When a workspace enables `model_tools`, chat lets the local model read and list
-files in that workspace. Model write, process, network, Git, and MCP tools are
+files in that workspace and, with execute/read/write, request an approval-gated
+command. Model write, network, Git, and MCP tools are
 not implemented. Trusted commands record and apply the Windows container
 grants; see [command execution](execution.md).
 
@@ -151,9 +153,11 @@ omgcode --data-dir C:\omgcode-data workspace container-revoke GRANT_UUID
 require existing state. Flags take explicit `true` or `false` values. Read/write
 default to enabled; execute, task-network, host-services, and model-tools
 default to disabled. All decisions still report `execution_allowed: false`;
-only the trusted `run` command starts a process. Settings commands do not
-dispatch tools. `--model-tools true` lets chat offer the model
-read and list tools; see [model read/list tools](workspace-permissions.md#model-readlist-tools).
+only the trusted `run` command starts a process, and the model command tool
+reaches it only after consuming an approval. Settings commands do not dispatch
+tools. `--model-tools true` lets chat offer the model read/list tools and, with
+execute/read/write, the approval-gated command tool; see
+[model tools](workspace-permissions.md#model-readlist-and-command-tools).
 See the [workspace contract](workspace-permissions.md) for limits and failures.
 `container-grant` and `container-revoke` work on Windows only. They change ACLs
 for the workspace's AppContainer and record each change; see
@@ -221,9 +225,10 @@ native mount. Execute remains disabled. The `audit`, `acknowledge`,
 `checkpoints`, `acknowledge-checkpoint`, and `delete-checkpoint` commands require
 existing workspace settings.
 They do not require a configured root, workspace registration, or session
-selection. Chat advertises the read and list tools only when the session's
-workspace enables `model_tools`; see
-[model read/list tools](workspace-permissions.md#model-readlist-tools).
+selection. Chat advertises the read/list tools when the session's workspace
+enables `model_tools`, and the command tool when `execute`, `read`, and `write`
+are also enabled; see
+[model tools](workspace-permissions.md#model-readlist-and-command-tools).
 
 Capability JSON separates implementation from availability. On Linux and
 Windows, `workspace_file_broker_implemented` is `true`, while
@@ -470,7 +475,7 @@ usage events, streaming chunks, and large-output artifacts remain planned.
 | Crate | Responsibility |
 | --- | --- |
 | omgcode-core | Compiled prompt, bounded model adapter, session/control/file-operation/run journals, workspace policy and toolchain profiles, broker orchestration, trusted runs, bounded turn/tool lifecycle, and non-destructive edit previews |
-| omgcode-cli | Trusted operator input, one-turn chat orchestration with optional read/list model tools, bounded file and preview commands, trusted `run`, JSON output |
+| omgcode-cli | Trusted operator input, one-turn chat orchestration with optional read/list and approval-gated command model tools, bounded file and preview commands, trusted `run`, JSON output |
 | omgcode-platform | Native journal validation, directory identity, handle-relative workspace file operations, Windows AppContainer grants, interrupt-to-cancel handling, and a process-tree runner with Linux Landlock/seccomp and Windows AppContainer confinement |
 
 Core and CLI forbid unsafe code. The platform crate denies unsafe code except
@@ -555,6 +560,7 @@ cargo test -p omgcode-cli --test toolchain_acceptance --locked -- --ignored
 Do not infer whole-user/process containment, Git safety, credential storage,
 release filesystem support, or full coding-agent support from these tests. The
 broker supports bounded file operations through trusted CLI input and the core
-turn runtime, which chat drives for read and list when a workspace enables
-`model_tools`. Live provider tool-call compatibility and process containment
+turn runtime, which chat drives for read/list and an approval-gated command when
+a workspace enables `model_tools`. Live provider tool-call compatibility and
+process containment
 remain separate boundaries.

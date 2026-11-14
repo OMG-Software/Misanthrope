@@ -6,8 +6,9 @@ OMGCode aims to connect language models to controlled development tools.
 The current code is an early Rust core and command-line prototype. A bounded
 native workspace file broker is available through trusted CLI commands. A core
 turn/tool runtime and schema-v2 session format let chat offer the local LM Studio
-model read and list tools, only for a workspace that enables `model_tools`.
-Model write and process tools, a desktop interface, and Git workflows remain
+model read, list, and approval-gated command tools, only for a workspace that
+enables `model_tools` and the command tool's own preferences.
+Model write tools, a desktop interface, and Git workflows remain
 planned. The trusted CLI `run` command starts one program for a workspace whose
 `execute` preference is enabled. It uses an operator-declared toolchain
 profile, records each run in a run journal, and confines the process tree with
@@ -23,7 +24,10 @@ directory grants.
 > an explicitly selected local LM Studio model.
 > When a workspace enables the `model_tools` preference, chat lets the local
 > model read and list files inside that workspace through a bounded runtime.
-> It has no model write, process, network, Git, or MCP tools. The trusted
+> When `execute`, `read`, and `write` are also enabled, it offers a confined
+> command tool that records a pending approval and runs only after the operator
+> approves that exact call. It has no model write, network, Git, or MCP tools.
+> The trusted
 > CLI can replace or restore one existing file through a checkpoint on qualified
 > Linux ext4 or Windows NTFS, and can permanently delete one resolved checkpoint.
 > The `file` commands cannot delete workspace files. The trusted CLI `run`
@@ -86,8 +90,9 @@ and `omgcode-platform`. The CLI command is `omgcode`. It provides:
 - `chat`: send one user turn to an already-running LM Studio server at a literal
   loopback HTTP endpoint. It does not discover, start, or download models, and it
   rejects model tool requests unless the session's workspace enables
-  `model_tools`. Then it offers only the read and list tools, rechecked against
-  live settings before every call.
+  `model_tools`. Then it offers read/list tools and, when `execute`, `read`,
+  and `write` are also enabled, the approval-gated command tool, rechecked
+  against live settings before every call.
 
 Prompt assembly sends the compiled base in the system role. Optional user
 preferences and conversation history remain user or assistant messages. The
@@ -98,11 +103,11 @@ marked interrupted before chat can continue.
 
 The core also implements a session-owned turn/tool runtime and JSONL schema
 version 2. That runtime accepts a caller-supplied model interface, validates
-strict read/list tool calls, creates a fresh workspace binding before every
-operation, and records tool intents, results, and source-labelled messages.
-Only bounded read and directory listing are supported. `chat` runs it with the
-local LM Studio adapter for a workspace that enables `model_tools`. It has no
-write, process, Git, MCP, or network tool.
+strict read/list/command tool calls, creates a fresh workspace binding before
+every file operation, and records tool intents, results, and source-labelled
+messages. The command tool additionally requires a consumed approval. `chat`
+runs it with the local LM Studio adapter for a workspace that enables
+`model_tools`. It has no write, Git, MCP, or network tool.
 New sessions use schema version 2; version 1 journals remain readable and
 writable with their original text-only event subset.
 
@@ -154,7 +159,9 @@ conservative byte-based estimate; it is not the model tokenizer. While the
 workspace's `model_tools` preference is off, which is the default, the example
 sends only the supplied message and saved chat history, not workspace files;
 earlier tool results are replaced by a withheld notice. If `model_tools` is
-enabled for `.`, the model can call the read and list tools, and the file
+enabled for `.`, the model can call the read and list tools; with `execute`,
+`read`, and `write` also enabled it can request the command tool, which needs
+an operator approval. The file
 contents it reads are sent to the local model.
 The loopback connection does not establish how LM Studio handles data upstream;
 check the server's configuration before sending sensitive text.

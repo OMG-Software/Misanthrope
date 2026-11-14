@@ -65,11 +65,13 @@ This is a resume guide, not a replacement for the owning contracts in
   the trusted allowlisted package fetch and private cache (ADR-0035), and
   **Phase C11**, version **0.22.0**, with read-only Linux run access to that
   cache (ADR-0036), **Phase C12**, version **0.23.0**, with per-workspace
-  cache roots and scoped Windows access (ADR-0037), and **Phase C13**, version
+  cache roots and scoped Windows access (ADR-0037), **Phase C13**, version
   **0.24.0**, with provider-profile records and trusted per-call approvals
-  (ADR-0038, ADR-0039). It is stacked on C7 at `0426e42`. No run accepts a
-  profile or has destination-scoped networking; no provider adapter or model
-  tool is enabled.
+  (ADR-0038, ADR-0039), and **Phase C14**, version **0.25.0**, with the
+  approval-gated model command tool (ADR-0040). It is stacked on C7 at
+  `0426e42`. No run accepts a profile or has destination-scoped networking;
+  no provider adapter is enabled, and the command tool is the only model tool
+  that can request a process.
 
 Implemented today:
 
@@ -157,6 +159,11 @@ Implemented today:
   session, workspace, operation, request digest, and settings revision, expire,
   and are consumed once (ADR-0039). Neither enables a provider connection or a
   model tool.
+- The `workspace_run_command` model tool (ADR-0040) is offered only with live
+  `model_tools`, `execute`, `read`, and `write`. Its first call records a
+  pending approval and starts nothing; an approved exact call consumes the
+  approval and uses the trusted runner with fixed limits. No write, network,
+  Git, or MCP model tool exists.
 - Trusted `file restore` through a new checkpoint and
   `file delete-checkpoint --permanent` for one resolved checkpoint, on the same
   filesystems as apply. Neither is power-loss qualified. See
@@ -533,15 +540,22 @@ on Windows, and trusted CLI commands as the first caller. See
 - **C13 (this branch, version 0.24.0):** provider-profile records and trusted
   per-call approval records. Profiles store only a name, kind, and
   authentication mode; no credential, endpoint, adapter, or login exists.
-  Approvals are bound, expiring, single-use records; no model tool consumes
-  one yet. See
+  Approvals are bound, expiring, single-use records; the first consumer is the
+  command tool in C14. See
   [ADR-0038](docs/adr/0038-record-provider-profiles-without-credentials.md) and
   [ADR-0039](docs/adr/0039-gate-future-model-tools-with-bound-single-use-approval-records.md).
+- **C14 (this branch, version 0.25.0):** the `workspace_run_command` model
+  tool. It is offered only with live model-tools/execute/read/write, records a
+  pending approval on the first call, and consumes an approved exact record
+  before calling the trusted runner. It uses fixed limits and no network or
+  host services. See
+  [ADR-0040](docs/adr/0040-gate-the-model-command-tool-with-approvals-and-the-trusted-runner.md).
 
 Next decisions, not yet scheduled:
 
 - a credential service, provider adapters, and subscription/API-key login;
-- a model-callable command tool that consumes the approval record;
+- model write, network, Git, and MCP tools;
+- native successful-command qualification for the model tool;
 - registry credentials and development-server networking.
 
 ### Phase D: additional providers, streaming, and account lifecycle

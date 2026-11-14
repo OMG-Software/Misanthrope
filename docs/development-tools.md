@@ -25,7 +25,9 @@ the [tree limits](execution.md#tree-limits) for large builds. On Linux the
 process limit counts threads, so a parallel compiler needs a higher limit
 than its process count. Version 0.19.0 adds a sampled limit on net disk growth
 for the writable roots; it is not a filesystem quota. No
-model tool runs project tools. Tool support must be qualified on the actual
+model tool runs project tools. A model command tool can request one only
+through the trusted `run` path and a consumed approval. Tool support must be
+qualified on the actual
 platform; the [execution guide](execution.md#known-limits) lists the
 toolchains and versions that passed acceptance.
 
