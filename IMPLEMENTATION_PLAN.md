@@ -1,6 +1,6 @@
 # OMGCode implementation plan
 
-Last verified: 2026-11-13.
+Last verified: 2026-11-14.
 
 This guide is part of `main` after PR #9. Read it before selecting the next
 increment. Checkpoint preparation does not mean native replacement exists.
@@ -68,7 +68,9 @@ This is a resume guide, not a replacement for the owning contracts in
   cache roots and scoped Windows access (ADR-0037), **Phase C13**, version
   **0.24.0**, with provider-profile records and trusted per-call approvals
   (ADR-0038, ADR-0039), and **Phase C14**, version **0.25.0**, with the
-  approval-gated model command tool (ADR-0040). It is stacked on C7 at
+  approval-gated model command tool (ADR-0040), qualified by **Phase C15**, a
+  native end-to-end acceptance test of one approved successful command on both
+  hosts. It is stacked on C7 at
   `0426e42`. No run accepts a profile or has destination-scoped networking;
   no provider adapter is enabled, and the command tool is the only model tool
   that can request a process.
@@ -95,9 +97,11 @@ Implemented today:
   complete proposed UTF-8 content. Exact digests, bounded one-hunk diff, no
   workspace mutation, no checkpoint, no replacement.
 - LM Studio Chat Completions chat with non-streaming requests. It is text-only
-  unless the session's workspace enables `model_tools`; then it offers only the
-  read and list tools. See
-  [ADR-0026](docs/adr/0026-offer-read-list-tools-through-a-workspace-preference.md).
+  unless the session's workspace enables `model_tools`; then it offers the read
+  and list tools and, when `execute`, `read`, and `write` also allow it, the
+  approval-gated command tool. See
+  [ADR-0026](docs/adr/0026-offer-read-list-tools-through-a-workspace-preference.md)
+  and [ADR-0040](docs/adr/0040-gate-the-model-command-tool-with-approvals-and-the-trusted-runner.md).
 - Read-only core initialization/ledger record inspectors with bounded strict
   JSON, lifecycle validation, manifest references, and unresolved-state retention.
   The pure inspectors open no files and execute no recorded work.
@@ -157,8 +161,8 @@ Implemented today:
 - Provider profiles record connection shapes without credentials or adapters
   (ADR-0038). Trusted approval records bind a future model-tool call to a
   session, workspace, operation, request digest, and settings revision, expire,
-  and are consumed once (ADR-0039). Neither enables a provider connection or a
-  model tool.
+  and are consumed once (ADR-0039). Provider profiles enable no connection; the
+  command tool is the only model tool that consumes an approval record.
 - The `workspace_run_command` model tool (ADR-0040) is offered only with live
   `model_tools`, `execute`, `read`, and `write`. Its first call records a
   pending approval and starts nothing; an approved exact call consumes the
@@ -173,12 +177,12 @@ Not implemented:
 
 - Apply or restore on other filesystems, workspace file deletion, ledger
   compaction, and standalone CLI checkpoint preparation.
-- Model write, process, network, Git, or MCP tools; per-call tool approval;
-  and live provider tool-call qualification.
-- Model-callable process execution, a network destination allowlist, Git,
-  MCP, runtime skills, memories, desktop/UI panels, compaction, or caches.
-  Nothing calls the unconfined process runner.
-- Subscription/API-key provider profiles beyond the local LM Studio route.
+- Model write, network, Git, and MCP tools; live provider tool-call
+  qualification; and streaming, discovery, and cancellation in a live provider.
+- A run network destination allowlist, runtime skills, memories, desktop/UI
+  panels, compaction, and caches. Nothing calls the unconfined process runner.
+- Provider adapters and subscription/API-key login; the recorded provider
+  profiles are configuration only.
 
 ## Resume steps
 
@@ -550,12 +554,18 @@ on Windows, and trusted CLI commands as the first caller. See
   before calling the trusted runner. It uses fixed limits and no network or
   host services. See
   [ADR-0040](docs/adr/0040-gate-the-model-command-tool-with-approvals-and-the-trusted-runner.md).
+- **C15 (this branch, version 0.25.0 qualification):** native end-to-end
+  acceptance for the model command tool. The real chat CLI, a mock provider,
+  two turns, an operator approval, and the trusted runner run one successful
+  confined command on Linux and Windows. Linux needs a delegated cgroup;
+  Windows needs a workspace container grant. The case fails, rather than
+  skips, when the host cannot provide them. Confinement correctness remains
+  the platform suites' responsibility.
 
 Next decisions, not yet scheduled:
 
 - a credential service, provider adapters, and subscription/API-key login;
 - model write, network, Git, and MCP tools;
-- native successful-command qualification for the model tool;
 - registry credentials and development-server networking.
 
 ### Phase D: additional providers, streaming, and account lifecycle

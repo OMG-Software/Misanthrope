@@ -1,6 +1,6 @@
 # Build and run the core prototype
 
-OMGCode 0.17.0 is a developer CLI prototype with workspace permission
+OMGCode 0.25.0 is a developer CLI prototype with workspace permission
 settings and bounded native file operations through trusted operator commands.
 It can send a text conversation to an explicitly selected local LM Studio model
 and save that conversation. It can read/list files, exclusively create new
@@ -352,16 +352,20 @@ reason and a `withheld_tool_results` count. Text which resembles a command
 remains text.
 
 When the workspace enables `model_tools`, chat offers `workspace_read_file` and
-`workspace_list_directory`. The model may make up to four requests in one turn.
-Each call is rechecked against live settings and stays inside the workspace.
-Results return to the model as source-labelled user messages. The configured
-LM Studio token is removed from each result before it is recorded or sent. A
-tool call that contains the token is refused with a `provider` error before it
-is recorded, because editing its arguments could change the requested path.
-Saved tool results are sent again only while the live `model_tools` and `read`
-preferences both allow it. There is no per-call approval prompt. The output reports
-`model_tools.mode` as `enabled`, with the workspace ID, rounds, call count,
-tool bytes, and withheld count. `reply.finish_reason` is `length` when the token
+`workspace_list_directory`. When `execute`, `read`, and `write` also allow it,
+it offers the approval-gated `workspace_run_command`. The model may make up to
+four requests in one turn. Each read/list call is rechecked against live
+settings and stays inside the workspace. Results return to the model as
+source-labelled user messages. The configured LM Studio token is removed from
+each result before it is recorded or sent. A tool call that contains the token
+is refused with a `provider` error before it is recorded, because editing its
+arguments could change the requested path. Saved tool results are sent again
+only while the live `model_tools` and `read` preferences both allow it. Chat
+prompts for no approval: a command call first records a pending approval and
+returns `approval_required`; the operator runs `approvals approve <id>` between
+turns, and a second identical call consumes it and calls the trusted runner.
+The output reports `model_tools.mode` as `enabled`, with the workspace ID,
+rounds, call count, tool bytes, and withheld count. `reply.finish_reason` is `length` when the token
 limit cut the final reply short; the turn is still recorded as complete. A refused or invalid call ends the turn with a `permission`,
 `tool_call`, or `tool_limit` error, recorded in the journal.
 
