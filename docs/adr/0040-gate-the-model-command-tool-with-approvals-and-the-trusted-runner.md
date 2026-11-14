@@ -25,8 +25,13 @@ Add the model tool `workspace_run_command`:
 2. **Arguments:** `profile`, `program`, `arguments` (at most 64 strings), and
    an optional workspace-relative `cwd`. Parsing is strict: unknown fields,
    invalid names, control characters in the program, oversized arguments, and
-   parent or absolute `cwd` values are refused. There is no shell; arguments
-   are passed exactly.
+   parent or absolute `cwd` values are refused. The tool has no shell mode: it
+   never composes or re-parses a command line, and passes every argument
+   exactly. The model may name any program the approved profile exposes,
+   including an interpreter such as `sh` or `cmd`; the interpreter's own
+   parsing is part of the exact program and arguments the operator approves.
+   A name denylist is not used because interpreters can run commands without
+   being named as a shell.
 3. **Fixed limits:** the tool does not accept model-selected limits. It uses a
    20-second deadline, 4 KiB retained from each output stream, 1 GiB memory,
    64 processes, 20 seconds of CPU, and 256 MiB of disk growth. It selects no
@@ -59,8 +64,10 @@ native confinement remain the authority and the only process path.
   more than one exact request.
 - **Model-selected limits or network access.** Rejected: the model cannot
   widen its own resource or network boundary.
-- **A shell command string.** Rejected: it would re-parse untrusted text and
-  break exact argument handling.
+- **A shell command string.** Rejected: the tool would re-parse untrusted
+  text and break exact argument handling. Naming an interpreter as the
+  program remains allowed and is covered by the operator's exact-request
+  approval; rejecting every interpreter by name is not a reliable boundary.
 - **Direct unconfined execution from the model tool.** Rejected: the trusted
   runner is the only process path.
 - **A UI approval inside the chat turn.** Deferred: chat is non-interactive

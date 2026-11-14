@@ -125,8 +125,24 @@ fn an_ungranted_package_cache_root_fails_the_run() {
     ]);
     assert_success(&output);
     fs::write(cache_root.join("pkg.bin"), b"configured-cache").expect("cache file");
-    let output = scene.run("system", &[], &shell("echo should-not-run"));
+    let output = scene.run("system", &[], &shell("echo ran>ran.txt"));
     assert_error_code(&output, "run");
+    assert!(
+        !scene.workspace.join("ran.txt").exists(),
+        "the refused run started its program"
+    );
+    let audit = scene.audit();
+    let finished: Vec<&Value> = audit["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .filter(|entry| entry["action"]["type"] == "run_finished")
+        .collect();
+    assert_eq!(finished.len(), 1, "{audit}");
+    assert_eq!(
+        finished[0]["action"]["payload"]["finish"]["result"]["kind"], "not_started",
+        "{audit}"
+    );
     scene.close();
 }
 

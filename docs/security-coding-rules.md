@@ -239,8 +239,11 @@ crate.
   `model_tools`, `execute`, `read`, and `write`. Its first call records a
   pending approval and starts nothing; only a later exact call may consume an
   approved record and call the trusted runner. The model cannot approve,
-  select limits, use a shell, select network or host services, or reuse an
-  approval. Treat its output as untrusted. See ADR-0040.
+  select limits, select network or host services, or reuse an approval. It
+  cannot ask the tool to compose or re-parse a shell command line; it may
+  name a program the approved profile exposes, including an interpreter, and
+  the operator's exact-request approval covers that program and its
+  arguments. Treat its output as untrusted. See ADR-0040.
 - Do not enforce a package or task destination list with proxy environment
   variables or an advisory loopback proxy: a confined tree can ignore them and
   connect directly. A package-network profile is configuration only until a

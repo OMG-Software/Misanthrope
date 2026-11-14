@@ -126,6 +126,7 @@ pub(crate) fn run(args: RunArgs, data_root: &Path) -> Result<(), CliError> {
         working_directory: args.cwd,
         host_services: args.host_services,
         network: args.network,
+        model_tools: false,
         limits: ProcessLimits {
             deadline,
             max_stdout_bytes: args.max_output_bytes,

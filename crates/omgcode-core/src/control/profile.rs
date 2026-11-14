@@ -234,7 +234,17 @@ impl ControlStore {
                 .collect(),
         };
         // Replay validation also runs in the append preflight; check the
-        // shape first so the operator gets the specific reason.
+        // shape first so the operator gets the specific reason. A reserved
+        // runner variable is refused only for new declarations: a profile
+        // recorded before the reserve existed must remain readable, and the
+        // runner skips its value when building the environment.
+        for (name, _) in &declaration.environment {
+            if is_reserved_variable(name) {
+                return Err(ControlError::ProfileRefused(
+                    "this variable is set by the runner and cannot be declared",
+                ));
+            }
+        }
         validate_shape(&profile)?;
         self.append(
             Action::ProfileAdded {
@@ -355,11 +365,6 @@ fn validate_shape(profile: &ToolchainProfile) -> Result<(), ControlError> {
         if !valid_variable_name(&variable.name) {
             return Err(ControlError::ProfileRefused(
                 "variable names are ASCII letters, digits, and '_', not starting with a digit",
-            ));
-        }
-        if is_reserved_variable(&variable.name) {
-            return Err(ControlError::ProfileRefused(
-                "this variable is set by the runner and cannot be declared",
             ));
         }
         if variable.value.len() > MAX_VARIABLE_VALUE_BYTES || variable.value.contains('\0') {

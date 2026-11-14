@@ -136,6 +136,33 @@ fn a_denied_or_expired_approval_cannot_be_consumed() {
 }
 
 #[test]
+fn expired_undecided_requests_do_not_fill_the_pending_limit() {
+    let (_directory, data, workspace_id, mut store) = scene();
+    let session_id = Uuid::new_v4();
+    let mut short = declaration(workspace_id, session_id);
+    short.ttl_secs = MIN_APPROVAL_TTL_SECS;
+    for offset in 0..MAX_PENDING_APPROVALS {
+        store
+            .request_approval(&short, NOW + offset as u64)
+            .expect("short request");
+    }
+    let later = NOW + MIN_APPROVAL_TTL_SECS + MAX_PENDING_APPROVALS as u64;
+    let approval = store
+        .request_approval(&declaration(workspace_id, session_id), later)
+        .expect("a new request after every pending slot expired");
+    assert_eq!(approval.state, ApprovalState::Pending);
+    drop(store);
+    let store = ControlStore::open(&data).expect("expired approvals replay");
+    assert_eq!(
+        store
+            .approval_status(approval.id, later)
+            .expect("status")
+            .state,
+        ApprovalState::Pending
+    );
+}
+
+#[test]
 fn binding_and_settings_changes_refuse_consumption() {
     let (_directory, _data, workspace_id, mut store) = scene();
     let session_id = Uuid::new_v4();

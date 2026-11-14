@@ -191,7 +191,7 @@ impl ControlStore {
             .snapshot
             .approvals
             .iter()
-            .filter(|record| record.decision.is_none())
+            .filter(|record| pending_at(record, now_unix))
             .count()
             >= MAX_PENDING_APPROVALS
         {
@@ -324,6 +324,13 @@ impl ControlStore {
     }
 }
 
+/// Whether a record still occupies a pending slot at `now`. An expired,
+/// undecided record keeps its history but cannot be decided, so it must not
+/// block a new request.
+fn pending_at(record: &ApprovalRecord, now: u64) -> bool {
+    record.decision.is_none() && record.request.expires_unix > now
+}
+
 /// Validate and apply one approval action during replay or append preflight.
 pub(super) fn apply(
     state: &mut ControlSnapshot,
@@ -346,7 +353,7 @@ pub(super) fn apply(
                 || state
                     .approvals
                     .iter()
-                    .filter(|record| record.decision.is_none())
+                    .filter(|record| pending_at(record, request.created_unix))
                     .count()
                     >= MAX_PENDING_APPROVALS
             {

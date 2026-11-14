@@ -99,10 +99,20 @@ struct Scene {
     _directory: tempfile::TempDir,
     data: PathBuf,
     workspace_id: WorkspaceId,
+    cache_root: PathBuf,
 }
 
 impl Scene {
     fn new(origins: &[String]) -> Self {
+        Self::build(origins, true)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn unconfigured(origins: &[String]) -> Self {
+        Self::build(origins, false)
+    }
+
+    fn build(origins: &[String], configure_cache: bool) -> Self {
         let directory = tempfile::tempdir().expect("temporary directory");
         let data = directory.path().join("data");
         let root = directory.path().join("dev");
@@ -130,10 +140,18 @@ impl Scene {
                 store.revision(),
             )
             .expect("profile");
+        let cache_root = directory.path().join("cache");
+        if configure_cache && !cfg!(target_os = "linux") {
+            fs::create_dir(&cache_root).expect("cache root");
+            store
+                .set_package_cache_root(workspace_id, &cache_root, store.revision())
+                .expect("cache root");
+        }
         Self {
             _directory: directory,
             data,
             workspace_id,
+            cache_root,
         }
     }
 
@@ -149,10 +167,14 @@ impl Scene {
     }
 
     fn cache_file(&self, name: &str) -> PathBuf {
-        self.data
-            .join("package-cache")
-            .join(self.workspace_id.to_string())
-            .join(name)
+        if cfg!(target_os = "linux") {
+            self.data
+                .join("package-cache")
+                .join(self.workspace_id.to_string())
+                .join(name)
+        } else {
+            self.cache_root.join(name)
+        }
     }
 
     fn audit_text(&self) -> String {
@@ -341,4 +363,144 @@ fn task_network_is_required_and_bad_names_are_refused() {
         .expect_err("bad cache name");
         assert!(matches!(error, FetchError::Refused(_)), "{name}: {error}");
     }
+}
+
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn a_fetch_without_a_cache_root_is_refused_off_linux() {
+    let scene = Scene::unconfigured(&["http://127.0.0.1:9/fixtures/".to_owned()]);
+    let before = scene.audit_text();
+    let error = fetch(
+        &scene.data,
+        &scene.request(
+            "http://127.0.0.1:9/fixtures/pkg.bin".to_owned(),
+            "pkg.bin",
+            1024,
+        ),
+    )
+    .expect_err("no cache root is available");
+    assert!(matches!(error, FetchError::Refused(_)), "{error}");
+    assert_eq!(scene.audit_text(), before);
+    assert!(!scene.cache_file("pkg.bin").exists());
+}
+
+#[test]
+fn concurrent_publication_never_replaces_the_winner() {
+    use std::sync::{Arc, Barrier};
+
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let first = directory.path().join("first.partial");
+    let second = directory.path().join("second.partial");
+    fs::write(&first, b"first").expect("first partial");
+    fs::write(&second, b"second").expect("second partial");
+    let final_path = directory.path().join("pkg.bin");
+    let barrier = Arc::new(Barrier::new(2));
+    let results: Vec<Result<(), FetchError>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = [&first, &second]
+            .into_iter()
+            .map(|temporary| {
+                let barrier = Arc::clone(&barrier);
+                let final_path = final_path.clone();
+                scope.spawn(move || {
+                    barrier.wait();
+                    publish_cache_file(temporary, &final_path, "pkg.bin")
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("publisher"))
+            .collect()
+    });
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(result, Err(FetchError::AlreadyCached(_))))
+            .count(),
+        1
+    );
+    let content = fs::read(&final_path).expect("published file");
+    assert!(
+        content == b"first" || content == b"second",
+        "the final file is one complete payload"
+    );
+}
+
+/// A server that sends one body byte at a time, each inside a read timeout.
+struct TrickleFixture {
+    address: SocketAddr,
+    task: JoinHandle<()>,
+}
+
+impl TrickleFixture {
+    fn start(interval: Duration, bytes: usize) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture");
+        listener
+            .set_nonblocking(true)
+            .expect("make fixture accept bounded");
+        let address = listener.local_addr().expect("fixture address");
+        let task = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(connection) => break connection,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "fixture accept timed out");
+                        thread::sleep(Duration::from_millis(2));
+                    }
+                    Err(error) => panic!("fixture accept failed: {error}"),
+                }
+            };
+            stream
+                .set_nonblocking(false)
+                .expect("make accepted stream blocking");
+            let head = read_head(&mut stream);
+            assert!(head.starts_with("GET "), "{head}");
+            let response =
+                format!("HTTP/1.1 200 OK\r\nContent-Length: {bytes}\r\nConnection: close\r\n\r\n");
+            if stream.write_all(response.as_bytes()).is_err() {
+                return;
+            }
+            for _ in 0..bytes {
+                if stream.write_all(b"x").is_err() {
+                    return;
+                }
+                let _ = stream.flush();
+                thread::sleep(interval);
+            }
+        });
+        Self { address, task }
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("http://{}{path}", self.address)
+    }
+
+    fn finish(self) {
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while !self.task.is_finished() {
+            assert!(Instant::now() < deadline, "fixture finished");
+            thread::sleep(Duration::from_millis(2));
+        }
+        self.task.join().expect("fixture joined");
+    }
+}
+
+#[test]
+fn a_trickled_body_cannot_outlive_the_fetch_deadline() {
+    let fixture = TrickleFixture::start(Duration::from_millis(200), 32);
+    let scene = Scene::new(&[format!("http://{}/fixtures/", fixture.address)]);
+    let mut request = scene.request(fixture.url("/fixtures/slow.bin"), "slow.bin", 1024);
+    request.timeout = Duration::from_secs(1);
+    let started = Instant::now();
+    let error = fetch(&scene.data, &request).expect_err("the overall deadline must stop the fetch");
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "the fetch ran past its deadline: {:?}",
+        started.elapsed()
+    );
+    assert!(matches!(error, FetchError::Body(_)), "{error}");
+    assert!(!scene.cache_file("slow.bin").exists());
+    fixture.finish();
 }

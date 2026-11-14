@@ -26,6 +26,8 @@ fn start(run_id: Uuid) -> RunStart {
         }),
         network: None,
         package_cache: false,
+        package_cache_root: None,
+        model_origin: false,
     }
 }
 
@@ -88,7 +90,9 @@ fn limits_and_usage_are_recorded_and_checked_on_replay() {
     });
     let run = Uuid::new_v4();
     let entries = [
-        RunAction::RunStarted { start: start(run) },
+        RunAction::RunStarted {
+            start: Box::new(start(run)),
+        },
         RunAction::RunFinished {
             run_id: run,
             finish: not_started,
@@ -104,7 +108,13 @@ fn limits_and_usage_are_recorded_and_checked_on_replay() {
     assert!(matches!(
         RunJournal::apply(
             &mut state.clone(),
-            &entry(store, 1, RunAction::RunStarted { start: zero }),
+            &entry(
+                store,
+                1,
+                RunAction::RunStarted {
+                    start: Box::new(zero),
+                }
+            ),
             1,
             store
         ),
@@ -157,7 +167,13 @@ fn network_access_is_recorded_and_bounded_on_replay() {
     assert!(matches!(
         RunJournal::apply(
             &mut ReplayState::default(),
-            &entry(store, 1, RunAction::RunStarted { start: excessive }),
+            &entry(
+                store,
+                1,
+                RunAction::RunStarted {
+                    start: Box::new(excessive),
+                }
+            ),
             1,
             store
         ),

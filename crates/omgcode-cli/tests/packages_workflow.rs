@@ -163,6 +163,25 @@ fn a_trusted_fetch_writes_a_private_cache_and_is_audited() {
     );
     assert_success(&output);
 
+    // Windows has no application-storage fallback; select an external root.
+    #[cfg(windows)]
+    {
+        let cache_root = temporary.path().join("package-cache-root");
+        fs::create_dir(&cache_root).expect("cache root");
+        let output = run_cli(
+            &data_root,
+            &[
+                "workspace",
+                "set-package-cache",
+                &id,
+                path_arg(&cache_root),
+                "--revision",
+                &revision(&data_root).to_string(),
+            ],
+        );
+        assert_success(&output);
+    }
+
     // When the operator fetches a declared package URL.
     let url = fixture.url("/fixtures/pkg.bin");
     let output = run_cli(
@@ -187,7 +206,10 @@ fn a_trusted_fetch_writes_a_private_cache_and_is_audited() {
     assert_eq!(report["bytes"], BODY.len());
     assert_eq!(report["status"], 200);
     assert_eq!(report["profile_name"], PROFILE);
+    #[cfg(target_os = "linux")]
     let cache = data_root.join("package-cache").join(&id).join("pkg.bin");
+    #[cfg(windows)]
+    let cache = temporary.path().join("package-cache-root").join("pkg.bin");
     assert_eq!(fs::read(&cache).expect("cache file"), BODY);
     let head = fixture.finish();
     assert!(head.starts_with("GET /fixtures/pkg.bin "), "{head}");

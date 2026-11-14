@@ -85,6 +85,10 @@ pub struct RunRequest {
     /// `task_network` preference. On Linux the run can then reach any address,
     /// loopback included; on Windows only the internet. See ADR-0032.
     pub network: bool,
+    /// Whether this request came from a model tool. Such a run also requires
+    /// the live `model_tools` preference for its whole life; trusted CLI runs
+    /// leave this false and are unaffected by later model-tool changes.
+    pub model_tools: bool,
     /// Deadline, output, cleanup, and tree bounds. Tree limits are required;
     /// a request without them is refused before anything is recorded.
     pub limits: ProcessLimits,
@@ -518,6 +522,17 @@ fn withdrawn(control: &ControlStore, start: &RunStart) -> Option<&'static str> {
         Some(status) if status.profile().id() == start.profile_id => {}
         _ => return Some("the toolchain profile was removed"),
     }
+    if start.model_origin && !registration.permissions().model_tools {
+        return Some("the workspace model_tools preference is disabled");
+    }
+    match (
+        start.package_cache_root.as_ref(),
+        control.package_cache_root(start.workspace_id),
+    ) {
+        (None, None) => {}
+        (Some(recorded), Some(current)) if recorded.same_directory(current) => {}
+        _ => return Some("the workspace package cache root changed"),
+    }
     let Ok(scope) = control.file_scope(start.workspace_id) else {
         return Some("the workspace is outside the development root");
     };
@@ -809,6 +824,11 @@ fn prepare(
             "host-service access is not available on Windows",
         ));
     }
+    if request.model_tools && !permissions.model_tools {
+        return Err(RunError::Refused(
+            "the workspace model_tools preference is disabled",
+        ));
+    }
     permitted(permissions, request.host_services, request.network).map_err(RunError::Refused)?;
     let status = control
         .profile(&request.profile)
@@ -859,8 +879,15 @@ fn prepare(
         &mut environment,
     )?;
     for variable in profile.environment() {
+        // A legacy profile may declare a runner-owned variable. The runner's
+        // value was already set above and takes precedence; do not let the
+        // profile override it.
+        if crate::control::is_reserved_variable(variable.name()) {
+            continue;
+        }
         environment.push((variable.name().into(), variable.value().into()));
     }
+    let package_cache_root = control.package_cache_root(request.workspace_id).cloned();
     let start = RunStart {
         run_id,
         workspace_id: request.workspace_id,
@@ -894,6 +921,8 @@ fn prepare(
             None
         },
         package_cache,
+        package_cache_root,
+        model_origin: request.model_tools,
     };
     Ok(Prepared {
         start,
@@ -1362,6 +1391,8 @@ mod tests {
             limits: None,
             network: None,
             package_cache: false,
+            package_cache_root: None,
+            model_origin: false,
         }
     }
 
@@ -1444,6 +1475,7 @@ mod tests {
                 working_directory: None,
                 host_services: false,
                 network: false,
+                model_tools: false,
                 limits: ProcessLimits {
                     tree: Some(tree),
                     ..ProcessLimits::default()
@@ -1666,6 +1698,66 @@ mod tests {
         drop(control);
         let control = open_control(&data).expect("control");
         assert_eq!(withdrawn(&control, &networked), None);
+    }
+
+    /// A run requested by the model also needs live `model_tools`; a trusted
+    /// CLI run does not.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn disabling_model_tools_withdraws_only_model_origin_runs() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (data, workspace_id, _journal_root, _store_id) = store(directory.path());
+        let plain = allowed_start(&data, directory.path(), workspace_id);
+        let mut model = plain.clone();
+        model.model_origin = true;
+        let control = open_control(&data).expect("control");
+        assert_eq!(
+            withdrawn(&control, &model),
+            Some("the workspace model_tools preference is disabled")
+        );
+        assert_eq!(withdrawn(&control, &plain), None);
+        drop(control);
+        let mut control = ControlStore::open(&data).expect("control store");
+        control
+            .set_permissions(
+                workspace_id,
+                PermissionSet {
+                    execute: true,
+                    model_tools: true,
+                    ..PermissionSet::default()
+                },
+                control.revision(),
+            )
+            .expect("permissions");
+        drop(control);
+        let control = open_control(&data).expect("control");
+        assert_eq!(withdrawn(&control, &model), None);
+    }
+
+    /// A configured cache-root change withdraws a run that holds the old
+    /// exposure.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn changing_the_package_cache_root_withdraws_the_run() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (data, workspace_id, _journal_root, _store_id) = store(directory.path());
+        let mut start = allowed_start(&data, directory.path(), workspace_id);
+        let cache = directory.path().join("cache");
+        fs::create_dir(&cache).expect("cache root");
+        start.package_cache_root = None;
+        let control = open_control(&data).expect("control");
+        assert_eq!(withdrawn(&control, &start), None);
+        drop(control);
+        let mut control = ControlStore::open(&data).expect("control store");
+        control
+            .set_package_cache_root(workspace_id, &cache, control.revision())
+            .expect("cache root");
+        drop(control);
+        let control = open_control(&data).expect("control");
+        assert_eq!(
+            withdrawn(&control, &start),
+            Some("the workspace package cache root changed")
+        );
     }
 
     /// A live run that the settings still allow is not waited for. Linux

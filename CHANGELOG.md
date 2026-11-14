@@ -12,7 +12,9 @@ Changes are recorded here before a release version is assigned.
     preferences are enabled. Every call rechecks them; the trusted run checks
     them again.
   - **Arguments:** a recorded toolchain profile, program, at most 64
-    arguments, and an optional workspace-relative `cwd`. There is no shell.
+    arguments, and an optional workspace-relative `cwd`. The tool has no shell
+    mode and never re-parses a command line; the model may name an interpreter
+    the approved profile exposes.
   - **Approval:** the first call records a pending approval and returns
     `approval_required`; it starts nothing. After `approvals approve <id>`, a
     second identical call consumes the approval and calls the trusted runner.
@@ -336,6 +338,36 @@ Changes are recorded here before a release version is assigned.
 
 ### Fixed
 
+- PR #30 review follow-up:
+  - Expired, undecided approvals no longer occupy the 64 pending slots during
+    requests or replay. Only records unexpired at the request's event time
+    count.
+  - A legacy toolchain profile that declares `OMGCODE_PACKAGE_CACHE` still
+    replays. New declarations are refused; the runner skips a legacy value so
+    its own cache path wins.
+  - Windows package fetch now requires a selected cache root, matching the
+    runner's lack of an application-storage fallback.
+  - Package fetch checks its overall deadline before each body read, so a
+    trickled response cannot outlive the requested timeout.
+  - Package cache publication uses an atomic no-replace hard link. Two
+    concurrent fetches cannot overwrite each other, and a synchronized
+    collision test covers the winner.
+  - A run records its configured package cache root and whether it came from a
+    model tool. Clearing or replacing the root, or disabling `model_tools`,
+    withdraws the live run. The cache-root CLI commands wait for affected runs.
+  - Changing or clearing a cache root revokes read-execute container grants
+    that covered it, and selecting a root another workspace can already read is
+    refused.
+  - The model command summary finds a UTF-8 boundary before truncation; a long
+    multibyte program name no longer panics.
+  - Disk sampling observes cancellation during traversal, and directory
+    enumeration checks the entry budget before queuing each path.
+  - Documents that `workspace_run_command` has no shell mode but may name an
+    interpreter under the exact-request approval. Corrects stale plan, guide,
+    and AGENTS descriptions of approval records and model tools.
+  - Strengthens the ungranted-cache refusal test to prove the program did not
+    start, and the cache-root replay test to compare the exact workspace and
+    directory identity.
 - Tree limits, after the PR #27 review:
   - **Range checks before recording:** the core checks every run limit before
     it records a run, so a direct caller with an out-of-range tree limit gets
