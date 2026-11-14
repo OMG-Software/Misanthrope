@@ -119,7 +119,7 @@ an explicit current-content check. Trusted `file delete-checkpoint --permanent`
 removes one resolved checkpoint's files and keeps its ledger history. Neither
 command is power-loss qualified. Model-dispatched write tools
 remain unavailable.
-Process/network confinement, Git, MCP, and memories remain planned. See the
+Model-dispatched process execution, Git, MCP, and memories remain planned. See the
 [workspace settings contract](docs/workspace-permissions.md), the
 [workspace file-access guide](docs/file-access.md), and the [development
 guide](docs/development.md) for limits and command details.
