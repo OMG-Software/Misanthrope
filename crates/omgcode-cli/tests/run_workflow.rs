@@ -881,19 +881,15 @@ fn a_disk_limit_ends_the_run_and_is_recorded() {
     #[cfg(target_os = "linux")]
     let script = "cp growth-source.bin growth.bin; while :; do :; done".to_owned();
     // Build the growth with `cmd` built-ins and files the container creates.
-    // External tools need grants the CI container lacks, and it could not read
-    // a host-created source. Doubling a small file passes 16 MiB quickly.
+    // External tools and `copy` were denied in the CI container, but `echo`
+    // creation and `type` of a container-created file work. Append a 7 KiB
+    // chunk enough times to pass 16 MiB.
     #[cfg(windows)]
     let script = {
-        let mut script = String::from("echo x>g0");
-        for step in 1..=25 {
-            script.push_str(&format!(
-                "& copy /b g{previous}+g{previous} g{step} >nul",
-                previous = step - 1
-            ));
-        }
-        script.push_str("& for /l %i in (1,0,2) do @rem");
-        script
+        let chunk = "x".repeat(7000);
+        format!(
+            "echo {chunk}>chunk & (for /l %i in (1,1,2500) do @type chunk>>growth.bin) & for /l %i in (1,0,2) do @rem"
+        )
     };
     let options = [
         "--max-disk-mib",
