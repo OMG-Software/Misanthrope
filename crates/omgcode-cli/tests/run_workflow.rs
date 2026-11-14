@@ -879,11 +879,22 @@ fn a_disk_limit_ends_the_run_and_is_recorded() {
     #[cfg(target_os = "linux")]
     fs::write(&source, vec![0u8; 32 * 1024 * 1024]).expect("growth source");
     #[cfg(target_os = "linux")]
-    let script = "cp growth-source.bin growth.bin; while :; do :; done";
-    // `fsutil` sets the logical length directly. A 32 MiB copy was slow or
-    // failed on the Windows CI runner before the sampler saw growth.
+    let script = "cp growth-source.bin growth.bin; while :; do :; done".to_owned();
+    // Build the growth with `cmd` built-ins and files the container creates.
+    // External tools need grants the CI container lacks, and it could not read
+    // a host-created source. Doubling a small file passes 16 MiB quickly.
     #[cfg(windows)]
-    let script = "fsutil file createnew growth.bin 33554432 >nul & for /l %i in (1,0,2) do @rem";
+    let script = {
+        let mut script = String::from("echo x>g0");
+        for step in 1..=25 {
+            script.push_str(&format!(
+                "& copy /b g{previous}+g{previous} g{step} >nul",
+                previous = step - 1
+            ));
+        }
+        script.push_str("& for /l %i in (1,0,2) do @rem");
+        script
+    };
     let options = [
         "--max-disk-mib",
         "16",
@@ -896,7 +907,8 @@ fn a_disk_limit_ends_the_run_and_is_recorded() {
         "--timeout-secs",
         "45",
     ];
-    let run = run_json(&scene.run_for("system", &options, &shell(script), Duration::from_secs(60)));
+    let run =
+        run_json(&scene.run_for("system", &options, &shell(&script), Duration::from_secs(60)));
     assert_eq!(
         run["start"]["limits"]["max_disk_bytes"],
         16u64 * 1024 * 1024,
