@@ -1,6 +1,7 @@
 //! Developer CLI for the first OMGCode core prototype.
 #![forbid(unsafe_code)]
 
+mod approvals_cli;
 mod control_cli;
 mod file_cli;
 mod model_tools;
@@ -73,6 +74,11 @@ enum Command {
     Packages {
         #[command(subcommand)]
         action: packages_cli::PackagesCommand,
+    },
+    /// Inspect, decide, or consume trusted per-call approvals.
+    Approvals {
+        #[command(subcommand)]
+        action: approvals_cli::ApprovalsCommand,
     },
 }
 
@@ -237,6 +243,9 @@ fn run(cli: Cli) -> Result<(), CliError> {
             "package_network_profiles": true,
             "package_network_enforcement": false,
             "package_fetch": true,
+            "provider_profiles": true,
+            "provider_adapters": false,
+            "approvals": true,
             "process_execution": if RUN_SUPPORTED {
                 serde_json::Value::from("trusted_cli_only")
             } else {
@@ -301,6 +310,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
         Command::Run(args) => run_cli::run(args, &data_root(cli.data_dir)?),
         Command::Runs { action } => run_cli::runs(action, &data_root(cli.data_dir)?),
         Command::Packages { action } => packages_cli::run(action, &data_root(cli.data_dir)?),
+        Command::Approvals { action } => approvals_cli::run(action, &data_root(cli.data_dir)?),
     }
 }
 

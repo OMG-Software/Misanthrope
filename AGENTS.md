@@ -22,7 +22,9 @@ filesystem quota. Package-network profiles are recorded as configuration only;
 no run uses them. The trusted `packages fetch` command downloads from declared
 origins into a per-workspace cache. A selected root is exposed read-only on
 Linux and Windows; Windows needs a read-execute container grant, and Linux
-falls back to application storage. Trusted CLI
+falls back to application storage. Provider profiles and trusted single-use
+approval records are configuration and authorization records only; no adapter
+or model tool uses them. Trusted CLI
 commands record, apply, and revoke Windows container ACL grants. Follow the
 [execution contract](docs/execution.md).
 The bundled web interface and most planned features are not implemented.

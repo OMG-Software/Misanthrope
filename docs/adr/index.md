@@ -52,3 +52,5 @@ meaningful alternative does not need an ADR.
 | [0035: Fetch packages through a trusted allowlisted cache](0035-fetch-packages-through-a-trusted-allowlisted-cache.md) | Accepted | 2026-11-13 |
 | [0036: Expose the package fetch cache read-only to Linux runs](0036-expose-the-package-fetch-cache-read-only-to-linux-runs.md) | Superseded by ADR-0037 | 2026-11-14 |
 | [0037: Use a per-workspace cache root and a scoped Windows grant](0037-use-a-per-workspace-cache-root-and-a-scoped-windows-grant.md) | Accepted | 2026-11-14 |
+| [0038: Record provider profiles without credentials](0038-record-provider-profiles-without-credentials.md) | Accepted | 2026-11-14 |
+| [0039: Gate future model tools with bound, single-use approval records](0039-gate-future-model-tools-with-bound-single-use-approval-records.md) | Accepted | 2026-11-14 |

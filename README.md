@@ -41,9 +41,11 @@ directory grants.
 > declared origins into a private per-workspace cache. A selected cache root
 > is exposed read-only on Linux and Windows; Windows needs a read-execute
 > container grant, and Linux falls back to application storage when no root is
-> selected. Runs have memory, process-count, CPU-time, and sampled disk-growth
-> limits; the disk limit is not a filesystem quota. See
-> [command execution](docs/execution.md#tree-limits).
+> selected. Provider profiles record connection shapes, and trusted
+> single-use approval records prepare per-call model-tool consent; neither
+> enables an adapter, login, or model tool. Runs have memory, process-count,
+> CPU-time, and sampled disk-growth limits; the disk limit is not a filesystem
+> quota. See [command execution](docs/execution.md#tree-limits).
 
 ## Goals
 

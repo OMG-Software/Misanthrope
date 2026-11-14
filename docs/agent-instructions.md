@@ -156,6 +156,24 @@ Claude Code prompts.
 [OpenAI request mapping](https://developers.openai.com/api/docs/guides/migrate-to-responses),
 [Claude Messages](https://platform.claude.com/docs/en/api/messages/create)
 
+## Approval records
+
+A future model tool that changes host state must obtain a trusted, single-use
+approval record. `approvals request` records a pending request;
+`approvals list`, `show`, `approve`, and `deny` inspect or decide it; and
+`approvals consume` marks an approved record used. The record binds the
+session, workspace, operation, exact request SHA-256, and the settings revision
+at request time. It stores no argument text. The summary is at most 256 bytes,
+must contain no secrets or control characters, and is for the operator.
+
+An approval lives 60 to 3600 seconds and is consumed at most once. Consumption
+checks the binding and refuses if the settings revision changed. The CLI
+consume command executes nothing. A future model tool must call the core
+consumption check immediately before its operation and fail closed when the
+record is missing, denied, expired, consumed, or bound differently. Approval
+events preserve the settings revision. See
+[ADR-0039](adr/0039-gate-future-model-tools-with-bound-single-use-approval-records.md).
+
 ## Release request records
 
 Freeze an instruction manifest when starting each request. Record the prompt

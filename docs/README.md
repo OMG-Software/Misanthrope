@@ -90,7 +90,9 @@ Package-network profiles are recorded as configuration only (ADR-0034); no run
 uses them, and network access remains all-or-nothing. The trusted
 `packages fetch` command downloads from declared origins into a per-workspace
 cache. A selected root is exposed read-only on Linux and Windows; Windows
-needs a read-execute grant, and Linux falls back to application storage. The
+needs a read-execute grant, and Linux falls back to application storage.
+Provider profiles record connection shapes, and approval records prepare
+per-call model-tool consent; neither enables an adapter or model tool. The
 limited file broker and the core read/list turn runtime
 do not provide general model tools. Chat dispatches only the read and
 list tools, and only for a workspace that enables `model_tools`. A read-only CLI preview compares a workspace file with trusted proposed

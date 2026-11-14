@@ -64,9 +64,12 @@ This is a resume guide, not a replacement for the owning contracts in
   package-network profile records, **Phase C10**, version **0.21.0**, with
   the trusted allowlisted package fetch and private cache (ADR-0035), and
   **Phase C11**, version **0.22.0**, with read-only Linux run access to that
-  cache (ADR-0036), and **Phase C12**, version **0.23.0**, with per-workspace
-  cache roots and scoped Windows access (ADR-0037). It is stacked on C7 at
-  `0426e42`. No run accepts a profile or has destination-scoped networking.
+  cache (ADR-0036), **Phase C12**, version **0.23.0**, with per-workspace
+  cache roots and scoped Windows access (ADR-0037), and **Phase C13**, version
+  **0.24.0**, with provider-profile records and trusted per-call approvals
+  (ADR-0038, ADR-0039). It is stacked on C7 at `0426e42`. No run accepts a
+  profile or has destination-scoped networking; no provider adapter or model
+  tool is enabled.
 
 Implemented today:
 
@@ -149,6 +152,11 @@ Implemented today:
   named by `OMGCODE_PACKAGE_CACHE`. Windows requires a read-execute container
   grant on the root; Linux falls back to application storage when no root is
   selected. Overlapping roots are refused.
+- Provider profiles record connection shapes without credentials or adapters
+  (ADR-0038). Trusted approval records bind a future model-tool call to a
+  session, workspace, operation, request digest, and settings revision, expire,
+  and are consumed once (ADR-0039). Neither enables a provider connection or a
+  model tool.
 - Trusted `file restore` through a new checkpoint and
   `file delete-checkpoint --permanent` for one resolved checkpoint, on the same
   filesystems as apply. Neither is power-loss qualified. See
@@ -522,11 +530,19 @@ on Windows, and trusted CLI commands as the first caller. See
   storage and the development root; fetch and run use it; Windows needs a
   read-execute grant on that root. See
   [ADR-0037](docs/adr/0037-use-a-per-workspace-cache-root-and-a-scoped-windows-grant.md).
+- **C13 (this branch, version 0.24.0):** provider-profile records and trusted
+  per-call approval records. Profiles store only a name, kind, and
+  authentication mode; no credential, endpoint, adapter, or login exists.
+  Approvals are bound, expiring, single-use records; no model tool consumes
+  one yet. See
+  [ADR-0038](docs/adr/0038-record-provider-profiles-without-credentials.md) and
+  [ADR-0039](docs/adr/0039-gate-future-model-tools-with-bound-single-use-approval-records.md).
 
 Next decisions, not yet scheduled:
 
-- registry credentials and development-server networking;
-- a model-callable command tool with per-call approval.
+- a credential service, provider adapters, and subscription/API-key login;
+- a model-callable command tool that consumes the approval record;
+- registry credentials and development-server networking.
 
 ### Phase D: additional providers, streaming, and account lifecycle
 

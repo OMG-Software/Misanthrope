@@ -4,7 +4,8 @@
 
 use clap::{Args, Subcommand, ValueEnum};
 use omgcode_core::control::{
-    ContainerGrantAccess, ControlError, ControlStore, PackageProfileDeclaration, ProfileDeclaration,
+    ContainerGrantAccess, ControlError, ControlStore, PackageProfileDeclaration,
+    ProfileDeclaration, ProviderProfileDeclaration,
 };
 use omgcode_core::policy::{Operation, PermissionSet, PolicyRequest, WorkspaceId};
 use omgcode_core::run;
@@ -87,6 +88,31 @@ pub(crate) enum WorkspaceCommand {
         #[arg(long)]
         revision: u64,
     },
+    /// Record a provider connection shape. No credential or adapter is used.
+    ProviderProfileAdd(ProviderProfileAddArgs),
+    /// Show one recorded provider profile.
+    ProviderProfileShow { name: String },
+    /// Remove a provider profile.
+    ProviderProfileRemove {
+        name: String,
+        #[arg(long)]
+        revision: u64,
+    },
+}
+
+#[derive(Args)]
+pub(crate) struct ProviderProfileAddArgs {
+    /// The profile name: ASCII letters, digits, '.', '-', or '_'.
+    name: String,
+    /// One of: openai, anthropic, ollama_local, ollama_cloud, open_router,
+    /// lm_studio.
+    #[arg(long)]
+    kind: String,
+    /// One of: subscription, api_key, none.
+    #[arg(long)]
+    auth: String,
+    #[arg(long)]
+    revision: u64,
 }
 
 #[derive(Args)]
@@ -303,6 +329,29 @@ pub(crate) fn run(action: WorkspaceCommand, data_root: &Path) -> Result<(), CliE
             stop_withdrawn_runs(data_root, &[])?;
             print_json(&output)
         }
+        WorkspaceCommand::ProviderProfileAdd(args) => provider_profile_add(args, data_root),
+        WorkspaceCommand::ProviderProfileShow { name } => {
+            let store = open_existing(data_root)?
+                .ok_or_else(|| CliError::new("control", "Workspace control is not initialized"))?;
+            let profile = store
+                .provider_profile(&name)
+                .ok_or_else(|| control_error(ControlError::UnknownProvider))?;
+            print_json(&json!({ "provider_profile": profile }))
+        }
+        WorkspaceCommand::ProviderProfileRemove { name, revision } => {
+            let mut store = open_existing(data_root)?
+                .ok_or_else(|| CliError::new("control", "Workspace control is not initialized"))?;
+            let profile_id = store
+                .remove_provider_profile(&name, revision)
+                .map_err(control_error)?;
+            let output = json!({
+                "removed_provider_profile_id": profile_id,
+                "snapshot": store.snapshot(),
+            });
+            drop(store);
+            stop_withdrawn_runs(data_root, &[])?;
+            print_json(&output)
+        }
         WorkspaceCommand::ContainerRevoke { grant } => {
             let mut store = open_existing(data_root)?
                 .ok_or_else(|| CliError::new("control", "Workspace control is not initialized"))?;
@@ -398,6 +447,25 @@ fn package_profile_add(args: PackageProfileAddArgs, data_root: &Path) -> Result<
         .map_err(control_error)?;
     print_json(&json!({
         "package_profile_id": profile.id(),
+        "snapshot": store.snapshot(),
+    }))
+}
+
+fn provider_profile_add(args: ProviderProfileAddArgs, data_root: &Path) -> Result<(), CliError> {
+    let mut store = open_existing(data_root)?
+        .ok_or_else(|| CliError::new("control", "Workspace control is not initialized"))?;
+    let profile = store
+        .add_provider_profile(
+            &ProviderProfileDeclaration {
+                name: args.name,
+                kind: args.kind,
+                auth: args.auth,
+            },
+            args.revision,
+        )
+        .map_err(control_error)?;
+    print_json(&json!({
+        "provider_profile_id": profile.id(),
         "snapshot": store.snapshot(),
     }))
 }

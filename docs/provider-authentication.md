@@ -127,6 +127,22 @@ before calling this feature available. A CLI or SDK wrapper alone is not
 evidence of that approval. Keep the requirement open and the blocker visible;
 a separately billed Anthropic API connection remains a different profile.
 
+## Recorded provider profiles (0.24.0)
+
+`workspace provider-profile-add/show/remove` record a name, a provider kind,
+and an authentication mode. Kinds are `openai`, `anthropic`, `ollama_local`,
+`ollama_cloud`, `open_router`, and `lm_studio`; modes are `subscription`,
+`api_key`, and `none`. Subscription is accepted only for OpenAI and Anthropic.
+API keys are accepted for those, Ollama Cloud, OpenRouter, and LM Studio.
+Ollama Local accepts only `none`.
+
+A profile stores no endpoint, account, token, password, certificate, or other
+credential. It is configuration only: no adapter, login, entitlement check,
+billing mode, or model context uses it. `capabilities` reports
+`provider_profiles: true` and `provider_adapters: false`. A credential service
+and the provider-specific login approvals remain prerequisites for any real
+connection. See [ADR-0038](adr/0038-record-provider-profiles-without-credentials.md).
+
 ## Settings and account lifecycle
 
 ### LM Studio release connection requirements

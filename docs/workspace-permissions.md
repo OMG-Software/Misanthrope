@@ -122,6 +122,11 @@ zero-based sequence, UTC timestamp, global revision, and tagged `action`:
 | `package_fetch_finished` | Trusted package-fetch outcome; preserve revision |
 | `package_cache_root_set` | Select one workspace's package cache root; increment revision |
 | `package_cache_root_cleared` | Clear one workspace's package cache root; increment revision |
+| `provider_profile_added` | New provider profile; increment revision |
+| `provider_profile_removed` | Remove a provider profile; increment revision |
+| `approval_requested` | Trusted approval request; preserve revision |
+| `approval_decided` | Approval granted or denied; preserve revision |
+| `approval_consumed` | Approval used once; preserve revision |
 
 Operational file checks do not append `policy_checked`. They use current
 settings and their separate [operation journal](file-access.md). This prevents
@@ -210,6 +215,32 @@ and `package_cache_root_cleared`. `workspace status` lists selected roots under
 written by 0.23.0 cannot be read by 0.22.0. The
 [execution guide](execution.md#trusted-package-fetch) owns the fetch, exposure,
 and grant rules.
+
+## Provider profiles
+
+`workspace provider-profile-add <name> --kind <kind> --auth <auth>
+--revision <n>`, `provider-profile-show <name>`, and
+`provider-profile-remove <name> --revision <n>` record provider connection
+shapes. They store no credential, endpoint, or account. Adding and removing
+use the expected revision and increment it through `provider_profile_added`
+and `provider_profile_removed`; `workspace status` lists them under
+`provider_profiles` and omits the field until one exists. The
+[provider authentication guide](provider-authentication.md) owns the kind and
+authentication matrix. A control journal written by 0.24.0 cannot be read by
+0.23.0.
+
+## Approval records
+
+`approvals request`, `list`, `show`, `approve`, `deny`, and `consume` manage
+trusted per-call approvals. A request records a session, workspace, operation,
+exact request digest, summary, settings revision, and expiry. The events
+`approval_requested`, `approval_decided`, and `approval_consumed` preserve the
+settings revision. A decision or consumption is refused after expiry,
+mismatch, reuse, or any settings change. No model tool consumes an approval
+yet, and the CLI consume command executes nothing. The
+[agent instructions guide](agent-instructions.md#approval-records) owns the
+tool-side contract. See
+[ADR-0039](adr/0039-gate-future-model-tools-with-bound-single-use-approval-records.md).
 
 ## Task network
 

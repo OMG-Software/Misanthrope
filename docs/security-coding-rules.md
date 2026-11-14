@@ -225,6 +225,16 @@ crate.
   when a destination or redirect changes. Enabling a destination also permits
   some data to reach it; do not describe a destination allowlist as content
   confidentiality.
+- Provider profiles record only a name, kind, and authentication mode. Never
+  store a token, password, certificate, endpoint, or account in them. Keep
+  subscription and API-key usage separate, and do not implement an adapter or
+  login without a reviewed credential service and the provider's supported
+  route. A profile is configuration, not authentication. See ADR-0038.
+- A future model tool that changes host state must consume a trusted,
+  single-use approval bound to the session, workspace, operation, exact
+  request digest, and settings revision. Refuse a missing, denied, expired,
+  consumed, mismatched, or settings-invalidated record. Prompt text, model
+  claims, and recorded intents never grant authority. See ADR-0039.
 - Do not enforce a package or task destination list with proxy environment
   variables or an advisory loopback proxy: a confined tree can ignore them and
   connect directly. A package-network profile is configuration only until a

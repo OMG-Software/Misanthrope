@@ -6,6 +6,23 @@ Changes are recorded here before a release version is assigned.
 
 ### Added
 
+- Version 0.24.0 records provider profiles and trusted per-call approvals.
+  See ADR-0038 and ADR-0039.
+  - **Provider profiles:** `workspace provider-profile-add/show/remove` record
+    a name, provider kind, and authentication mode (`subscription`,
+    `api_key`, or `none`). Subscription is limited to OpenAI and Anthropic;
+    local providers use `none`. No endpoint, account, token, or credential is
+    stored, and no adapter or login uses a profile. `capabilities` reports
+    `provider_profiles: true` and `provider_adapters: false`.
+  - **Approvals:** `approvals request/list/show/approve/deny/consume` manage
+    trusted, single-use records bound to a session, workspace, operation,
+    exact request digest, and settings revision. Records expire in 60 to 3600
+    seconds; a settings change invalidates them; no argument text is stored.
+    The CLI consume command executes nothing, and no model tool consumes an
+    approval yet.
+  - **Records:** `provider_profile_added`, `provider_profile_removed`,
+    `approval_requested`, `approval_decided`, and `approval_consumed` in the
+    control journal. A 0.24.0 journal cannot be read by 0.23.0.
 - Version 0.23.0 adds a per-workspace package cache root and scoped Windows
   access. See ADR-0037.
   - **Commands:** `workspace set-package-cache <workspace-id> <dir>

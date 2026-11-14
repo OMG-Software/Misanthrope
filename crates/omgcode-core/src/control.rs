@@ -22,9 +22,17 @@ use crate::policy::{
 use crate::storage::{self, StorageError};
 use crate::workspace::DirectoryRecord;
 
+mod approval;
 mod container;
 mod package;
 mod profile;
+mod provider;
+
+pub use approval::{
+    ApprovalBinding, ApprovalDecision, ApprovalDeclaration, ApprovalOperation, ApprovalRequest,
+    ApprovalState, ApprovalStatus, MAX_APPROVAL_SUMMARY_BYTES, MAX_APPROVAL_TTL_SECS,
+    MAX_APPROVALS, MAX_PENDING_APPROVALS, MIN_APPROVAL_TTL_SECS, now_unix,
+};
 
 pub use container::{
     ContainerGrant, ContainerGrantAccess, ContainerGrantState, ContainerGrantStatus,
@@ -43,6 +51,10 @@ pub use profile::{
     MAX_PROFILES, MAX_VARIABLE_NAME_BYTES, MAX_VARIABLE_VALUE_BYTES, ProfileDeclaration,
     ProfilePlatform, ProfileStatus, ProfileVariable, RESERVED_VARIABLES, ToolchainProfile,
     is_reserved_variable, valid_profile_name,
+};
+pub use provider::{
+    MAX_PROVIDER_PROFILES, ProviderAuth, ProviderKind, ProviderProfile, ProviderProfileDeclaration,
+    ProviderProfileStatus,
 };
 
 const FILE_NAME: &str = "control-v1.jsonl";
@@ -119,6 +131,18 @@ pub enum ControlError {
     /// The requested package cache root is invalid or overlaps protected data.
     #[error("package cache root refused: {0}")]
     PackageCacheRefused(&'static str),
+    /// No recorded provider profile has this name.
+    #[error("provider profile is not recorded")]
+    UnknownProvider,
+    /// The requested provider profile is invalid.
+    #[error("provider profile refused: {0}")]
+    ProviderRefused(&'static str),
+    /// No retained approval has this identifier.
+    #[error("approval is not recorded")]
+    UnknownApproval,
+    /// The approval request, decision, or consumption is not valid.
+    #[error("approval refused: {0}")]
+    ApprovalRefused(&'static str),
 }
 
 impl From<StorageError> for ControlError {
@@ -180,6 +204,11 @@ pub struct ControlSnapshot {
     /// application storage and the development root.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     package_cache_roots: Vec<PackageCacheRootStatus>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    provider_profiles: Vec<ProviderProfileStatus>,
+    /// Trusted per-call approval records. Operational state, not settings.
+    #[serde(skip)]
+    approvals: Vec<approval::ApprovalRecord>,
     /// Container revocations requested per workspace since the journal was
     /// created. Derived on replay and never serialized; run watchers compare
     /// it with the count when their run started.
@@ -308,6 +337,22 @@ enum Action {
     PackageCacheRootCleared {
         #[serde(deserialize_with = "deserialize_workspace_id")]
         workspace_id: WorkspaceId,
+    },
+    ProviderProfileAdded {
+        profile: ProviderProfile,
+    },
+    ProviderProfileRemoved {
+        profile_id: Uuid,
+    },
+    ApprovalRequested {
+        request: ApprovalRequest,
+    },
+    ApprovalDecided {
+        approval_id: Uuid,
+        decision: ApprovalDecision,
+    },
+    ApprovalConsumed {
+        approval_id: Uuid,
     },
 }
 
@@ -476,6 +521,8 @@ impl ControlStore {
                 profiles: Vec::new(),
                 package_profiles: Vec::new(),
                 package_cache_roots: Vec::new(),
+                provider_profiles: Vec::new(),
+                approvals: Vec::new(),
                 grant_revocations: BTreeMap::new(),
             },
             entries: Vec::new(),
@@ -967,6 +1014,9 @@ impl ControlStore {
                 | Action::ContainerGrantRevoked { .. }
                 | Action::PackageFetchStarted { .. }
                 | Action::PackageFetchFinished { .. }
+                | Action::ApprovalRequested { .. }
+                | Action::ApprovalDecided { .. }
+                | Action::ApprovalConsumed { .. }
         );
         let revision = if configuration_change {
             state
@@ -1095,6 +1145,14 @@ impl ControlStore {
                         "clearing an unknown package cache root",
                     ))?;
                 state.package_cache_roots.remove(index);
+            }
+            Action::ProviderProfileAdded { .. } | Action::ProviderProfileRemoved { .. } => {
+                provider::apply(state, &entry.action, revision)?;
+            }
+            Action::ApprovalRequested { .. }
+            | Action::ApprovalDecided { .. }
+            | Action::ApprovalConsumed { .. } => {
+                approval::apply(state, &entry.action, revision)?;
             }
         }
         state.revision = revision;
