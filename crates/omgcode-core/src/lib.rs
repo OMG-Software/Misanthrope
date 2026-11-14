@@ -5,6 +5,7 @@ pub mod control;
 pub mod edit;
 mod file_audit;
 pub mod files;
+pub mod packages;
 pub mod policy;
 pub mod prompt;
 pub mod provider;

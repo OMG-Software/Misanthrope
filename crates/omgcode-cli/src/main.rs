@@ -4,6 +4,7 @@
 mod control_cli;
 mod file_cli;
 mod model_tools;
+mod packages_cli;
 mod run_cli;
 
 use clap::{Args, Parser, Subcommand};
@@ -67,6 +68,11 @@ enum Command {
     Runs {
         #[command(subcommand)]
         action: run_cli::RunsCommand,
+    },
+    /// Fetch a package from a declared registry into a private cache.
+    Packages {
+        #[command(subcommand)]
+        action: packages_cli::PackagesCommand,
     },
 }
 
@@ -230,6 +236,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
             "toolchain_profiles": RUN_SUPPORTED,
             "package_network_profiles": true,
             "package_network_enforcement": false,
+            "package_fetch": true,
             "process_execution": if RUN_SUPPORTED {
                 serde_json::Value::from("trusted_cli_only")
             } else {
@@ -293,6 +300,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
         Command::Chat(args) => chat(cli.data_dir, args),
         Command::Run(args) => run_cli::run(args, &data_root(cli.data_dir)?),
         Command::Runs { action } => run_cli::runs(action, &data_root(cli.data_dir)?),
+        Command::Packages { action } => packages_cli::run(action, &data_root(cli.data_dir)?),
     }
 }
 

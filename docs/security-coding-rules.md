@@ -230,6 +230,12 @@ crate.
   connect directly. A package-network profile is configuration only until a
   mechanism constrains every egress path, including direct IP, IPv6, UDP, DNS,
   loopback, and alternate socket families. See ADR-0034.
+- A trusted `packages fetch` is an operator action, never a model tool. It may
+  contact only a declared origin and path prefix, must disable redirects and
+  proxy variables, send no credentials, cap and hash the response, and write
+  only the private per-workspace cache. Record the intent and outcome without
+  the URL text. Do not expose the private cache to a run without a reviewed
+  read-only confinement and platform access check.
 - Assemble and validate a complete structured tool call before dispatch.
   Validate names, arguments, limits, session scope, and provider call identity.
   A provider adapter must parse provider JSON strictly; the core runtime then

@@ -37,7 +37,9 @@ directory grants.
 > `--host-services` flag allow can reach the host's Unix-domain sockets, such
 > as service and credential-agent sockets. Package-network profiles can be
 > recorded as configuration only (ADR-0034); no run uses them and they do not
-> narrow network access. Runs have memory, process-count, CPU-time, and sampled
+> narrow network access. The trusted `packages fetch` command downloads from
+> declared origins into a private cache; the run remains offline and does not
+> yet read that cache. Runs have memory, process-count, CPU-time, and sampled
 > disk-growth limits; the disk limit is not a filesystem quota. See
 > [command execution](docs/execution.md#tree-limits).
 
@@ -67,6 +69,10 @@ and `omgcode-platform`. The CLI command is `omgcode`. It provides:
   with a recorded toolchain profile, and inspect, acknowledge, or archive the
   run journal. Output is printed, never stored. See
   [command execution](docs/execution.md#trusted-runs).
+- `packages fetch`: download one URL from a declared package-network origin
+  into a private per-workspace cache. It is a trusted operator command, never
+  a model tool, and the confined run still has no network access. See
+  [trusted package fetch](docs/execution.md#trusted-package-fetch).
 - `file`: use bounded native reads, listings, exclusive new-file creation,
   single-directory creation, and read-only diff previews through explicit
   workspace/session CLI selections. These trusted operator commands do not

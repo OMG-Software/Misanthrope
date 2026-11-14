@@ -6,6 +6,26 @@ Changes are recorded here before a release version is assigned.
 
 ### Added
 
+- Version 0.21.0 adds the trusted operator command `omgcode packages fetch`
+  and a private allowlisted package cache. See ADR-0035.
+  - **Command:** `packages fetch <workspace-id> --profile <name> --url <url>
+    --name <cache-file> [--max-bytes <n>] [--timeout-secs <n>]`.
+  - **Gating:** trusted CLI only; never a model tool. The workspace must be
+    registered and enable `task_network`.
+  - **Destination:** the URL must match a recorded origin's scheme, host,
+    port, and path prefix. Normal use is `https`; `http` is accepted only for
+    loopback tests. Credentials, queries, fragments, and redirects are
+    refused. Proxy environment variables are ignored.
+  - **Transport:** system TLS trust through `reqwest`'s `native-tls` feature;
+    certificate validation is never disabled.
+  - **Bounds:** one GET, 1 byte to 1 GiB, 1 to 600 seconds. The body is
+    streamed, hashed with SHA-256, and stopped at the limit.
+  - **Cache:** `<data-dir>/package-cache/<workspace-id>/<cache-file>`, private
+    directories and files, exclusive name, temporary file then rename. No
+    power-loss claim. The run does not yet read the cache.
+  - **Audit:** `package_fetch_started` and `package_fetch_finished` in the
+    control journal preserve the settings revision and omit the URL text. A
+    control journal written by 0.21.0 cannot be read by 0.20.0.
 - Version 0.20.0 records operator-declared package-network profiles as
   configuration only. See ADR-0034.
   - **Commands:** `workspace package-profile-add`, `package-profile-show`, and

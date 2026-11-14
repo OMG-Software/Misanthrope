@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::{Action, ControlError, ControlSnapshot, ControlStore, valid_profile_name, valid_uuid};
+use crate::policy::WorkspaceId;
 
 /// Most recorded package-network profiles.
 pub const MAX_PACKAGE_PROFILES: usize = 32;
@@ -24,6 +25,8 @@ pub const MAX_PACKAGE_ORIGIN_BYTES: usize = 2048;
 pub const MAX_PACKAGE_HOST_BYTES: usize = 253;
 /// Longest registry path prefix, in bytes.
 pub const MAX_PACKAGE_PATH_BYTES: usize = 1024;
+/// Longest package cache output name, in bytes.
+pub const MAX_PACKAGE_OUTPUT_BYTES: usize = 128;
 
 /// The scheme a registry origin uses.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -132,6 +135,71 @@ pub struct PackageProfileDeclaration {
     pub name: String,
     /// Registry origins. At least one.
     pub origins: Vec<String>,
+}
+
+/// The audit intent recorded before a trusted package fetch starts.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackageFetchStart {
+    /// Durable fetch identifier, used to pair the outcome.
+    pub fetch_id: Uuid,
+    /// The workspace whose private cache receives the file.
+    #[serde(deserialize_with = "super::deserialize_workspace_id")]
+    pub workspace_id: WorkspaceId,
+    /// The selected package-network profile.
+    pub profile_id: Uuid,
+    pub profile_name: String,
+    pub profile_revision: u64,
+    /// SHA-256 of the exact request URL. The URL text is not recorded.
+    pub url_sha256: String,
+    /// The cache file name.
+    pub output_name: String,
+    /// The greatest response body accepted.
+    pub max_bytes: u64,
+    /// The request deadline.
+    pub timeout_ms: u64,
+}
+
+/// The audit outcome of a trusted package fetch.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackageFetchFinish {
+    pub fetch_id: Uuid,
+    pub outcome: PackageFetchOutcome,
+    /// The final HTTP status, when a response was received.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    /// Bytes written to the cache; zero unless the fetch completed.
+    pub bytes: u64,
+    /// SHA-256 of the cached bytes, when the fetch completed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+}
+
+/// How a trusted package fetch ended.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PackageFetchOutcome {
+    /// The file was written and synced to the cache.
+    Fetched,
+    /// The fetch failed after its intent was recorded.
+    Failed { reason: PackageFetchFailure },
+}
+
+/// A controlled package-fetch failure recorded in the outcome.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PackageFetchFailure {
+    /// The request could not be sent or read.
+    Transport,
+    /// The registry answered with a non-success status.
+    Status,
+    /// The body passed the size limit.
+    TooLarge,
+    /// The cache file could not be created, written, or published.
+    Cache,
+    /// The file was written, but its directory entry could not be synced.
+    Sync,
 }
 
 /// Parse one registry origin.
@@ -279,6 +347,70 @@ impl ControlStore {
         )?;
         Ok(profile_id)
     }
+
+    /// Record the intent of a trusted package fetch. This preserves the
+    /// settings revision; the fetch is audit, not configuration.
+    pub fn record_package_fetch_started(
+        &mut self,
+        start: PackageFetchStart,
+    ) -> Result<(), ControlError> {
+        validate_fetch_start(&start)?;
+        self.append(Action::PackageFetchStarted { start }, self.revision())
+    }
+
+    /// Record the outcome of a trusted package fetch. This preserves the
+    /// settings revision.
+    pub fn record_package_fetch_finished(
+        &mut self,
+        finish: PackageFetchFinish,
+    ) -> Result<(), ControlError> {
+        validate_fetch_finish(&finish)?;
+        self.append(Action::PackageFetchFinished { finish }, self.revision())
+    }
+}
+
+/// Whether `name` is a safe single cache file name. It is ASCII letters,
+/// digits, `.`, `-`, or `_`, starts and ends with a letter or digit, and is not
+/// a reserved Windows device name.
+pub fn valid_output_name(name: &str) -> bool {
+    if name.is_empty() || name.len() > MAX_PACKAGE_OUTPUT_BYTES {
+        return false;
+    }
+    let bytes = name.as_bytes();
+    if !bytes.first().is_some_and(u8::is_ascii_alphanumeric)
+        || !bytes.last().is_some_and(u8::is_ascii_alphanumeric)
+        || !bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+    {
+        return false;
+    }
+    let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
+    !matches!(
+        stem.as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    )
 }
 
 /// Validate and apply one package-profile action during replay or append
@@ -317,9 +449,66 @@ pub(super) fn apply(
                 ))?;
             state.package_profiles.remove(index);
         }
+        Action::PackageFetchStarted { start } => {
+            validate_fetch_start(start)
+                .map_err(|_| ControlError::Invalid("invalid package fetch start"))?;
+        }
+        Action::PackageFetchFinished { finish } => {
+            validate_fetch_finish(finish)
+                .map_err(|_| ControlError::Invalid("invalid package fetch finish"))?;
+        }
         _ => {}
     }
     Ok(())
+}
+
+fn validate_fetch_start(start: &PackageFetchStart) -> Result<(), ControlError> {
+    if !valid_uuid(start.fetch_id)
+        || !valid_uuid(start.profile_id)
+        || !valid_profile_name(&start.profile_name)
+        || start.profile_revision == 0
+        || !valid_digest(&start.url_sha256)
+        || !valid_output_name(&start.output_name)
+        || start.max_bytes == 0
+        || start.timeout_ms == 0
+    {
+        return Err(refused("a package fetch start is invalid"));
+    }
+    Ok(())
+}
+
+fn validate_fetch_finish(finish: &PackageFetchFinish) -> Result<(), ControlError> {
+    if !valid_uuid(finish.fetch_id)
+        || finish
+            .status
+            .is_some_and(|status| !(100..=599).contains(&status))
+    {
+        return Err(refused("a package fetch outcome is invalid"));
+    }
+    match finish.outcome {
+        PackageFetchOutcome::Fetched => {
+            if finish
+                .sha256
+                .as_deref()
+                .is_none_or(|digest| !valid_digest(digest))
+            {
+                return Err(refused("a fetched outcome needs a valid content digest"));
+            }
+        }
+        PackageFetchOutcome::Failed { .. } => {
+            if finish.bytes != 0 || finish.sha256.is_some() {
+                return Err(refused("a failed fetch records no cached bytes"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn valid_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
 /// Check everything about a profile that needs no network or filesystem.

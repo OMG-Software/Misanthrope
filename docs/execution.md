@@ -47,8 +47,9 @@ per-run disk quota exists, so the supervisor measures growth on a separate
 thread rather than the kernel enforcing a quota.
 
 The [package-network profile](#package-network-profile-contract-only) is
-recorded as configuration only (ADR-0034) since version 0.20.0. No run accepts
-one, and `--network` remains all-or-nothing.
+recorded as configuration only (ADR-0034) since version 0.20.0. Version 0.21.0
+adds a trusted `packages fetch` for declared origins; no run accepts a profile,
+`--network` remains all-or-nothing, and the run does not yet read the cache.
 
 ## Accepted decisions
 
@@ -250,6 +251,49 @@ variables and an advisory loopback proxy can be bypassed by a hostile tree.
 Candidate mechanisms for a later decision are a trusted host-side fetch into a
 private cache with an offline run, an OS destination filter, or a Linux-only
 network-namespace relay.
+
+### Trusted package fetch
+
+Version 0.21.0 adds a trusted operator fetch for declared origins; see
+[ADR-0035](adr/0035-fetch-packages-through-a-trusted-allowlisted-cache.md).
+It is never a model tool, and the confined run still has no network access.
+
+```text
+omgcode packages fetch <workspace-id> --profile <name> --url <url>
+    --name <cache-file> [--max-bytes <1-1073741824>]
+    [--timeout-secs <1-600>]
+```
+
+Before the request it checks:
+
+1. The workspace is registered and its live `task_network` preference is
+   enabled.
+2. The named package-network profile exists.
+3. The URL is absolute and matches a declared origin's scheme, host, port, and
+   path prefix. It has no credentials, query, or fragment. Normal use is
+   `https`; `http` is accepted only for a loopback test fixture.
+4. The cache name is one safe file name and the file does not already exist.
+5. The byte limit is 1 byte to 1 GiB and the deadline is 1 to 600 seconds.
+
+The request is one GET. Redirects are not followed, proxy environment
+variables are ignored, no credentials are sent, and nothing is retried. TLS
+uses the operating-system trust store through `reqwest`'s `native-tls`
+feature; certificate validation is never disabled. The response must be 2xx
+and its body is streamed, hashed with SHA-256, and stopped if it passes the
+byte limit.
+
+The file is written as a private `.partial-<fetch-id>` entry, synced, and
+renamed to `<data-dir>/package-cache/<workspace-id>/<cache-file>`. Existing
+names are never overwritten. The cache makes no power-loss claim. The control
+journal records `package_fetch_started` before the request and
+`package_fetch_finished` after it; both preserve the settings revision. They
+record the profile identity and revision, a SHA-256 of the URL (never its
+text), the cache name, limits, HTTP status, byte count, and content digest. A
+failure records a controlled reason. An abandoned fetch leaves its start
+record without a finish; nothing retries automatically.
+
+The run does not yet read this cache. Exposing it read-only to a run is a
+separate increment. Registry credentials remain unsupported.
 
 ## Container grants
 
@@ -865,11 +909,17 @@ These remain true after C6:
   `listen` on an unbound socket, which takes a port the kernel chooses. UDP
   bind is never limited. See
   [network access](#network-access).
-- **No package-network enforcement.** Package-network profiles are recorded as
-  configuration only (ADR-0034). No run accepts one, and it does not narrow
-  `--network`. A proxy or proxy environment variables are not a boundary: a
-  hostile tree can connect directly. See
-  [package-network profile](#package-network-profile-contract-only).
+- **No run destination enforcement.** Package-network profiles are recorded,
+  and the trusted [`packages fetch`](#trusted-package-fetch) command contacts
+  only declared origins. No run accepts a profile, `--network` remains
+  all-or-nothing, and the run does not yet read the package cache. A proxy or
+  proxy environment variables are not a boundary: a hostile tree can connect
+  directly.
+- **Package fetch limits.** The fetch is trusted-CLI only. It sends no
+  credentials, follows no redirects, ignores proxy variables, and uses the
+  system TLS store. The cache is private application storage, is not exposed
+  to runs, and makes no power-loss claim. Tests use loopback HTTP; a live
+  HTTPS registry is not qualified.
 - **Network coverage.** Network access was tested on Windows 11 build 26300
   and WSL 6.6 (Landlock ABI 3) only, including a TLS fetch with the system
   `curl` on both. The ABI 4 TCP-bind denial has not run on a live kernel.
@@ -922,11 +972,12 @@ These remain true after C6:
 | C7 (0.19.0) | Sampled disk-growth limit for every trusted run | Done: see [disk growth](#disk-growth) and ADR-0033 |
 | C8 (contract only, 0.19.0) | Package-network profile contract and implementation gate | Done as a contract: see [package-network profile](#package-network-profile-contract-only) and ADR-0034. No destination enforcement. |
 | C9 (0.20.0) | Package-network profile records | Done as configuration: `workspace package-profile-add/show/remove` and the control journal events. No run accepts a profile. |
+| C10 (0.21.0) | Trusted allowlisted package fetch | Done: see [trusted package fetch](#trusted-package-fetch) and ADR-0035. The run remains offline and does not yet read the cache. |
 
 Later work needs its own decisions:
 
-- an enforceable package-network destination mechanism, registry credentials,
-  and development-server networking;
+- exposing the package cache to runs read-only, registry credentials, and
+  development-server networking;
 - a model-callable command tool.
 
 Live qualification on each supported OS remains a separate gate.

@@ -118,6 +118,8 @@ zero-based sequence, UTC timestamp, global revision, and tagged `action`:
 | `profile_removed` | Remove a toolchain profile; increment revision |
 | `package_profile_added` | New package-network profile; increment revision |
 | `package_profile_removed` | Remove a package-network profile; increment revision |
+| `package_fetch_started` | Trusted package-fetch intent; preserve revision |
+| `package_fetch_finished` | Trusted package-fetch outcome; preserve revision |
 
 Operational file checks do not append `policy_checked`. They use current
 settings and their separate [operation journal](file-access.md). This prevents
@@ -185,6 +187,13 @@ authorizes network access. Version 0.19.0 refuses a settings log that records
 one; a 0.20.0 control journal cannot be read by 0.19.0. The
 [execution guide](execution.md#package-network-profile-contract-only) owns the
 contract and the remaining enforcement gate.
+
+A trusted `packages fetch` appends `package_fetch_started` and
+`package_fetch_finished` events. They preserve the settings revision. They
+record the profile identity and revision, a SHA-256 of the request URL (never
+the URL text), the cache name, limits, HTTP status, byte count, and content
+digest. A failed fetch records a controlled reason; an abandoned fetch leaves
+its start event. A control journal written by 0.21.0 cannot be read by 0.20.0.
 
 ## Task network
 

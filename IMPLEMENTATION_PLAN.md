@@ -60,9 +60,11 @@ This is a resume guide, not a replacement for the owning contracts in
   **0.19.0**, with a sampled net disk-growth limit for every trusted run.
 - This branch, `codex/package-network-profile`: **Phase C8** at `16d8945`,
   the contract-only package-network profile and implementation gate
-  (ADR-0034), plus **Phase C9**, version **0.20.0**, with operator-declared
-  package-network profile records. It is stacked on C7 at `0426e42`. No run
-  accepts a profile and no destination filter exists.
+  (ADR-0034), **Phase C9**, version **0.20.0**, with operator-declared
+  package-network profile records, and **Phase C10**, version **0.21.0**, with
+  the trusted allowlisted package fetch and private cache (ADR-0035). It is
+  stacked on C7 at `0426e42`. No run accepts a profile or reads the cache, and
+  no run destination filter exists.
 
 Implemented today:
 
@@ -134,6 +136,11 @@ Implemented today:
   contract and implementation gate (ADR-0034). Version 0.20.0 records
   operator-declared profiles as configuration only. No run accepts a profile,
   no destination filter exists, and `--network` remains all-or-nothing.
+- A trusted [`packages fetch`](docs/execution.md#trusted-package-fetch)
+  command (ADR-0035). It contacts only declared origins, refuses redirects and
+  credentials, bounds and hashes the response, writes a private per-workspace
+  cache, and records the intent and outcome. The run remains offline and does
+  not yet read the cache.
 - Trusted `file restore` through a new checkpoint and
   `file delete-checkpoint --permanent` for one resolved checkpoint, on the same
   filesystems as apply. Neither is power-loss qualified. See
@@ -493,11 +500,17 @@ on Windows, and trusted CLI commands as the first caller. See
   profile records. Profiles are stored through the control journal, with
   revisions and strict origin validation. They are configuration only; no run
   accepts one and no destination filter exists.
+- **C10 (this branch, version 0.21.0):** the trusted allowlisted package
+  fetch. The user selected a trusted host-side fetch into a private cache. The
+  command contacts only declared origins, refuses redirects and credentials,
+  bounds and hashes the body, and audits the intent and outcome. The run
+  remains offline and does not read the cache. See
+  [ADR-0035](docs/adr/0035-fetch-packages-through-a-trusted-allowlisted-cache.md).
 
 Next decisions, not yet scheduled:
 
-- an enforceable package-network mechanism, registry credentials, and
-  development-server networking (see ADR-0034);
+- exposing the package cache to runs read-only, registry credentials, and
+  development-server networking;
 - a model-callable command tool with per-call approval.
 
 ### Phase D: additional providers, streaming, and account lifecycle

@@ -33,8 +33,10 @@ pub use container::{
 /// Whether this platform can record and apply container grants.
 pub use omgcode_platform::container::CONTAINER_GRANTS_SUPPORTED;
 pub use package::{
-    MAX_PACKAGE_ORIGIN_BYTES, MAX_PACKAGE_ORIGINS, MAX_PACKAGE_PROFILES, PackageOrigin,
+    MAX_PACKAGE_ORIGIN_BYTES, MAX_PACKAGE_ORIGINS, MAX_PACKAGE_OUTPUT_BYTES, MAX_PACKAGE_PROFILES,
+    PackageFetchFailure, PackageFetchFinish, PackageFetchOutcome, PackageFetchStart, PackageOrigin,
     PackageProfile, PackageProfileDeclaration, PackageProfileStatus, PackageScheme, parse_origin,
+    valid_output_name,
 };
 pub use profile::{
     MAX_PROFILE_NAME_CHARS, MAX_PROFILE_PATH_ENTRIES, MAX_PROFILE_ROOTS, MAX_PROFILE_VARIABLES,
@@ -276,6 +278,12 @@ enum Action {
     },
     PackageProfileRemoved {
         profile_id: Uuid,
+    },
+    PackageFetchStarted {
+        start: PackageFetchStart,
+    },
+    PackageFetchFinished {
+        finish: PackageFetchFinish,
     },
 }
 
@@ -847,6 +855,8 @@ impl ControlStore {
                 | Action::ContainerGrantApplied { .. }
                 | Action::ContainerRevokeRequested { .. }
                 | Action::ContainerGrantRevoked { .. }
+                | Action::PackageFetchStarted { .. }
+                | Action::PackageFetchFinished { .. }
         );
         let revision = if configuration_change {
             state
@@ -933,7 +943,10 @@ impl ControlStore {
             Action::ProfileAdded { .. } | Action::ProfileRemoved { .. } => {
                 profile::apply(state, &entry.action, revision)?;
             }
-            Action::PackageProfileAdded { .. } | Action::PackageProfileRemoved { .. } => {
+            Action::PackageProfileAdded { .. }
+            | Action::PackageProfileRemoved { .. }
+            | Action::PackageFetchStarted { .. }
+            | Action::PackageFetchFinished { .. } => {
                 package::apply(state, &entry.action, revision)?;
             }
         }

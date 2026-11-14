@@ -49,3 +49,4 @@ meaningful alternative does not need an ADR.
 | [0032: Allow outbound network for trusted runs through task_network](0032-allow-outbound-network-for-trusted-runs-through-task-network.md) | Accepted | 2026-11-13 |
 | [0033: Bound run disk growth by sampling writable roots](0033-bound-run-disk-growth-by-sampling-writable-roots.md) | Accepted | 2026-11-13 |
 | [0034: Gate package networking behind enforceable destination control](0034-gate-package-networking-behind-enforceable-destination-control.md) | Accepted | 2026-11-13 |
+| [0035: Fetch packages through a trusted allowlisted cache](0035-fetch-packages-through-a-trusted-allowlisted-cache.md) | Accepted | 2026-11-13 |

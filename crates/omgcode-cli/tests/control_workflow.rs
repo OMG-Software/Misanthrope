@@ -450,6 +450,7 @@ fn capabilities_report_configuration_only_policy_and_trusted_runs_only() {
     assert_eq!(capabilities["toolchain_profiles"], runs);
     assert_eq!(capabilities["package_network_profiles"], true);
     assert_eq!(capabilities["package_network_enforcement"], false);
+    assert_eq!(capabilities["package_fetch"], true);
     if runs {
         assert_eq!(capabilities["process_execution"], "trusted_cli_only");
     } else {

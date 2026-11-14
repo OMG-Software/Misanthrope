@@ -129,7 +129,9 @@ allowlist. The
 [package-network profile](execution.md#package-network-profile-contract-only)
 is recorded as configuration only (ADR-0034): `workspace
 package-profile-add/show/remove` store registry origins, but no run accepts a
-profile, and a proxy or proxy environment variables are not a boundary.
+profile, and a proxy or proxy environment variables are not a boundary. The
+trusted `packages fetch` command contacts only declared origins and writes a
+private cache; the run remains offline and does not yet read that cache.
 Registry credentials require a narrow reviewed credential path. Offline tasks
 must work with available dependencies or explain which download is needed.
 
@@ -158,12 +160,13 @@ cancellation, denied host-data access, and disabled networking. Include missing
 dependencies, spaces and native path forms, stale tool profiles, concurrent
 builds, disk exhaustion, and hostile build/package scripts.
 
-The package-network acceptance case cannot run yet. Profiles are recorded as
-configuration only (ADR-0034), and no runtime mechanism narrows destinations.
-A future implementation must prove that an approved profile reaches its
-declared registry destinations and rejects every other destination, including
-direct IP, IPv6, UDP, DNS, and proxy-bypass paths. Model-provider connectivity
-alone must not enable package or general task traffic.
+The trusted `packages fetch` command is covered by core and CLI tests. The
+run-side package-network acceptance case still cannot run: no run accepts a
+profile, and no run reads the fetch cache. A future implementation must prove
+that an approved profile reaches its declared registry destinations and
+rejects every other destination, including direct IP, IPv6, UDP, DNS, and
+proxy-bypass paths. Model-provider connectivity alone must not enable package
+or general task traffic.
 
 Record the selected profile with task results so failures are reproducible.
 Do not claim general support from locating an executable or printing its version.
@@ -184,9 +187,9 @@ yet:
 - disk exhaustion under concurrent writers, and inode, directory-entry, or
   metadata exhaustion; the sampled disk limit is tested with ordinary file
   growth;
-- package downloads through `--network`, and rejection of undeclared
-  destinations, because there is no destination allowlist and the
-  package-network profile is contract only (ADR-0034);
+- package downloads through a run's `--network`, and rejection of undeclared
+  destinations, because there is no destination allowlist; the trusted
+  `packages fetch` path is separate and the run does not read its cache;
 - hostile package scripts beyond the hostile programs.
 
 The Java case has not run on either host. The registry case also remains open.
