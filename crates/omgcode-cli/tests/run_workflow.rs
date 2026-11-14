@@ -871,21 +871,25 @@ fn a_tree_limit_ends_the_run_and_is_recorded() {
 fn a_disk_limit_ends_the_run_and_is_recorded() {
     let scene = Scene::new();
     assert_success(&scene.add_profile("system", &[]));
-    // The source exists before the run, so the baseline counts it. Copying it
-    // inside the writable workspace adds bytes the disk limit must see. Both
-    // commands then wait to be stopped.
+    // The source exists before the run, so the baseline counts it. Growing the
+    // writable workspace adds bytes the disk limit must see; each command then
+    // waits to be stopped.
+    #[cfg(target_os = "linux")]
     let source = scene.workspace.join("growth-source.bin");
+    #[cfg(target_os = "linux")]
     fs::write(&source, vec![0u8; 32 * 1024 * 1024]).expect("growth source");
     #[cfg(target_os = "linux")]
     let script = "cp growth-source.bin growth.bin; while :; do :; done";
+    // `fsutil` sets the logical length directly. A 32 MiB copy was slow or
+    // failed on the Windows CI runner before the sampler saw growth.
     #[cfg(windows)]
-    let script = "copy /b growth-source.bin growth.bin >nul & for /l %i in (1,0,2) do @rem";
+    let script = "fsutil file createnew growth.bin 33554432 >nul & for /l %i in (1,0,2) do @rem";
     let options = [
         "--max-disk-mib",
         "16",
         "--max-memory-mib",
         "512",
-        // Copying 32 MiB and sampling once a second can outlast the normal
+        // Creating 32 MiB and sampling once a second can outlast the normal
         // 10-second CLI deadline on a loaded runner. Bound the run itself so
         // a missed disk limit still records a deadline instead of leaving the
         // run pending when the harness stops the CLI.
@@ -895,10 +899,11 @@ fn a_disk_limit_ends_the_run_and_is_recorded() {
     let run = run_json(&scene.run_for("system", &options, &shell(script), Duration::from_secs(60)));
     assert_eq!(
         run["start"]["limits"]["max_disk_bytes"],
-        16u64 * 1024 * 1024
+        16u64 * 1024 * 1024,
+        "{run}"
     );
-    assert_eq!(run["finish"]["result"]["kind"], "limit_exceeded");
-    assert_eq!(run["finish"]["result"]["limit"], "disk");
+    assert_eq!(run["finish"]["result"]["kind"], "limit_exceeded", "{run}");
+    assert_eq!(run["finish"]["result"]["limit"], "disk", "{run}");
     assert!(
         run["finish"]["usage"]["peak_disk_bytes"]
             .as_u64()
