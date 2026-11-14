@@ -22,8 +22,13 @@ Changes are recorded here before a release version is assigned.
   - **Records:** the session journal records the tool intent/result; the run
     journal records the run. A failed run consumes the approval; no replay
     executes a recorded call.
-  - **Not qualified:** a successful native command on both hosts as a
-    model-tool acceptance case; the gate and run hand-off are tested.
+  - **Qualified:** a successful approved command through the real chat CLI on
+    both hosts. A mock provider requests the platform shell's `echo`; the first
+    turn records `approval_required`, the operator approves, and the second
+    identical turn consumes the record and runs the command through the trusted
+    runner. The test asserts an `exited` result with code 0, the bounded output,
+    the session tool result, and the consumed approval. On Linux the CLI starts
+    in a delegated cgroup; on Windows the scene grants the workspace.
 - Version 0.24.0 records provider profiles and trusted per-call approvals.
   See ADR-0038 and ADR-0039.
   - **Provider profiles:** `workspace provider-profile-add/show/remove` record

@@ -80,9 +80,11 @@ native confinement remain the authority and the only process path.
   for the exact arguments before approving; the tool intent is untrusted
   evidence.
 - The tests cover parsing, the permission gate, approval creation, consumption,
-  and the run hand-off. They do not qualify a successful native command on both
-  hosts; the existing trusted-run tests and future acceptance work remain
-  separate.
+  and the run hand-off. A CLI acceptance test now drives the real chat process
+  through both turns with a mock provider and an operator approval, then runs a
+  successful confined command through the trusted runner on both Linux and
+  Windows. It needs a delegated cgroup on Linux and a workspace container grant
+  on Windows; a host without them fails the case rather than skipping it.
 - A model command can return up to 4 KiB per stream; the turn's result and
   aggregate limits still apply, and a larger result is replaced with a
   controlled `output_too_large` result.

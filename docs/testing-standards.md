@@ -159,7 +159,7 @@ As the relevant components are implemented, include:
 | Windows confinement | Granted read-only and read-write paths, denied host files, directories, named pipe, and loopback TCP, a writable container temporary directory, inheritance by descendants, the same probes unconfined, missing, weaker, and foreign grants, a missing profile, `LOCALAPPDATA`, or container name, refused `HostServices`, an ungranted program |
 | Container grants | SID derivation, propagation to existing and new children, exact read-back, protection state kept, junctions not followed, hard-link reach, refused replaced/junction/file/relative paths, profile creation and deletion, journal intent and outcome order, replay validation, revision rules, scope refusals, pending and revoking recovery, the revocation reserve, CLI grant/list/revoke, refusal off Windows |
 | Model tool chat | Preference off by default and rechecked per call, settings compatibility, confinement against parent, absolute, rooted, UNC, link, junction, and hard-link paths, strict provider tool-call parsing, token removal before journal and model, refusal of token-bearing calls, withheld replay after revocation, finish reason, one call per turn in escape cases |
-| Model command tool | Strict profile/program/argument/cwd parsing, tool advertised only with live model-tools/execute/read/write, first call records a pending approval and starts nothing, denial, approval consumption, exact digest and binding, settings-revision invalidation, run hand-off failure, output bounds, and no replay |
+| Model command tool | Strict profile/program/argument/cwd parsing, tool advertised only with live model-tools/execute/read/write, first call records a pending approval and starts nothing, denial, approval consumption, exact digest and binding, settings-revision invalidation, run hand-off failure, output bounds, and no replay. An end-to-end CLI case drives the real chat process, a mock provider, an operator approval, and the trusted runner to a successful confined command on both hosts |
 | MCP | Version/transport compatibility, authorization, untrusted content, local confinement, OAuth/redirects, cancellation |
 | LM Studio | Model discovery, token/no-token profiles, streamed tools, context limits, unavailable models, no hosted-tool bypass |
 | Instructions | Compiled base/UI/request match, runtime replacement denial, role-injection attempts, preference/task precedence, revisions, safe rendering |
@@ -178,7 +178,15 @@ Completions request and rejects any tool call in the reply. It requires the
 compiled base prompt and accepts only a literal loopback HTTP endpoint. The
 adapter is not a permission boundary: the CLI selects tool mode from the live
 `model_tools` preference, and the runtime rechecks that preference before each
-call. The turn-runtime tests use a scripted model interface. The tool-enabled chat tests
+call. An end-to-end acceptance case starts the real chat CLI under a delegated
+cgroup on Linux, has the mock provider request the platform shell's `echo`,
+approves the recorded call between turns, and asserts that the second identical
+turn consumes the approval and runs the command through the trusted runner to
+an `exited` result with code 0 and the expected output. On Windows the scene
+grants the workspace. The case needs those host facilities and fails without
+them; it does not qualify confinement correctness, which the platform suites
+own. It passed on Windows 11 build 26300 and WSL 6.6 (Ubuntu 24.04) on
+2026-11-14. The turn-runtime tests use a scripted model interface. The tool-enabled chat tests
 use a mock that returns the documented OpenAI-compatible tool-call shape; they
 do not establish live LM Studio tool-call compatibility. A single opt-in spot-check
 with LM Studio 0.4.28 and `google/gemma-4-e4b` on Windows is recorded in the implementation plan. Model discovery, streaming, cancellation, and

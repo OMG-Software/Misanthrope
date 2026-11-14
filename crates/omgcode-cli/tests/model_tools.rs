@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+use support::run_scene::{Scene, run_command, shell};
 use support::workspace_fixture::Fixture;
 use support::{
     CLI_DEADLINE, HANG_FIXTURE_ENV, assert_error_code, assert_success, json_output, path_arg,
@@ -579,6 +580,158 @@ fn revoking_read_denies_model_reads_even_with_tools_enabled() {
     let events = fs::read_to_string(&journal).expect("journal");
     assert!(events.contains("permission_denied"));
     assert!(!events.contains(std::str::from_utf8(NOTE).expect("UTF-8 note")));
+}
+
+/// Start chat under the delegated cgroup a confined run needs.
+///
+/// A chat turn can perform an approved model command in the same process, and
+/// on Linux the trusted runner refuses a process outside a delegated cgroup.
+/// `run_command` places the CLI in a `Delegate=yes` scope there and is a plain
+/// CLI launcher on Windows.
+fn scoped_chat(scene: &Scene, journal: &Path, endpoint: &str, message: &str) -> Output {
+    let journal = path_arg(journal);
+    let arguments = [
+        "chat",
+        "--journal",
+        journal,
+        "--endpoint",
+        endpoint,
+        "--model",
+        "fixture",
+        "--context-tokens",
+        "131072",
+        "--max-output-tokens",
+        "64",
+        message,
+    ];
+    let result = run_with_deadline(
+        run_command(&scene.data, &arguments),
+        Duration::from_secs(60),
+    )
+    .expect("run OMGCode chat");
+    assert!(
+        !result.timed_out,
+        "chat exceeded its deadline: stdout={} stderr={}",
+        String::from_utf8_lossy(&result.output.stdout),
+        String::from_utf8_lossy(&result.output.stderr)
+    );
+    result.output
+}
+
+/// The full operator flow: the model asks for one command, the operator
+/// approves the exact request between turns, and the approved turn runs a real
+/// confined program through the trusted runner on the host.
+#[test]
+fn an_approved_model_command_runs_successfully_through_the_trusted_runner() {
+    let scene = Scene::build(true, true);
+    for permission in ["--read", "--write", "--model-tools"] {
+        scene.set_permission(permission, "true");
+    }
+    assert_success(&scene.add_profile("system", &[]));
+
+    let session = scene.cli(&["session", "new", "--workspace", path_arg(&scene.workspace)]);
+    assert_success(&session);
+    let journal = PathBuf::from(json_output(&session)["journal"].as_str().expect("journal"));
+
+    // The platform shell is the program; the tool itself has no shell mode and
+    // passes every argument exactly as the model provided it.
+    let command = shell("echo approved");
+    let request = json!({
+        "profile": "system",
+        "program": command[0],
+        "arguments": &command[1..],
+    });
+
+    let server = SequenceServer::start(vec![
+        tool_call("call-1", "workspace_run_command", &request),
+        text("Waiting for operator approval."),
+    ]);
+    let first = scoped_chat(&scene, &journal, &server.endpoint, "run the command");
+    let requests = server.finish();
+
+    assert_success(&first);
+    let first = json_output(&first);
+    assert_eq!(first["reply"]["content"], "Waiting for operator approval.");
+    assert_eq!(first["model_tools"]["tool_calls"], 1);
+    assert_eq!(requests.len(), 2);
+    let offered = requests[0]["tools"].to_string();
+    assert!(
+        offered.contains("workspace_run_command"),
+        "the command tool must be offered: {offered}"
+    );
+
+    let listed = scene.cli(&["approvals", "list"]);
+    assert_success(&listed);
+    let approvals = json_output(&listed)["approvals"]
+        .as_array()
+        .expect("approvals")
+        .to_vec();
+    assert_eq!(approvals.len(), 1, "one pending request: {approvals:?}");
+    assert_eq!(approvals[0]["operation"], "command");
+    assert_eq!(approvals[0]["state"], "pending");
+    let approval = approvals[0]["id"].as_str().expect("approval id").to_owned();
+    assert_success(&scene.cli(&["approvals", "approve", &approval]));
+
+    let server = SequenceServer::start(vec![
+        tool_call("call-2", "workspace_run_command", &request),
+        text("The command finished."),
+    ]);
+    let second = scoped_chat(&scene, &journal, &server.endpoint, "run the command");
+    let requests = server.finish();
+
+    assert_success(&second);
+    let second = json_output(&second);
+    assert_eq!(second["reply"]["content"], "The command finished.");
+    assert_eq!(second["model_tools"]["tool_calls"], 1);
+    assert_eq!(requests.len(), 2);
+    let result = user_texts(&requests[1])
+        .into_iter()
+        .find(|text| text.starts_with("Tool result [call call-2"))
+        .expect("executed command result sent to the model");
+    assert!(
+        result.contains("\"status\":\"executed\""),
+        "the model must receive the executed result: {result}"
+    );
+    let expected_stdout = if cfg!(windows) {
+        "\"stdout\":\"approved\\r\\n\""
+    } else {
+        "\"stdout\":\"approved\\n\""
+    };
+    assert!(
+        result.contains(expected_stdout),
+        "the confined program output must reach the model: {result}"
+    );
+
+    let events = fs::read_to_string(&journal).expect("session journal");
+    assert!(events.contains("tool.completed"));
+    assert!(
+        events.contains("\\\"status\\\":\\\"executed\\\""),
+        "the session journal must record the executed result: {events}"
+    );
+
+    let audit = scene.audit();
+    assert_eq!(audit["pending"], json!([]));
+    let finished: Vec<&Value> = audit["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .filter(|entry| entry["action"]["type"] == "run_finished")
+        .collect();
+    assert_eq!(finished.len(), 1, "exactly one run: {audit}");
+    assert_eq!(
+        finished[0]["action"]["payload"]["finish"]["result"],
+        json!({"kind": "exited", "code": 0}),
+        "the confined program must exit successfully"
+    );
+
+    let listed = scene.cli(&["approvals", "list"]);
+    assert_success(&listed);
+    let listed = json_output(&listed);
+    let approvals = listed["approvals"].as_array().expect("approvals");
+    assert_eq!(approvals.len(), 1);
+    assert_eq!(approvals[0]["state"], "consumed");
+
+    scene.close();
 }
 
 #[test]

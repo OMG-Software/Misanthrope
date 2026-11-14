@@ -669,8 +669,11 @@ run that fails after consumption uses the approval.
 Output is untrusted and bounded. The session journal records the tool intent
 and result; the run journal records the run. No replay executes a recorded
 call. The model can request but cannot approve; the CLI approval commands are
-the operator surface, and there is no approval UI. A successful native command
-on both hosts remains a separate qualification.
+the operator surface, and there is no approval UI. A CLI acceptance test runs
+one approved command through the real chat process, a mock provider, and the
+trusted runner on both Linux and Windows, and asserts a successful exit, the
+bounded output, and the consumed approval. On Linux the chat process starts in
+a delegated cgroup; on Windows the test scene grants the workspace.
 
 ### Toolchain profiles
 
@@ -988,9 +991,11 @@ These remain true after C6:
   limits, network, or host services. It uses a 20-second deadline and 4 KiB
   per output stream. The operator flow spans two turns, and no approval UI
   exists. A denied exact request stays denied for the current settings
-  revision; a failed run consumes the approval. The gate and hand-off are
-  tested, but a successful native command on both hosts is not yet qualified
-  as a model-tool acceptance case.
+  revision; a failed run consumes the approval. A CLI acceptance test runs one
+  approved command through the real chat process and the trusted runner on
+  both hosts; it needs a delegated cgroup on Linux and a workspace container
+  grant on Windows. Confinement correctness remains the platform suites'
+  responsibility.
 - **Network coverage.** Network access was tested on Windows 11 build 26300
   and WSL 6.6 (Landlock ABI 3) only, including a TLS fetch with the system
   `curl` on both. The ABI 4 TCP-bind denial has not run on a live kernel.
@@ -1047,12 +1052,11 @@ These remain true after C6:
 | C11 (0.22.0) | Read-only package cache for Linux runs | Superseded by C12: Linux exposure moved to the per-workspace root, with an application-storage fallback. |
 | C12 (0.23.0) | Per-workspace package cache root and scoped Windows grant | Done: see [trusted package fetch](#trusted-package-fetch) and ADR-0037. Windows needs a read-execute grant on the workspace root. |
 | C13 (0.24.0) | Provider profiles and trusted approval records | Done: see the [provider authentication guide](provider-authentication.md#recorded-provider-profiles-0240) and [approval records](agent-instructions.md#approval-records). No adapter or model tool executed. |
-| C14 (0.25.0) | Approval-gated model command tool | Done: see [model command tool](#model-command-tool) and ADR-0040. A successful native command still needs its own qualification. |
+| C14 (0.25.0) | Approval-gated model command tool | Done: see [model command tool](#model-command-tool) and ADR-0040. A CLI acceptance test qualifies one successful approved command on both hosts; confinement correctness remains the platform suites' responsibility. |
 
 Later work needs its own decisions:
 
 - registry credentials and development-server networking;
 - model write, network, Git, and MCP tools;
-- native successful-command qualification for the model tool.
 
 Live qualification on each supported OS remains a separate gate.
