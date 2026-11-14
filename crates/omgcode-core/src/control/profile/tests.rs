@@ -216,10 +216,6 @@ fn replay_refuses_inconsistent_profile_records() {
             "no roots",
             Box::new(|profile| profile.read_only_roots.clear()),
         ),
-        (
-            "reserved variable",
-            Box::new(|profile| profile.environment[0].name = "Path".into()),
-        ),
         ("nil id", Box::new(|profile| profile.id = Uuid::nil())),
     ];
     for (label, mutate) in mutations {
@@ -251,6 +247,49 @@ fn replay_refuses_inconsistent_profile_records() {
     unknown.push(removal);
     write_entries(&scene.data, &unknown);
     assert!(ControlStore::open(&scene.data).is_err(), "unknown removal");
+}
+
+#[test]
+fn a_new_profile_cannot_declare_a_runner_variable() {
+    let mut scene = scene();
+    let mut declaration = declaration(&scene);
+    declaration
+        .environment
+        .push(("OMGCODE_PACKAGE_CACHE".into(), "legacy".into()));
+    assert!(matches!(
+        scene.store.add_profile(&declaration, 1),
+        Err(ControlError::ProfileRefused(_))
+    ));
+}
+
+#[test]
+fn a_legacy_profile_with_a_runner_variable_still_replays() {
+    let mut scene = scene();
+    scene
+        .store
+        .add_profile(&declaration(&scene), 1)
+        .expect("profile");
+    let entries = scene.store.entries.clone();
+    drop(scene.store);
+    let mut legacy = entries;
+    let last = legacy.last_mut().expect("profile event");
+    let Action::ProfileAdded { profile } = &mut last.action else {
+        panic!("expected a profile event");
+    };
+    profile.environment.push(ProfileVariable {
+        name: "OMGCODE_PACKAGE_CACHE".into(),
+        value: "legacy-value".into(),
+    });
+    write_entries(&scene.data, &legacy);
+    let store = ControlStore::open(&scene.data).expect("legacy profile replays");
+    let profile = store.profile("tools").expect("profile");
+    assert!(
+        profile
+            .profile()
+            .environment()
+            .iter()
+            .any(|variable| variable.name() == "OMGCODE_PACKAGE_CACHE")
+    );
 }
 
 #[test]

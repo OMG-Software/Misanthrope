@@ -26,6 +26,7 @@ use uuid::{Uuid, Version};
 use crate::policy::WorkspaceId;
 use crate::session::NativePath;
 use crate::storage::{self, StorageError};
+use crate::workspace::DirectoryRecord;
 
 const FILE_NAME: &str = "runs-v1.jsonl";
 const SCHEMA_VERSION: u32 = 1;
@@ -184,6 +185,16 @@ pub struct RunStart {
     /// since 0.22.0. False and earlier runs omit it.
     #[serde(default, skip_serializing_if = "is_false")]
     pub package_cache: bool,
+    /// The configured package cache root the run was exposed to, since
+    /// 0.26.0. A cache-root change withdraws the run. Earlier runs omit it;
+    /// a recorded root appearing later is treated as a change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) package_cache_root: Option<DirectoryRecord>,
+    /// Whether this run was requested by a model tool and therefore also
+    /// requires the live `model_tools` preference, since 0.26.0. Earlier runs
+    /// omit it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub model_origin: bool,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -232,7 +243,7 @@ enum RunAction {
     /// Bind the journal to one control store. Always first.
     Created,
     RunStarted {
-        start: RunStart,
+        start: Box<RunStart>,
     },
     RunFinished {
         run_id: Uuid,
@@ -426,7 +437,9 @@ impl RunJournal {
         if self.state.pending.len() >= MAX_PENDING_RUNS {
             return Err(RunJournalError::TooManyPending);
         }
-        self.append(RunAction::RunStarted { start })
+        self.append(RunAction::RunStarted {
+            start: Box::new(start),
+        })
     }
 
     /// Record a run's outcome. `CleanupUnconfirmed` keeps it pending.
@@ -455,7 +468,7 @@ impl RunJournal {
         self.entries
             .iter()
             .filter_map(|entry| match &entry.action {
-                RunAction::RunStarted { start } => Some(start),
+                RunAction::RunStarted { start } => Some(start.as_ref()),
                 _ => None,
             })
             .filter(|start| {

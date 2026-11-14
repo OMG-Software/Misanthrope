@@ -180,9 +180,21 @@ pub fn fetch(data_root: &Path, request: &FetchRequest) -> Result<FetchReport, Fe
             root.live_path()
                 .map_err(|_| FetchError::Refused("the package cache root is unavailable"))?
         }
-        None => data_root
-            .join("package-cache")
-            .join(request.workspace_id.to_string()),
+        None => {
+            #[cfg(target_os = "linux")]
+            {
+                data_root
+                    .join("package-cache")
+                    .join(request.workspace_id.to_string())
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = data_root;
+                return Err(FetchError::Refused(
+                    "a package cache root must be selected before fetching on this platform",
+                ));
+            }
+        }
     };
     storage::create_private_directories(&cache)
         .map_err(|error| FetchError::Cache(io::Error::other(error.to_string())))?;
@@ -304,6 +316,22 @@ fn matching_origin(profile: &PackageProfile, url: &Url) -> Result<(), FetchError
     Ok(())
 }
 
+/// Publish a completed private partial under a new cache name without
+/// replacing an existing entry. A hard link is one atomic no-replace
+/// operation in the same directory; a concurrent winner leaves this caller
+/// with `AlreadyCached`. The cache is not power-loss qualified.
+fn publish_cache_file(temporary: &Path, final_path: &Path, name: &str) -> Result<(), FetchError> {
+    fs::hard_link(temporary, final_path).map_err(|error| {
+        if fs::symlink_metadata(final_path).is_ok() {
+            FetchError::AlreadyCached(name.to_owned())
+        } else {
+            FetchError::Cache(error)
+        }
+    })?;
+    let _ = fs::remove_file(temporary);
+    Ok(())
+}
+
 fn perform(
     start: &PackageFetchStart,
     url: &Url,
@@ -311,6 +339,7 @@ fn perform(
     final_path: &Path,
 ) -> Result<(FetchReport, u16), FailedFetch> {
     let timeout = Duration::from_millis(start.timeout_ms);
+    let deadline = Instant::now() + timeout;
     let client = Client::builder()
         .no_proxy()
         .redirect(Policy::none())
@@ -350,6 +379,20 @@ fn perform(
     let mut bytes = 0u64;
     let mut buffer = vec![0u8; READ_CHUNK];
     loop {
+        // reqwest's timeout bounds each read, not the whole response. A
+        // server that trickles bytes must not extend the fetch indefinitely.
+        if Instant::now() >= deadline {
+            drop(file);
+            let _ = fs::remove_file(&temporary);
+            return Err(FailedFetch {
+                error: FetchError::Body(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "the package fetch deadline passed",
+                )),
+                reason: PackageFetchFailure::Transport,
+                status: Some(http_status),
+            });
+        }
         let read = match response.read(&mut buffer) {
             Ok(0) => break,
             Ok(read) => read,
@@ -396,7 +439,9 @@ fn perform(
 
     // The cache is private to the user; a same-user writer can already change
     // it. Refuse a name that appeared after the pre-check, and publish with a
-    // rename. No power-loss claim is made for this cache.
+    // hard link so two concurrent fetches cannot replace each other's file.
+    // The link fails atomically when the destination exists. No power-loss
+    // claim is made for this cache.
     match fs::symlink_metadata(final_path) {
         Ok(_) => {
             let _ = fs::remove_file(&temporary);
@@ -416,14 +461,8 @@ fn perform(
             });
         }
     }
-    if let Err(error) = fs::rename(&temporary, final_path) {
+    if let Err(error) = publish_cache_file(&temporary, final_path, &start.output_name) {
         let _ = fs::remove_file(&temporary);
-        let already = fs::symlink_metadata(final_path).is_ok();
-        let error = if already {
-            FetchError::AlreadyCached(start.output_name.clone())
-        } else {
-            FetchError::Cache(error)
-        };
         return Err(FailedFetch {
             error,
             reason: PackageFetchFailure::Cache,

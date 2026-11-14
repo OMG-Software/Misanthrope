@@ -1348,6 +1348,7 @@ impl WorkspaceToolDispatcher<'_> {
             working_directory: cwd.as_ref().map(PathBuf::from),
             host_services: false,
             network: false,
+            model_tools: true,
             limits: command_limits(),
         };
         let digest = command_digest(self.session_id, &request);
@@ -1567,10 +1568,11 @@ fn command_summary(profile: &str, program: &str, arguments: usize) -> String {
         .unwrap_or(program);
     let mut summary = format!("run {profile}/{label} ({arguments} arguments)");
     if summary.len() > 180 {
-        summary.truncate(180);
-        while !summary.is_char_boundary(summary.len()) {
-            summary.pop();
+        let mut end = 180;
+        while !summary.is_char_boundary(end) {
+            end -= 1;
         }
+        summary.truncate(end);
     }
     summary
 }
@@ -1740,4 +1742,18 @@ fn validate_relative_path(path: &str, allow_empty: bool) -> Result<(), ToolCallE
         return Err(ToolCallError::InvalidPath);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod summary_tests {
+    use super::command_summary;
+
+    #[test]
+    fn a_command_summary_truncates_on_a_utf8_boundary() {
+        let program = format!("{}{}", "a".repeat(168), 'é');
+        let summary = command_summary("system", &program, 3);
+        assert!(summary.len() <= 180);
+        assert!(summary.is_char_boundary(summary.len()));
+        assert!(summary.starts_with("run system/"));
+    }
 }

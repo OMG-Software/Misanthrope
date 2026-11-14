@@ -37,6 +37,9 @@ const STOP_CHECK: Duration = Duration::from_millis(100);
 /// Most entries one sample may examine. A larger tree fails closed because the
 /// supervisor cannot finish the measurement it started.
 const MAX_SAMPLED_ENTRIES: usize = 4_000_000;
+/// Longest one scan may run. A slow filesystem fails the measurement rather
+/// than delaying cancellation or the final outcome without a bound.
+const MAX_SCAN_TIME: Duration = Duration::from_secs(30);
 
 /// Disk usage measured above the run's baseline.
 pub(super) struct DiskMonitor {
@@ -117,7 +120,7 @@ impl DiskMonitor {
                 "a disk limit needs at least one writable path",
             ));
         }
-        let baseline = measure(&roots, None).map_err(ProcessError::DiskMeasurement)?;
+        let baseline = measure(&roots, None, None).map_err(ProcessError::DiskMeasurement)?;
         Ok(Some(Self {
             state: Arc::new(DiskState::default()),
             thread: None,
@@ -175,7 +178,7 @@ impl DiskMonitor {
             allocated: self.baseline.allocated.saturating_add(self.limit),
             logical: self.baseline.logical.saturating_add(self.limit),
         };
-        let measured = measure(&self.roots, Some(ceiling))?;
+        let measured = measure(&self.roots, Some(ceiling), None)?;
         self.record(&measured);
         Ok(())
     }
@@ -247,7 +250,7 @@ fn sample_until_stopped(
         if state.stop.load(Ordering::SeqCst) {
             return;
         }
-        match measure(roots, Some(ceiling)) {
+        match measure(roots, Some(ceiling), Some(&state.stop)) {
             Ok(measured) => {
                 let growth = measured
                     .allocated
@@ -258,6 +261,11 @@ fn sample_until_stopped(
                     state.exceeded.store(true, Ordering::SeqCst);
                     return;
                 }
+            }
+            Err(_) if state.stop.load(Ordering::SeqCst) => {
+                // Cancellation interrupted this scan. That is not a
+                // measurement failure; the supervisor is already stopping.
+                return;
             }
             Err(error) => {
                 // Only the first error matters; the supervisor stops the tree.
@@ -316,9 +324,15 @@ fn disk_roots(confinement: &Confinement) -> io::Result<Vec<PathBuf>> {
     Ok(outer)
 }
 
-/// Sum the bytes under `roots`, stopping once a ceiling is passed.
-fn measure(roots: &[PathBuf], ceiling: Option<Ceiling>) -> io::Result<Measured> {
-    measure_entries(roots, ceiling, MAX_SAMPLED_ENTRIES)
+/// Sum the bytes under `roots`, stopping once a ceiling is passed or `stop`
+/// is set. A stopped scan reports an interrupted measurement; the caller
+/// must not record that as a failure while it is already stopping.
+fn measure(
+    roots: &[PathBuf],
+    ceiling: Option<Ceiling>,
+    stop: Option<&AtomicBool>,
+) -> io::Result<Measured> {
+    measure_entries(roots, ceiling, MAX_SAMPLED_ENTRIES, stop)
 }
 
 /// [`measure`] with an explicit entry budget, so the fail-closed bound can be
@@ -327,13 +341,28 @@ fn measure_entries(
     roots: &[PathBuf],
     ceiling: Option<Ceiling>,
     max_entries: usize,
+    stop: Option<&AtomicBool>,
 ) -> io::Result<Measured> {
+    let stopped = || stop.is_some_and(|flag| flag.load(Ordering::SeqCst));
+    let scan_deadline = Instant::now() + MAX_SCAN_TIME;
     let mut allocated = 0u64;
     let mut logical = 0u64;
     let mut exhausted = false;
     let mut examined = 0usize;
     let mut pending: Vec<PathBuf> = roots.to_vec();
     while let Some(path) = pending.pop() {
+        if stopped() {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "the disk sample was cancelled",
+            ));
+        }
+        if Instant::now() >= scan_deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the disk measurement exceeded its time budget",
+            ));
+        }
         examined = examined.saturating_add(1);
         if examined > max_entries {
             return Err(io::Error::other(
@@ -356,6 +385,26 @@ fn measure_entries(
                 Err(error) => return Err(error),
             };
             for entry in entries {
+                if stopped() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Interrupted,
+                        "the disk sample was cancelled",
+                    ));
+                }
+                if Instant::now() >= scan_deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "the disk measurement exceeded its time budget",
+                    ));
+                }
+                // Reserve each queued path against the same budget before
+                // allocating it, so a directory with millions of children
+                // cannot exhaust memory before the budget check runs.
+                if examined.saturating_add(pending.len()).saturating_add(1) > max_entries {
+                    return Err(io::Error::other(
+                        "the writable roots have too many entries to measure for the disk limit",
+                    ));
+                }
                 match entry {
                     Ok(entry) => pending.push(entry.path()),
                     Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -474,7 +523,7 @@ mod tests {
         fs::create_dir(&nested).expect("nested directory");
         write_file(directory.path(), "one.txt", 4096);
         write_file(&nested, "two.txt", 8192);
-        let measured = measure(&[directory.path().to_path_buf()], None).expect("measure");
+        let measured = measure(&[directory.path().to_path_buf()], None, None).expect("measure");
         assert!(!measured.exceeded);
         assert!(
             measured.allocated >= 12 * 1024 && measured.logical >= 12 * 1024,
@@ -492,6 +541,7 @@ mod tests {
                 allocated: 1,
                 logical: 1,
             }),
+            None,
         )
         .expect("measure past the ceiling");
         assert!(measured.exceeded);
@@ -510,7 +560,7 @@ mod tests {
         {
             std::os::unix::fs::symlink(directory.path(), directory.path().join("loop"))
                 .expect("symbolic link");
-            let measured = measure(&[directory.path().to_path_buf()], None).expect("measure");
+            let measured = measure(&[directory.path().to_path_buf()], None, None).expect("measure");
             assert!(!measured.exceeded);
             assert!(
                 measured.allocated >= 4096 && measured.logical >= 4096,
@@ -518,7 +568,7 @@ mod tests {
             );
         }
         // A root that disappears measures nothing rather than failing.
-        let measured = measure(&[missing], None).expect("measure a missing root");
+        let measured = measure(&[missing], None, None).expect("measure a missing root");
         assert_eq!(measured.allocated, 0);
         assert_eq!(measured.logical, 0);
     }
@@ -550,7 +600,7 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary directory");
         write_file(directory.path(), "one.txt", 4096);
         let root = directory.path().to_path_buf();
-        let error = measure_entries(std::slice::from_ref(&root), None, 1)
+        let error = measure_entries(std::slice::from_ref(&root), None, 1, None)
             .expect_err("the entry budget was exceeded");
         assert!(error.to_string().contains("too many entries"), "{error}");
     }
@@ -566,11 +616,32 @@ mod tests {
         write_file(&locked, "one.txt", 4096);
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o000))
             .expect("remove permissions");
-        let measured = measure(&[directory.path().to_path_buf()], None);
+        let measured = measure(&[directory.path().to_path_buf()], None, None);
         // Restore access before the temporary directory is removed.
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o700))
             .expect("restore permissions");
         assert!(measured.is_err(), "an unreadable directory was measured");
+    }
+
+    #[test]
+    fn a_cancelled_measurement_reports_interruption() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        write_file(directory.path(), "one.txt", 4096);
+        let stop = AtomicBool::new(true);
+        let error = measure(&[directory.path().to_path_buf()], None, Some(&stop))
+            .expect_err("a stopped scan must not report success");
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+    }
+
+    #[test]
+    fn a_directory_with_more_children_than_the_budget_is_refused_before_queuing() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        for index in 0..20 {
+            write_file(directory.path(), &format!("file-{index}.txt"), 1);
+        }
+        let error = measure_entries(&[directory.path().to_path_buf()], None, 5, None)
+            .expect_err("the entry budget was exceeded");
+        assert!(error.to_string().contains("too many entries"), "{error}");
     }
 
     #[test]
@@ -585,8 +656,9 @@ mod tests {
         };
         let roots = disk_roots(&confinement).expect("roots");
         assert_eq!(roots, vec![directory.path().to_path_buf()]);
-        let outer = measure(&roots, None).expect("measure the outer root");
-        let inner = measure(std::slice::from_ref(&nested), None).expect("measure the nested root");
+        let outer = measure(&roots, None, None).expect("measure the outer root");
+        let inner =
+            measure(std::slice::from_ref(&nested), None, None).expect("measure the nested root");
         assert_eq!(outer.allocated, inner.allocated);
         assert_eq!(outer.logical, inner.logical);
     }

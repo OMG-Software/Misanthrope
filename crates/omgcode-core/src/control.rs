@@ -586,6 +586,14 @@ impl ControlStore {
         }) {
             return Ok(());
         }
+        self.refuse_foreign_cache_grant(workspace_id, &directory)?;
+        if omgcode_platform::container::CONTAINER_GRANTS_SUPPORTED
+            && let Some(previous) = self.package_cache_root(workspace_id).cloned()
+        {
+            for grant in self.cache_root_grants(workspace_id, &previous)? {
+                self.revoke_container_grant(grant)?;
+            }
+        }
         self.append(
             Action::PackageCacheRootSet {
                 workspace_id,
@@ -607,18 +615,71 @@ impl ControlStore {
         if self.workspace(workspace_id).is_none() {
             return Err(ControlError::UnknownWorkspace);
         }
-        if !self
-            .snapshot
-            .package_cache_roots
-            .iter()
-            .any(|existing| existing.workspace_id == workspace_id)
-        {
+        let Some(previous) = self.package_cache_root(workspace_id).cloned() else {
             return Ok(());
+        };
+        if omgcode_platform::container::CONTAINER_GRANTS_SUPPORTED {
+            for grant in self.cache_root_grants(workspace_id, &previous)? {
+                self.revoke_container_grant(grant)?;
+            }
         }
         self.append(
             Action::PackageCacheRootCleared { workspace_id },
             self.next_revision()?,
         )?;
+        Ok(())
+    }
+
+    /// Read-execute grants of this workspace that cover `root`, or the cache
+    /// itself, in either direction. A cache-root transition must revoke them
+    /// before the new selection takes effect.
+    fn cache_root_grants(
+        &self,
+        workspace_id: WorkspaceId,
+        root: &DirectoryRecord,
+    ) -> Result<Vec<Uuid>, ControlError> {
+        let mut grants = Vec::new();
+        for status in self.container_grants() {
+            let grant = status.grant();
+            if grant.workspace_id() != workspace_id
+                || grant.access() != ContainerGrantAccess::ReadExecute
+            {
+                continue;
+            }
+            let directory = grant.directory();
+            if directory.same_directory(root)
+                || directory.contains(root)?
+                || root.contains(directory)?
+            {
+                grants.push(grant.id());
+            }
+        }
+        Ok(grants)
+    }
+
+    /// Refuse a root that another workspace's container can already read.
+    fn refuse_foreign_cache_grant(
+        &self,
+        workspace_id: WorkspaceId,
+        root: &DirectoryRecord,
+    ) -> Result<(), ControlError> {
+        for status in self.container_grants() {
+            let grant = status.grant();
+            if grant.workspace_id() == workspace_id
+                || grant.access() != ContainerGrantAccess::ReadExecute
+            {
+                continue;
+            }
+            let directory = grant.directory();
+            if directory.same_directory(root)
+                || directory.contains(root)?
+                || root.contains(directory)?
+            {
+                return Err(ControlError::PackageCacheRefused(
+                    "another workspace's container already has access to this directory",
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -1222,6 +1283,43 @@ mod tests {
             store.check_file_policy(&binding, &request),
             Err(ControlError::LimitReached)
         ));
+    }
+
+    /// A cache-root change must find grants that covered the old root and
+    /// refuse a new root another workspace can already read.
+    #[test]
+    fn cache_root_changes_select_covering_grants_and_refuse_foreign_access() {
+        let directory = tempfile::tempdir().expect("private temporary directory");
+        let data = directory.path().join("data");
+        let root = directory.path().join("projects");
+        fs::create_dir_all(root.join("first")).expect("development root");
+        fs::create_dir_all(root.join("second")).expect("development root");
+        let mut store = ControlStore::open(&data).expect("control store");
+        store.set_development_root(&root, 0).expect("root");
+        let first = store
+            .register_workspace(&root.join("first"), 1)
+            .expect("first workspace")
+            .id();
+        let second = store
+            .register_workspace(&root.join("second"), store.revision())
+            .expect("second workspace")
+            .id();
+        let cache = directory.path().join("cache");
+        fs::create_dir(&cache).expect("cache root");
+        let nested = cache.join("nested");
+        fs::create_dir(&nested).expect("nested cache root");
+        let foreign = store.test_record_grant(second, &cache, ContainerGrantAccess::ReadExecute);
+        let nested_record = DirectoryRecord::capture(&nested).expect("nested record");
+        assert!(matches!(
+            store.refuse_foreign_cache_grant(first, &nested_record),
+            Err(ControlError::PackageCacheRefused(_))
+        ));
+        let own = store.test_record_grant(first, &cache, ContainerGrantAccess::ReadExecute);
+        let grants = store
+            .cache_root_grants(first, &nested_record)
+            .expect("covering grants");
+        assert!(grants.contains(&own), "{grants:?}");
+        assert!(!grants.contains(&foreign), "{grants:?}");
     }
 
     /// A failed write must leave acknowledged state unchanged and disable the writer.

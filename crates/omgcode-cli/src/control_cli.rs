@@ -255,7 +255,10 @@ pub(crate) fn run(action: WorkspaceCommand, data_root: &Path) -> Result<(), CliE
             store
                 .set_package_cache_root(workspace_id, &path, revision)
                 .map_err(control_error)?;
-            print_json(&store.snapshot())
+            let snapshot = store.snapshot();
+            drop(store);
+            stop_withdrawn_runs(data_root, &[])?;
+            print_json(&snapshot)
         }
         WorkspaceCommand::ClearPackageCache {
             workspace,
@@ -267,7 +270,10 @@ pub(crate) fn run(action: WorkspaceCommand, data_root: &Path) -> Result<(), CliE
             store
                 .clear_package_cache_root(workspace_id, revision)
                 .map_err(control_error)?;
-            print_json(&store.snapshot())
+            let snapshot = store.snapshot();
+            drop(store);
+            stop_withdrawn_runs(data_root, &[])?;
+            print_json(&snapshot)
         }
         WorkspaceCommand::Register { path, revision } => {
             let mut store = open(data_root)?;

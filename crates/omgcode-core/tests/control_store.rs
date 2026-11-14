@@ -542,12 +542,14 @@ fn package_cache_root_is_recorded_replayed_cleared_and_scoped() {
     store
         .set_package_cache_root(workspace_id, &cache_root, revision)
         .expect("cache root");
-    assert!(
-        serde_json::to_value(store.snapshot())
-            .expect("snapshot")
-            .get("package_cache_roots")
-            .is_some()
-    );
+    let recorded = serde_json::to_value(store.snapshot()).expect("snapshot");
+    let recorded_root = recorded["package_cache_roots"]
+        .as_array()
+        .expect("cache roots")
+        .first()
+        .expect("selected root")
+        .clone();
+    assert_eq!(recorded_root["workspace_id"], workspace_id.to_string());
     let revision = store.revision();
     assert!(matches!(
         store.set_package_cache_root(workspace_id, &inside, revision),
@@ -570,11 +572,20 @@ fn package_cache_root_is_recorded_replayed_cleared_and_scoped() {
     drop(store);
 
     let mut store = ControlStore::open(&fixture.data).expect("replay");
-    assert!(
-        serde_json::to_value(store.snapshot())
-            .expect("snapshot")
-            .get("package_cache_roots")
-            .is_some()
+    let replayed = serde_json::to_value(store.snapshot()).expect("snapshot");
+    let replayed_root = replayed["package_cache_roots"]
+        .as_array()
+        .expect("cache roots")
+        .first()
+        .expect("selected root")
+        .clone();
+    assert_eq!(
+        replayed_root["workspace_id"], recorded_root["workspace_id"],
+        "replay changed the workspace mapping"
+    );
+    assert_eq!(
+        replayed_root["directory"], recorded_root["directory"],
+        "replay changed the selected directory or its identity"
     );
     let revision = store.revision();
     store
