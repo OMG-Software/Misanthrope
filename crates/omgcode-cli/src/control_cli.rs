@@ -27,6 +27,20 @@ pub(crate) enum WorkspaceCommand {
         #[arg(long)]
         revision: u64,
     },
+    /// Select one workspace's fetched-package cache root, outside application
+    /// storage and the development root.
+    SetPackageCache {
+        workspace: String,
+        path: PathBuf,
+        #[arg(long)]
+        revision: u64,
+    },
+    /// Clear one workspace's package cache root. Cached files are left in place.
+    ClearPackageCache {
+        workspace: String,
+        #[arg(long)]
+        revision: u64,
+    },
     /// Register a workspace below the configured development root.
     Register {
         path: PathBuf,
@@ -203,6 +217,31 @@ pub(crate) fn run(action: WorkspaceCommand, data_root: &Path) -> Result<(), CliE
             drop(store);
             stop_withdrawn_runs(data_root, &[])?;
             print_json(&snapshot)
+        }
+        WorkspaceCommand::SetPackageCache {
+            workspace,
+            path,
+            revision,
+        } => {
+            let workspace_id = parse_workspace_id(&workspace)?;
+            let mut store = open_existing(data_root)?
+                .ok_or_else(|| CliError::new("control", "Workspace control is not initialized"))?;
+            store
+                .set_package_cache_root(workspace_id, &path, revision)
+                .map_err(control_error)?;
+            print_json(&store.snapshot())
+        }
+        WorkspaceCommand::ClearPackageCache {
+            workspace,
+            revision,
+        } => {
+            let workspace_id = parse_workspace_id(&workspace)?;
+            let mut store = open_existing(data_root)?
+                .ok_or_else(|| CliError::new("control", "Workspace control is not initialized"))?;
+            store
+                .clear_package_cache_root(workspace_id, revision)
+                .map_err(control_error)?;
+            print_json(&store.snapshot())
         }
         WorkspaceCommand::Register { path, revision } => {
             let mut store = open(data_root)?;

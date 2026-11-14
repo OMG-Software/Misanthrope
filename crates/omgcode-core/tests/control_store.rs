@@ -513,3 +513,82 @@ fn malformed_control_journals_fail_without_repair() {
         expect_invalid_unchanged(&data);
     }
 }
+
+/// One workspace's package cache root is a revisioned setting. It must be
+/// existing, outside application storage, outside the development root, and
+/// not overlap another workspace's cache root.
+#[test]
+fn package_cache_root_is_recorded_replayed_cleared_and_scoped() {
+    let fixture = fixture();
+    let cache_root = fixture._temporary.path().join("package-cache-root");
+    fs::create_dir(&cache_root).expect("cache root");
+    let nested = cache_root.join("nested");
+    fs::create_dir(&nested).expect("nested cache root");
+    let inside = fixture.root.join("cache-inside");
+    fs::create_dir(&inside).expect("inside development root");
+    let mut store = ControlStore::open(&fixture.data).expect("store");
+    store
+        .set_development_root(&fixture.root, 0)
+        .expect("development root");
+    let workspace_id = store
+        .register_workspace(&fixture.workspace, store.revision())
+        .expect("workspace")
+        .id();
+    let second_id = store
+        .register_workspace(&fixture.second_workspace, store.revision())
+        .expect("second workspace")
+        .id();
+    let revision = store.revision();
+    store
+        .set_package_cache_root(workspace_id, &cache_root, revision)
+        .expect("cache root");
+    assert!(
+        serde_json::to_value(store.snapshot())
+            .expect("snapshot")
+            .get("package_cache_roots")
+            .is_some()
+    );
+    let revision = store.revision();
+    assert!(matches!(
+        store.set_package_cache_root(workspace_id, &inside, revision),
+        Err(ControlError::PackageCacheRefused(_))
+    ));
+    assert!(matches!(
+        store.set_package_cache_root(workspace_id, &fixture.data, revision),
+        Err(ControlError::StorageOverlap)
+    ));
+    assert!(matches!(
+        store.set_package_cache_root(second_id, &nested, revision),
+        Err(ControlError::PackageCacheRefused(_))
+    ));
+    let missing = fixture._temporary.path().join("missing-cache");
+    assert!(
+        store
+            .set_package_cache_root(workspace_id, &missing, revision)
+            .is_err()
+    );
+    drop(store);
+
+    let mut store = ControlStore::open(&fixture.data).expect("replay");
+    assert!(
+        serde_json::to_value(store.snapshot())
+            .expect("snapshot")
+            .get("package_cache_roots")
+            .is_some()
+    );
+    let revision = store.revision();
+    store
+        .clear_package_cache_root(workspace_id, revision)
+        .expect("clear cache root");
+    assert!(
+        serde_json::to_value(store.snapshot())
+            .expect("snapshot")
+            .get("package_cache_roots")
+            .is_none()
+    );
+    let revision = store.revision();
+    store
+        .clear_package_cache_root(workspace_id, revision)
+        .expect("idempotent clear");
+    assert_eq!(store.revision(), revision);
+}

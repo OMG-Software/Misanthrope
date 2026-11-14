@@ -1025,7 +1025,7 @@ fn network_access(request: &RunRequest) -> NetworkAccess {
 #[cfg(target_os = "linux")]
 #[allow(clippy::too_many_arguments)]
 fn platform_setup(
-    _control: &ControlStore,
+    control: &ControlStore,
     request: &RunRequest,
     _workspace_record: &DirectoryRecord,
     workspace: &Path,
@@ -1064,7 +1064,7 @@ fn platform_setup(
     read_only.extend(support_paths.iter().cloned());
     // Expose only this workspace's fetched-package cache. Application storage
     // otherwise stays outside the run's view.
-    let package_cache = package_cache_path(data_root, request.workspace_id);
+    let package_cache = package_cache_path(control, data_root, request.workspace_id);
     if let Some(cache) = &package_cache {
         read_only.push(cache.clone());
         environment.push(("OMGCODE_PACKAGE_CACHE".into(), cache.as_os_str().to_owned()));
@@ -1089,12 +1089,37 @@ fn platform_setup(
 }
 
 /// The private package cache for one workspace, when it exists as a plain
-/// directory. A link or other entry is not exposed.
-#[cfg(target_os = "linux")]
-fn package_cache_path(data_root: &Path, workspace_id: WorkspaceId) -> Option<PathBuf> {
-    let path = data_root
-        .join("package-cache")
-        .join(workspace_id.to_string());
+/// directory. A configured root outside application storage takes precedence.
+/// Linux falls back to its application-storage cache; Windows has no fallback.
+/// A link or other entry is not exposed.
+fn package_cache_path(
+    control: &ControlStore,
+    data_root: &Path,
+    workspace_id: WorkspaceId,
+) -> Option<PathBuf> {
+    let path = match control.package_cache_root(workspace_id) {
+        Some(root) => {
+            if !root.is_current().ok()? {
+                return None;
+            }
+            root.live_path().ok()?
+        }
+        None => {
+            #[cfg(target_os = "linux")]
+            {
+                data_root
+                    .join("package-cache")
+                    .join(workspace_id.to_string())
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = data_root;
+                return None;
+            }
+        }
+    };
+    // Normalize a recorded Windows path to the drive-letter form tools accept.
+    let path = native_form(path).ok()?;
     match fs::symlink_metadata(&path) {
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => Some(path),
         _ => None,
@@ -1117,7 +1142,7 @@ fn platform_setup(
     workspace_record: &DirectoryRecord,
     workspace: &Path,
     roots: Vec<PathBuf>,
-    _data_root: &Path,
+    data_root: &Path,
     _run_id: Uuid,
     environment: &mut Vec<(OsString, OsString)>,
 ) -> Result<(Confinement, Option<Scratch>, Vec<PathBuf>, bool), RunError> {
@@ -1138,14 +1163,20 @@ fn platform_setup(
     }
     environment.push(("HOME".into(), home.clone().into_os_string()));
     environment.push(("USERPROFILE".into(), home.into_os_string()));
+    let package_cache = package_cache_path(control, data_root, request.workspace_id);
+    let mut read_only = roots;
+    if let Some(cache) = &package_cache {
+        read_only.push(cache.clone());
+        environment.push(("OMGCODE_PACKAGE_CACHE".into(), cache.as_os_str().to_owned()));
+    }
     let confinement = Confinement {
-        read_only: roots,
+        read_only,
         read_write: vec![workspace.to_path_buf()],
         unix_sockets: UnixSocketAccess::PairsOnly,
         network: network_access(request),
         container: Some(name),
     };
-    Ok((confinement, None, Vec::new(), false))
+    Ok((confinement, None, Vec::new(), package_cache.is_some()))
 }
 
 #[cfg(not(any(target_os = "linux", windows)))]

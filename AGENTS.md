@@ -20,8 +20,9 @@ CPU-time, and sampled net disk-growth limits; on Linux the CLI must run in a
 delegated cgroup v2. The disk limit measures writable roots and is not a
 filesystem quota. Package-network profiles are recorded as configuration only;
 no run uses them. The trusted `packages fetch` command downloads from declared
-origins into a private cache. Linux runs can read only their workspace's cache;
-Windows does not expose it. Trusted CLI
+origins into a per-workspace cache. A selected root is exposed read-only on
+Linux and Windows; Windows needs a read-execute container grant, and Linux
+falls back to application storage. Trusted CLI
 commands record, apply, and revoke Windows container ACL grants. Follow the
 [execution contract](docs/execution.md).
 The bundled web interface and most planned features are not implemented.

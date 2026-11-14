@@ -116,6 +116,9 @@ pub enum ControlError {
     /// The requested package-network profile is invalid.
     #[error("package-network profile refused: {0}")]
     PackageProfileRefused(&'static str),
+    /// The requested package cache root is invalid or overlaps protected data.
+    #[error("package cache root refused: {0}")]
+    PackageCacheRefused(&'static str),
 }
 
 impl From<StorageError> for ControlError {
@@ -173,11 +176,23 @@ pub struct ControlSnapshot {
     profiles: Vec<ProfileStatus>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     package_profiles: Vec<PackageProfileStatus>,
+    /// Operator-selected fetched-package roots, one per workspace, outside
+    /// application storage and the development root.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    package_cache_roots: Vec<PackageCacheRootStatus>,
     /// Container revocations requested per workspace since the journal was
     /// created. Derived on replay and never serialized; run watchers compare
     /// it with the count when their run started.
     #[serde(skip)]
     grant_revocations: BTreeMap<WorkspaceId, u64>,
+}
+
+/// One workspace's selected fetched-package cache root.
+#[derive(Clone, Debug, Serialize)]
+pub struct PackageCacheRootStatus {
+    workspace_id: WorkspaceId,
+    directory: DirectoryRecord,
+    revision: u64,
 }
 
 /// Operator-facing workspace view that reports every preference explicitly.
@@ -284,6 +299,15 @@ enum Action {
     },
     PackageFetchFinished {
         finish: PackageFetchFinish,
+    },
+    PackageCacheRootSet {
+        #[serde(deserialize_with = "deserialize_workspace_id")]
+        workspace_id: WorkspaceId,
+        directory: DirectoryRecord,
+    },
+    PackageCacheRootCleared {
+        #[serde(deserialize_with = "deserialize_workspace_id")]
+        workspace_id: WorkspaceId,
     },
 }
 
@@ -451,6 +475,7 @@ impl ControlStore {
                 container_grants: Vec::new(),
                 profiles: Vec::new(),
                 package_profiles: Vec::new(),
+                package_cache_roots: Vec::new(),
                 grant_revocations: BTreeMap::new(),
             },
             entries: Vec::new(),
@@ -472,6 +497,91 @@ impl ControlStore {
     /// Whether the user has explicitly selected a development root.
     pub const fn has_development_root(&self) -> bool {
         self.snapshot.development_root.is_some()
+    }
+
+    /// Select the fetched-package cache directory for one workspace. It must
+    /// exist, must not overlap application storage, must not overlap the
+    /// development root, and must not overlap another workspace's cache root.
+    pub fn set_package_cache_root(
+        &mut self,
+        workspace_id: WorkspaceId,
+        path: &Path,
+        expected_revision: u64,
+    ) -> Result<(), ControlError> {
+        self.check_revision(expected_revision)?;
+        if self.workspace(workspace_id).is_none() {
+            return Err(ControlError::UnknownWorkspace);
+        }
+        let directory = DirectoryRecord::capture(path)?;
+        self.check_storage_overlap(&directory)?;
+        let development = self
+            .snapshot
+            .development_root
+            .as_ref()
+            .ok_or(ControlError::NoRoot)?;
+        if development.contains(&directory)? || directory.contains(development)? {
+            return Err(ControlError::PackageCacheRefused(
+                "the package cache root must not overlap the development root",
+            ));
+        }
+        for existing in &self.snapshot.package_cache_roots {
+            if existing.workspace_id != workspace_id
+                && (existing.directory.contains(&directory)?
+                    || directory.contains(&existing.directory)?)
+            {
+                return Err(ControlError::PackageCacheRefused(
+                    "package cache roots must not overlap another workspace's root",
+                ));
+            }
+        }
+        if self.snapshot.package_cache_roots.iter().any(|existing| {
+            existing.workspace_id == workspace_id && existing.directory.same_directory(&directory)
+        }) {
+            return Ok(());
+        }
+        self.append(
+            Action::PackageCacheRootSet {
+                workspace_id,
+                directory,
+            },
+            self.next_revision()?,
+        )?;
+        Ok(())
+    }
+
+    /// Clear one workspace's package cache root. This advances the settings
+    /// revision only when a root was recorded. Cached files are left in place.
+    pub fn clear_package_cache_root(
+        &mut self,
+        workspace_id: WorkspaceId,
+        expected_revision: u64,
+    ) -> Result<(), ControlError> {
+        self.check_revision(expected_revision)?;
+        if self.workspace(workspace_id).is_none() {
+            return Err(ControlError::UnknownWorkspace);
+        }
+        if !self
+            .snapshot
+            .package_cache_roots
+            .iter()
+            .any(|existing| existing.workspace_id == workspace_id)
+        {
+            return Ok(());
+        }
+        self.append(
+            Action::PackageCacheRootCleared { workspace_id },
+            self.next_revision()?,
+        )?;
+        Ok(())
+    }
+
+    /// The selected package cache root for one workspace, if any.
+    pub(crate) fn package_cache_root(&self, workspace_id: WorkspaceId) -> Option<&DirectoryRecord> {
+        self.snapshot
+            .package_cache_roots
+            .iter()
+            .find(|status| status.workspace_id == workspace_id)
+            .map(|status| &status.directory)
     }
     /// Look up descriptive workspace metadata by its stable identifier.
     pub fn workspace(&self, id: WorkspaceId) -> Option<&WorkspaceRegistration> {
@@ -948,6 +1058,43 @@ impl ControlStore {
             | Action::PackageFetchStarted { .. }
             | Action::PackageFetchFinished { .. } => {
                 package::apply(state, &entry.action, revision)?;
+            }
+            Action::PackageCacheRootSet {
+                workspace_id,
+                directory,
+            } => {
+                if !directory.validate_shape()
+                    || !state
+                        .workspaces
+                        .iter()
+                        .any(|workspace| workspace.id == *workspace_id)
+                {
+                    return Err(ControlError::Invalid("invalid package cache root"));
+                }
+                if let Some(existing) = state
+                    .package_cache_roots
+                    .iter_mut()
+                    .find(|status| status.workspace_id == *workspace_id)
+                {
+                    existing.directory = directory.clone();
+                    existing.revision = revision;
+                } else {
+                    state.package_cache_roots.push(PackageCacheRootStatus {
+                        workspace_id: *workspace_id,
+                        directory: directory.clone(),
+                        revision,
+                    });
+                }
+            }
+            Action::PackageCacheRootCleared { workspace_id } => {
+                let index = state
+                    .package_cache_roots
+                    .iter()
+                    .position(|status| status.workspace_id == *workspace_id)
+                    .ok_or(ControlError::Invalid(
+                        "clearing an unknown package cache root",
+                    ))?;
+                state.package_cache_roots.remove(index);
             }
         }
         state.revision = revision;

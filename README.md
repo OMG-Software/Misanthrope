@@ -38,11 +38,12 @@ directory grants.
 > as service and credential-agent sockets. Package-network profiles can be
 > recorded as configuration only (ADR-0034); no run uses them and they do not
 > narrow network access. The trusted `packages fetch` command downloads from
-> declared origins into a private cache; the run remains offline and does not
-> yet read that cache on Windows. On Linux a run can read only its workspace's
-> cache through `OMGCODE_PACKAGE_CACHE`. Runs have memory, process-count,
-> CPU-time, and sampled disk-growth limits; the disk limit is not a filesystem
-> quota. See [command execution](docs/execution.md#tree-limits).
+> declared origins into a private per-workspace cache. A selected cache root
+> is exposed read-only on Linux and Windows; Windows needs a read-execute
+> container grant, and Linux falls back to application storage when no root is
+> selected. Runs have memory, process-count, CPU-time, and sampled disk-growth
+> limits; the disk limit is not a filesystem quota. See
+> [command execution](docs/execution.md#tree-limits).
 
 ## Goals
 

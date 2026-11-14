@@ -14,7 +14,7 @@
 use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -170,7 +170,20 @@ pub fn fetch(data_root: &Path, request: &FetchRequest) -> Result<FetchReport, Fe
     let url =
         Url::parse(&request.url).map_err(|_| FetchError::Refused("the URL must be absolute"))?;
     matching_origin(profile, &url)?;
-    let cache = cache_directory(data_root, request.workspace_id);
+    let cache = match control.package_cache_root(request.workspace_id) {
+        Some(root) => {
+            if !root.is_current().unwrap_or(false) {
+                return Err(FetchError::Refused(
+                    "the package cache root is stale; set it again",
+                ));
+            }
+            root.live_path()
+                .map_err(|_| FetchError::Refused("the package cache root is unavailable"))?
+        }
+        None => data_root
+            .join("package-cache")
+            .join(request.workspace_id.to_string()),
+    };
     storage::create_private_directories(&cache)
         .map_err(|error| FetchError::Cache(io::Error::other(error.to_string())))?;
     let final_path = cache.join(&request.name);
@@ -256,12 +269,6 @@ fn validate_request(request: &FetchRequest) -> Result<(), FetchError> {
         return Err(FetchError::Refused("the cache name is invalid"));
     }
     Ok(())
-}
-
-fn cache_directory(data_root: &Path, workspace_id: WorkspaceId) -> PathBuf {
-    data_root
-        .join("package-cache")
-        .join(workspace_id.to_string())
 }
 
 /// Require the URL to match a declared origin and path prefix, with no

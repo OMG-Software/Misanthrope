@@ -234,9 +234,11 @@ crate.
   contact only a declared origin and path prefix, must disable redirects and
   proxy variables, send no credentials, cap and hash the response, and write
   only the private per-workspace cache. Record the intent and outcome without
-  the URL text. A Linux run may read only the per-workspace cache subtree; do
-  not expose its parent, journals, settings, or another workspace. Do not
-  expose the cache on a platform that cannot enforce the same boundary.
+  the URL text. A run may read only the selected per-workspace cache root; do
+  not expose its parent, journals, settings, or another workspace's root. On
+  Windows the root needs a read-execute container grant, and overlapping cache
+  roots are refused. Do not expose the cache on a platform that cannot
+  enforce the same boundary.
 - Assemble and validate a complete structured tool call before dispatch.
   Validate names, arguments, limits, session scope, and provider call identity.
   A provider adapter must parse provider JSON strictly; the core runtime then

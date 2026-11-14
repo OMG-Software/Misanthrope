@@ -1,6 +1,6 @@
 # 0036: Expose the package fetch cache read-only to Linux runs
 
-- Status: Accepted
+- Status: Superseded by ADR-0037
 - Date: 2026-11-14
 
 ## Context
@@ -85,3 +85,4 @@ container grant.
 - [Security coding rules](../security-coding-rules.md#process-and-sandbox-boundary)
 - [Testing standards](../testing-standards.md)
 - [ADR-0035](0035-fetch-packages-through-a-trusted-allowlisted-cache.md)
+- Superseded by [ADR-0037](0037-use-a-per-workspace-cache-root-and-a-scoped-windows-grant.md)

@@ -130,9 +130,11 @@ allowlist. The
 is recorded as configuration only (ADR-0034): `workspace
 package-profile-add/show/remove` store registry origins, but no run accepts a
 profile, and a proxy or proxy environment variables are not a boundary. The
-trusted `packages fetch` command contacts only declared origins and writes a
-private cache. On Linux, a run can read only its workspace's cache through
-`OMGCODE_PACKAGE_CACHE`; on Windows the cache is not exposed. Tool-specific
+trusted `packages fetch` command contacts only declared origins and writes
+into the selected per-workspace cache root. A run can read only that root
+through `OMGCODE_PACKAGE_CACHE`; Windows needs a read-execute container grant,
+and Linux falls back to application storage when no root is selected.
+Tool-specific
 configuration to use that directory is operator work. Registry credentials
 require a narrow reviewed credential path. Offline tasks
 must work with available dependencies or explain which download is needed.
@@ -164,7 +166,8 @@ builds, disk exhaustion, and hostile build/package scripts.
 
 The trusted `packages fetch` command is covered by core and CLI tests. The
 run-side package-network acceptance case still cannot run: no run accepts a
-profile, and no run reads the fetch cache. A future implementation must prove
+profile. A run can read the selected cache root, but run-side destination
+scoping is still missing. A future implementation must prove
 that an approved profile reaches its declared registry destinations and
 rejects every other destination, including direct IP, IPv6, UDP, DNS, and
 proxy-bypass paths. Model-provider connectivity alone must not enable package
@@ -191,7 +194,8 @@ yet:
   growth;
 - package downloads through a run's `--network`, and rejection of undeclared
   destinations, because there is no destination allowlist; the trusted
-  `packages fetch` path is separate and the run does not read its cache;
+  `packages fetch` path is separate and the run can read only the selected
+  cache root, not use run-side package networking;
 - hostile package scripts beyond the hostile programs.
 
 The Java case has not run on either host. The registry case also remains open.

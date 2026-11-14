@@ -28,6 +28,108 @@ fn assert_no_runs(scene: &Scene) {
     assert_eq!(audit["pending"], Value::Array(Vec::new()));
 }
 
+/// A configured cache root is exposed read-only on Linux without using
+/// application storage.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_linux_run_reads_a_configured_package_cache_root() {
+    let scene = Scene::new();
+    assert_success(&scene.add_profile("system", &[]));
+    let cache_root = scene.path("package-cache-root");
+    fs::create_dir(&cache_root).expect("cache root");
+    let output = scene.cli(&[
+        "workspace",
+        "set-package-cache",
+        &scene.id,
+        path_arg(&cache_root),
+        "--revision",
+        &scene.revision().to_string(),
+    ]);
+    assert_success(&output);
+    fs::write(cache_root.join("pkg.bin"), b"configured-cache").expect("cache file");
+    let cache = cache_root.clone();
+    let script = "printf '%s\\n' \"$OMGCODE_PACKAGE_CACHE\"; \
+        cat \"$OMGCODE_PACKAGE_CACHE/pkg.bin\" > seen.txt; \
+        echo x > \"$OMGCODE_PACKAGE_CACHE/out\" 2>/dev/null && echo writable || echo read-only; \
+        ls \"$OMGCODE_PACKAGE_CACHE/..\" >/dev/null 2>&1 && echo parent-listed || echo parent-denied";
+    let run = run_json(&scene.run("system", &[], &shell(script)));
+    let stdout = run["stdout"]["text"].as_str().expect("stdout");
+    assert!(
+        stdout.contains(&cache.display().to_string()),
+        "the configured cache path was not exposed: {run}"
+    );
+    assert!(stdout.contains("read-only"), "{run}");
+    assert!(stdout.contains("parent-denied"), "{run}");
+    assert_eq!(
+        fs::read_to_string(scene.workspace.join("seen.txt")).expect("read cache"),
+        "configured-cache"
+    );
+    assert_eq!(run["start"]["package_cache"], true);
+    scene.close();
+}
+
+/// On Windows a configured cache root is exposed only after the container
+/// receives a read-execute grant on the per-workspace cache directory.
+#[cfg(windows)]
+#[test]
+fn a_windows_run_reads_a_granted_package_cache_root() {
+    let mut scene = Scene::new();
+    assert_success(&scene.add_profile("system", &[]));
+    // A top-level root has ancestors app packages can traverse; a root beneath
+    // the user's private temp directory cannot be reached by the container.
+    let cache_root = tempfile::TempDir::new_in("C:\\").expect("top-level cache root");
+    let cache_root_path = cache_root.path().to_path_buf();
+    let output = scene.cli(&[
+        "workspace",
+        "set-package-cache",
+        &scene.id,
+        path_arg(&cache_root_path),
+        "--revision",
+        &scene.revision().to_string(),
+    ]);
+    assert_success(&output);
+    fs::write(cache_root_path.join("pkg.bin"), b"configured-cache").expect("cache file");
+    let cache = cache_root_path.clone();
+    scene.grant(&cache_root_path, "read-execute");
+    let script = "type %OMGCODE_PACKAGE_CACHE%\\pkg.bin & echo %OMGCODE_PACKAGE_CACHE%";
+    let run = run_json(&scene.run("system", &[], &shell(script)));
+    let stdout = run["stdout"]["text"].as_str().expect("stdout");
+    assert!(
+        stdout.contains(&cache.display().to_string()),
+        "the configured cache path was not exposed: {run}"
+    );
+    assert!(
+        stdout.contains("configured-cache"),
+        "the cache file was not read: {run}"
+    );
+    assert_eq!(run["start"]["package_cache"], true);
+    scene.close();
+}
+
+/// Without the container grant, the configured cache path fails the run
+/// before the program starts.
+#[cfg(windows)]
+#[test]
+fn an_ungranted_package_cache_root_fails_the_run() {
+    let scene = Scene::new();
+    assert_success(&scene.add_profile("system", &[]));
+    let cache_root = scene.path("package-cache-root");
+    fs::create_dir(&cache_root).expect("cache root");
+    let output = scene.cli(&[
+        "workspace",
+        "set-package-cache",
+        &scene.id,
+        path_arg(&cache_root),
+        "--revision",
+        &scene.revision().to_string(),
+    ]);
+    assert_success(&output);
+    fs::write(cache_root.join("pkg.bin"), b"configured-cache").expect("cache file");
+    let output = scene.run("system", &[], &shell("echo should-not-run"));
+    assert_error_code(&output, "run");
+    scene.close();
+}
+
 /// A Linux run can read only its workspace's package cache. The cache is
 /// read-only and its parent application directory stays invisible.
 #[cfg(target_os = "linux")]

@@ -1,5 +1,6 @@
 use super::*;
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::path::PathBuf;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -195,6 +196,28 @@ fn a_declared_origin_is_fetched_and_audited() {
     );
     assert!(audit.contains(&report.url_sha256), "{audit}");
     assert!(audit.contains("\"kind\":\"fetched\""), "{audit}");
+}
+
+#[test]
+fn a_configured_cache_root_receives_the_fetch() {
+    let body = b"external-cache".to_vec();
+    let fixture = Fixture::start(200, body.clone(), "");
+    let scene = Scene::new(&[format!("http://{}/fixtures/", fixture.address)]);
+    let cache_root = scene._directory.path().join("external-cache");
+    fs::create_dir(&cache_root).expect("cache root");
+    let mut store = ControlStore::open(&scene.data).expect("store");
+    store
+        .set_package_cache_root(scene.workspace_id, &cache_root, store.revision())
+        .expect("cache root");
+    drop(store);
+    let url = fixture.url("/fixtures/pkg.bin");
+    let report = fetch(&scene.data, &scene.request(url, "pkg.bin", 1024)).expect("fetch");
+    assert_eq!(report.bytes, body.len() as u64);
+    let cached = cache_root.join("pkg.bin");
+    assert_eq!(fs::read(cached).expect("external cache file"), body);
+    assert!(!scene.cache_file("pkg.bin").exists());
+    let head = fixture.finish();
+    assert!(head.starts_with("GET /fixtures/pkg.bin "), "{head}");
 }
 
 #[test]

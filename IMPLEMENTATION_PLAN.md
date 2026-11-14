@@ -64,9 +64,9 @@ This is a resume guide, not a replacement for the owning contracts in
   package-network profile records, **Phase C10**, version **0.21.0**, with
   the trusted allowlisted package fetch and private cache (ADR-0035), and
   **Phase C11**, version **0.22.0**, with read-only Linux run access to that
-  cache (ADR-0036). It is stacked on C7 at `0426e42`. No run accepts a
-  profile or has destination-scoped networking; Windows does not expose the
-  cache.
+  cache (ADR-0036), and **Phase C12**, version **0.23.0**, with per-workspace
+  cache roots and scoped Windows access (ADR-0037). It is stacked on C7 at
+  `0426e42`. No run accepts a profile or has destination-scoped networking.
 
 Implemented today:
 
@@ -143,10 +143,12 @@ Implemented today:
   credentials, bounds and hashes the response, writes a private per-workspace
   cache, and records the intent and outcome. The run remains offline and does
   not yet read the cache.
-- Read-only Linux run access to the workspace's fetched-package cache
-  (ADR-0036). The cache directory is added to the Landlock read-only rules and
-  named by `OMGCODE_PACKAGE_CACHE`; its parent and other application storage
-  stay denied. Windows does not expose it.
+- Read-only run access to a per-workspace fetched-package cache root
+  (ADR-0037, superseding ADR-0036). The root is selected with
+  `workspace set-package-cache`, exposed read-only on Linux and Windows, and
+  named by `OMGCODE_PACKAGE_CACHE`. Windows requires a read-execute container
+  grant on the root; Linux falls back to application storage when no root is
+  selected. Overlapping roots are refused.
 - Trusted `file restore` through a new checkpoint and
   `file delete-checkpoint --permanent` for one resolved checkpoint, on the same
   filesystems as apply. Neither is power-loss qualified. See
@@ -513,15 +515,17 @@ on Windows, and trusted CLI commands as the first caller. See
   remains offline and does not read the cache. See
   [ADR-0035](docs/adr/0035-fetch-packages-through-a-trusted-allowlisted-cache.md).
 - **C11 (this branch, version 0.22.0):** read-only Linux run access to the
-  workspace package cache. The cache directory is a narrow exception to
-  keeping application storage outside the task view; the parent and sibling
-  workspaces stay denied. Windows does not expose the cache. See
-  [ADR-0036](docs/adr/0036-expose-the-package-fetch-cache-read-only-to-linux-runs.md).
+  workspace package cache. Superseded by C12, which moves exposure to a
+  per-workspace root and adds Windows access.
+- **C12 (this branch, version 0.23.0):** per-workspace cache roots and a
+  scoped Windows grant. The operator selects a root outside application
+  storage and the development root; fetch and run use it; Windows needs a
+  read-execute grant on that root. See
+  [ADR-0037](docs/adr/0037-use-a-per-workspace-cache-root-and-a-scoped-windows-grant.md).
 
 Next decisions, not yet scheduled:
 
-- a Windows package-cache root and grant design, registry credentials, and
-  development-server networking;
+- registry credentials and development-server networking;
 - a model-callable command tool with per-call approval.
 
 ### Phase D: additional providers, streaming, and account lifecycle

@@ -46,11 +46,11 @@ run bounds the allocated bytes it may add to its writable roots. No portable
 per-run disk quota exists, so the supervisor measures growth on a separate
 thread rather than the kernel enforcing a quota.
 
-Version 0.22.0 exposes the fetched-package cache to Linux runs read-only. A
-run whose workspace has a cache receives `OMGCODE_PACKAGE_CACHE` and may read
-that directory, but not its parent or any other application storage. Windows
-runs do not get the cache yet; see
-[ADR-0036](adr/0036-expose-the-package-fetch-cache-read-only-to-linux-runs.md).
+Version 0.23.0 adds a per-workspace package cache root. A configured root is
+exposed read-only on Linux and Windows; Windows requires a read-execute
+container grant on that root. Without a configured root, Linux keeps the
+application-storage fallback and Windows exposes nothing. See
+[ADR-0037](adr/0037-use-a-per-workspace-cache-root-and-a-scoped-windows-grant.md).
 
 ## Accepted decisions
 
@@ -263,7 +263,16 @@ It is never a model tool, and the confined run still has no network access.
 omgcode packages fetch <workspace-id> --profile <name> --url <url>
     --name <cache-file> [--max-bytes <1-1073741824>]
     [--timeout-secs <1-600>]
+omgcode workspace set-package-cache <workspace-id> <dir> --revision <n>
+omgcode workspace clear-package-cache <workspace-id> --revision <n>
 ```
+
+`set-package-cache` selects one workspace's cache directory. It must exist,
+must not overlap application storage or the development root, and must not
+overlap another workspace's root. `clear-package-cache` removes the selection
+and leaves cached files in place. Without a selected root, Linux uses the
+application-storage fallback and Windows has none. A 0.23.0 control journal
+cannot be read by 0.22.0.
 
 Before the request it checks:
 
@@ -284,7 +293,8 @@ and its body is streamed, hashed with SHA-256, and stopped if it passes the
 byte limit.
 
 The file is written as a private `.partial-<fetch-id>` entry, synced, and
-renamed to `<data-dir>/package-cache/<workspace-id>/<cache-file>`. Existing
+renamed into the selected workspace cache root, or into
+`<data-dir>/package-cache/<workspace-id>/` when no root is selected. Existing
 names are never overwritten. The cache makes no power-loss claim. The control
 journal records `package_fetch_started` before the request and
 `package_fetch_finished` after it; both preserve the settings revision. They
@@ -293,15 +303,18 @@ text), the cache name, limits, HTTP status, byte count, and content digest. A
 failure records a controlled reason. An abandoned fetch leaves its start
 record without a finish; nothing retries automatically.
 
-The run does not contact the registry itself. On Linux, when
-`<data-dir>/package-cache/<workspace-id>` exists as a plain directory, the run
-adds only that directory to its read-only rules and sets
-`OMGCODE_PACKAGE_CACHE` to it. The parent `package-cache` directory and the
-rest of the data root stay outside the run's view, and the run cannot write
-the cache. Windows does not expose the cache because the AppContainer cannot
-read application storage without an ACL grant, and container grants refuse
-that storage. Tool-specific use of the directory is operator configuration.
-Registry credentials remain unsupported.
+The run does not contact the registry itself. When the workspace cache exists
+as a plain directory, the run adds only that directory to its read-only rules
+and sets `OMGCODE_PACKAGE_CACHE` to it. The parent, application storage,
+journals, settings, and other workspaces' roots stay outside the run's view,
+and the run cannot write the cache. On Windows the selected root requires a
+read-execute container grant on that directory; without it the run fails
+before the program starts. Without a selected root, Linux uses the
+application-storage fallback and Windows exposes nothing. The root's ancestors
+must be traversable by the container, so use a dedicated top-level directory
+rather than a user's private temporary tree. Tool-specific use of the
+directory is operator configuration. Registry credentials remain unsupported.
+`workspace status` lists selected roots under `package_cache_roots`.
 
 ## Container grants
 
@@ -340,6 +353,11 @@ Rules:
 - The granted directory must still be the recorded one, by volume and file
   identity. A moved or replaced directory cannot be revoked through OMGCode
   until it is back at its recorded path.
+- A per-workspace package cache root outside the development root and
+  application storage is a valid read-execute grant target. Grant that root,
+  not a shared parent. The grant is container-wide, so use separate roots for
+  workspaces that must stay isolated. The container must be able to traverse
+  the root's ancestors; a dedicated top-level directory is recommended.
 - Grants work only on Windows. Elsewhere `container-grant` fails and records
   nothing.
 
@@ -465,8 +483,8 @@ entries, the runner-owned variables below, and the profile's variables.
 
 | Platform | Runner-owned variables | Read-only | Read-write |
 | --- | --- | --- | --- |
-| Linux | `HOME`, `TMPDIR`, and `XDG_CACHE_HOME`, all set to `<data-dir>/run-scratch/<run id>` (mode 0700, removed after the run), and, when the workspace cache exists, `OMGCODE_PACKAGE_CACHE` set to `<data-dir>/package-cache/<workspace id>` | Profile roots, `/dev/zero`, `/dev/random`, `/dev/urandom`, the workspace's [package cache](#trusted-package-fetch) when it exists, and, with `--network`, the [network support paths](#network-access) | The workspace, the scratch directory, `/dev/null` |
-| Windows | `LOCALAPPDATA`, `SystemRoot`, `windir`, and `HOME` and `USERPROFILE` set to the container's `AC` folder. Windows then sets `TEMP` and `TMP` inside it. The package cache is not exposed | Profile roots, checked against their live ACLs | The workspace, through its grant |
+| Linux | `HOME`, `TMPDIR`, and `XDG_CACHE_HOME`, all set to `<data-dir>/run-scratch/<run id>` (mode 0700, removed after the run), and, when the workspace cache exists, `OMGCODE_PACKAGE_CACHE` set to the selected root or the application-storage fallback | Profile roots, `/dev/zero`, `/dev/random`, `/dev/urandom`, the workspace's [package cache](#trusted-package-fetch) when it exists, and, with `--network`, the [network support paths](#network-access) | The workspace, the scratch directory, `/dev/null` |
+| Windows | `LOCALAPPDATA`, `SystemRoot`, `windir`, and `HOME` and `USERPROFILE` set to the container's `AC` folder. Windows then sets `TEMP` and `TMP` inside it. When a granted package cache root exists, `OMGCODE_PACKAGE_CACHE` is set to it | Profile roots, checked against their live ACLs; the package cache root, checked against its grant | The workspace, through its grant |
 
 Linux runs use `PairsOnly` sockets unless host services were selected. Runs
 have no IP networking unless `--network` was passed. Windows
@@ -926,15 +944,16 @@ These remain true after C6:
   boundary: a hostile tree can connect directly.
 - **Package fetch limits.** The fetch is trusted-CLI only. It sends no
   credentials, follows no redirects, ignores proxy variables, and uses the
-  system TLS store. The cache is private application storage; only the
-  per-workspace subtree is exposed to Linux runs, read-only. It makes no
-  power-loss claim. Tests use loopback HTTP; a live HTTPS registry is not
-  qualified.
-- **Package cache exposure is Linux-only.** A Linux run receives
-  `OMGCODE_PACKAGE_CACHE` and may read that directory, but not its parent,
-  journals, settings, or another workspace's cache. Windows does not expose
-  it. There is no invalidation, eviction, or freshness check, and configuring
-  a toolchain to use the directory is operator work.
+  system TLS store. The cache is the selected per-workspace root or, on Linux,
+  the application-storage fallback. It makes no power-loss claim. Tests use
+  loopback HTTP; a live HTTPS registry is not qualified.
+- **Package cache exposure.** A run receives `OMGCODE_PACKAGE_CACHE` when the
+  workspace cache exists as a plain directory, and may read only that
+  directory. On Windows the selected root needs a read-execute container grant
+  and traversable ancestors, or the run fails before it starts. Linux falls
+  back to application storage when no root is selected; Windows exposes
+  nothing. There is no invalidation, eviction, or freshness check, and
+  configuring a toolchain to use the directory is operator work.
 - **Network coverage.** Network access was tested on Windows 11 build 26300
   and WSL 6.6 (Landlock ABI 3) only, including a TLS fetch with the system
   `curl` on both. The ABI 4 TCP-bind denial has not run on a live kernel.
@@ -988,12 +1007,12 @@ These remain true after C6:
 | C8 (contract only, 0.19.0) | Package-network profile contract and implementation gate | Done as a contract: see [package-network profile](#package-network-profile-contract-only) and ADR-0034. No destination enforcement. |
 | C9 (0.20.0) | Package-network profile records | Done as configuration: `workspace package-profile-add/show/remove` and the control journal events. No run accepts a profile. |
 | C10 (0.21.0) | Trusted allowlisted package fetch | Done: see [trusted package fetch](#trusted-package-fetch) and ADR-0035. The run remains offline. |
-| C11 (0.22.0) | Read-only package cache for Linux runs | Done: see [trusted package fetch](#trusted-package-fetch) and ADR-0036. Windows does not expose the cache. |
+| C11 (0.22.0) | Read-only package cache for Linux runs | Superseded by C12: Linux exposure moved to the per-workspace root, with an application-storage fallback. |
+| C12 (0.23.0) | Per-workspace package cache root and scoped Windows grant | Done: see [trusted package fetch](#trusted-package-fetch) and ADR-0037. Windows needs a read-execute grant on the workspace root. |
 
 Later work needs its own decisions:
 
-- a Windows package-cache root and grant design, registry credentials, and
-  development-server networking;
+- registry credentials and development-server networking;
 - a model-callable command tool.
 
 Live qualification on each supported OS remains a separate gate.

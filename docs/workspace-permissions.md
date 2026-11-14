@@ -120,6 +120,8 @@ zero-based sequence, UTC timestamp, global revision, and tagged `action`:
 | `package_profile_removed` | Remove a package-network profile; increment revision |
 | `package_fetch_started` | Trusted package-fetch intent; preserve revision |
 | `package_fetch_finished` | Trusted package-fetch outcome; preserve revision |
+| `package_cache_root_set` | Select one workspace's package cache root; increment revision |
+| `package_cache_root_cleared` | Clear one workspace's package cache root; increment revision |
 
 Operational file checks do not append `policy_checked`. They use current
 settings and their separate [operation journal](file-access.md). This prevents
@@ -194,6 +196,20 @@ record the profile identity and revision, a SHA-256 of the request URL (never
 the URL text), the cache name, limits, HTTP status, byte count, and content
 digest. A failed fetch records a controlled reason; an abandoned fetch leaves
 its start event. A control journal written by 0.21.0 cannot be read by 0.20.0.
+
+## Package cache roots
+
+`workspace set-package-cache <workspace-id> <dir> --revision <n>` selects one
+workspace's fetched-package cache directory. It must exist, must not overlap
+application storage or the development root, and must not overlap another
+workspace's cache root. `workspace clear-package-cache <workspace-id>
+--revision <n>` removes the selection and leaves cached files in place. Both
+use the expected revision and increment it through `package_cache_root_set`
+and `package_cache_root_cleared`. `workspace status` lists selected roots under
+`package_cache_roots` and omits the field until one exists. A control journal
+written by 0.23.0 cannot be read by 0.22.0. The
+[execution guide](execution.md#trusted-package-fetch) owns the fetch, exposure,
+and grant rules.
 
 ## Task network
 

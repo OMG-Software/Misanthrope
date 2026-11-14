@@ -6,6 +6,24 @@ Changes are recorded here before a release version is assigned.
 
 ### Added
 
+- Version 0.23.0 adds a per-workspace package cache root and scoped Windows
+  access. See ADR-0037.
+  - **Commands:** `workspace set-package-cache <workspace-id> <dir>
+    --revision <n>` and `workspace clear-package-cache <workspace-id>
+    --revision <n>`. `status` lists roots under `package_cache_roots`.
+  - **Rules:** the root must exist, must not overlap application storage or
+    the development root, and must not overlap another workspace's root.
+  - **Fetch:** `packages fetch` writes into the selected root. Without one,
+    Linux keeps the application-storage fallback and Windows has none.
+  - **Runs:** a selected root is exposed read-only and named by
+    `OMGCODE_PACKAGE_CACHE` on both platforms. Windows requires a read-execute
+    container grant on that root and traversable ancestors; without the grant
+    the run fails before the program starts. `run_started` records
+    `package_cache` when true.
+  - **Records:** `package_cache_root_set` and `package_cache_root_cleared` in
+    the control journal. A 0.23.0 control journal cannot be read by 0.22.0.
+  - **Limits:** no invalidation, eviction, or freshness check; changing the
+    root leaves old files and old grants for the operator to manage.
 - Version 0.22.0 exposes the fetched-package cache to Linux runs read-only.
   See ADR-0036.
   - **Linux:** when `<data-dir>/package-cache/<workspace-id>` exists as a
