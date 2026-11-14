@@ -880,8 +880,19 @@ fn a_disk_limit_ends_the_run_and_is_recorded() {
     let script = "cp growth-source.bin growth.bin; while :; do :; done";
     #[cfg(windows)]
     let script = "copy /b growth-source.bin growth.bin >nul & for /l %i in (1,0,2) do @rem";
-    let options = ["--max-disk-mib", "16", "--max-memory-mib", "512"];
-    let run = run_json(&scene.run("system", &options, &shell(script)));
+    let options = [
+        "--max-disk-mib",
+        "16",
+        "--max-memory-mib",
+        "512",
+        // Copying 32 MiB and sampling once a second can outlast the normal
+        // 10-second CLI deadline on a loaded runner. Bound the run itself so
+        // a missed disk limit still records a deadline instead of leaving the
+        // run pending when the harness stops the CLI.
+        "--timeout-secs",
+        "45",
+    ];
+    let run = run_json(&scene.run_for("system", &options, &shell(script), Duration::from_secs(60)));
     assert_eq!(
         run["start"]["limits"]["max_disk_bytes"],
         16u64 * 1024 * 1024

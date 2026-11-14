@@ -602,9 +602,13 @@ release readiness remain separate gates.
   [testing standards](docs/testing-standards.md#isolation-and-concurrency) covers
   the CLI suites. `omgcode-core`'s `file_broker` FIFO test still spawns one child
   beside in-process stores; it did not fail in 60 parallel runs and is not gated.
-- Local Windows all-target runs intermittently timed out in pre-existing
-  multi-fixture provider tests under host load. The tests pass individually and
-  CI passed on `987a5aa`; recheck on a clean host rather than weakening a test.
+- Windows runs under host load can outlast the default 10-second CLI test
+  deadline. The disk-limit case now gives the run an explicit 45-second
+  deadline and the CLI 60 seconds, so a missed sampler ends as a recorded
+  deadline instead of a killed CLI with a pending run. The pre-existing
+  multi-fixture provider tests also timed out locally under host load; they
+  pass individually and passed CI on `987a5aa`. Recheck timeouts on a clean
+  host rather than weakening an assertion.
 - `.serena/` is untracked and unrelated. Do not commit or delete it without
   deciding what it is.
 - The turn runtime is library/test infrastructure until a provider adapter and
